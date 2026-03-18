@@ -1,0 +1,23 @@
+{
+  "name": "anka",
+  "version": "1.0.0",
+  "description": "metalsmarket.net LME Bakır, Çinko, Kurşun spot fiyat scraper ve analiz aracı",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "start:json": "node index.js --json",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:37925/git/sahindeniz/anka"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.13.6",
+    "chalk": "^5.6.2",
+    "puppeteer-core": "^24.39.1"
+  }
+}
