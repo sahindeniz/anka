@@ -655,7 +655,7 @@ class HistogramEditorPanel(QWidget):
             f"QPushButton:hover{{background:{ACCENT2};}}"
             f"QPushButton:pressed{{background:{BG4};}}")
         b_apply.setFixedHeight(26)
-        b_apply.clicked.connect(self._apply)
+        b_apply.clicked.connect(lambda: self._apply(emit=True))
         btn_row.addWidget(b_apply)
         root.addLayout(btn_row)
 
