@@ -60,18 +60,19 @@ def is_newer(remote: str, current: str = APP_VERSION) -> bool:
 def check_for_updates(timeout: int = 8) -> dict:
     """
     GitHub API'den güncel sürüm bilgisini çeker.
+    Önce releases/latest, yoksa tags'e bakar.
 
     Dönüş:
       {
         "available"  : bool,
-        "version"    : str,      # en son sürüm (örn. "1.2.0")
-        "url"        : str,      # release sayfası URL
-        "download_url": str,     # ZIP indirme linki
-        "notes"      : str,      # release notes
+        "version"    : str,
+        "url"        : str,
+        "download_url": str,
+        "notes"      : str,
         "error"      : str|None,
       }
     """
-    if not GITHUB_API_URL:
+    if not GITHUB_REPO:
         return {
             "available": False,
             "version":   APP_VERSION,
@@ -81,32 +82,33 @@ def check_for_updates(timeout: int = 8) -> dict:
             "error":     "GitHub deposu ayarlı değil.",
         }
 
-    try:
-        import urllib.request
-        import json
+    import urllib.request
+    import json
 
-        req = urllib.request.Request(
-            GITHUB_API_URL,
-            headers={
-                "Accept":     "application/vnd.github+json",
-                "User-Agent": f"AstroMaestroPro/{APP_VERSION}",
-            }
-        )
+    headers = {
+        "Accept":     "application/vnd.github+json",
+        "User-Agent": f"AstroMaestroPro/{APP_VERSION}",
+    }
+
+    def _fetch(url):
+        req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+            return json.loads(resp.read().decode("utf-8"))
 
+    # ── 1) Releases/latest ──
+    try:
+        data = _fetch(GITHUB_API_URL)
         remote_ver   = data.get("tag_name", "").lstrip("vV")
         release_url  = data.get("html_url", "")
-        notes        = data.get("body", "")[:2000]
+        notes        = data.get("body", "") or ""
+        notes        = notes[:2000]
 
-        # ZIP asset'ini bul
         download_url = ""
         for asset in data.get("assets", []):
             name = asset.get("name", "").lower()
-            if name.endswith(".zip") and "astro" in name:
+            if name.endswith(".zip"):
                 download_url = asset.get("browser_download_url", "")
                 break
-        # ZIP yoksa kaynak ZIP'i kullan
         if not download_url:
             download_url = data.get("zipball_url", "")
 
@@ -118,7 +120,44 @@ def check_for_updates(timeout: int = 8) -> dict:
             "notes":        notes,
             "error":        None,
         }
+    except Exception:
+        pass  # Release yok — tags'e bak
 
+    # ── 2) Tags fallback ──
+    try:
+        tags_url = f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=5"
+        tags = _fetch(tags_url)
+        if tags and len(tags) > 0:
+            latest_tag = tags[0].get("name", "").lstrip("vV")
+            repo_url = f"https://github.com/{GITHUB_REPO}"
+            zip_url  = f"{repo_url}/archive/refs/tags/{tags[0].get('name','')}.zip"
+            return {
+                "available":    is_newer(latest_tag),
+                "version":      latest_tag,
+                "url":          f"{repo_url}/releases",
+                "download_url": zip_url,
+                "notes":        "",
+                "error":        None,
+            }
+    except Exception:
+        pass
+
+    # ── 3) Commits fallback (son commit'i kontrol et) ──
+    try:
+        commits_url = f"https://api.github.com/repos/{GITHUB_REPO}/commits?per_page=1"
+        commits = _fetch(commits_url)
+        if commits and len(commits) > 0:
+            sha = commits[0].get("sha", "")[:7]
+            msg = commits[0].get("commit", {}).get("message", "")[:200]
+            repo_url = f"https://github.com/{GITHUB_REPO}"
+            return {
+                "available":    False,
+                "version":      f"{APP_VERSION} ({sha})",
+                "url":          repo_url,
+                "download_url": f"{repo_url}/archive/refs/heads/main.zip",
+                "notes":        f"Son commit: {msg}",
+                "error":        None,
+            }
     except Exception as e:
         return {
             "available":    False,
@@ -128,3 +167,12 @@ def check_for_updates(timeout: int = 8) -> dict:
             "notes":        "",
             "error":        str(e),
         }
+
+    return {
+        "available": False,
+        "version":   APP_VERSION,
+        "url":       f"https://github.com/{GITHUB_REPO}",
+        "download_url": "",
+        "notes":     "",
+        "error":     None,
+    }
