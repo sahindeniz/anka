@@ -67,11 +67,13 @@ CHECK_CSS = (
 )
 TAB_CSS = (
     f"QTabWidget::pane{{background:{BG2};border:1px solid {BORDER};"
-    f"border-radius:4px;margin-top:-1px;}}"
+    f"border-radius:5px;margin-top:-1px;}}"
     f"QTabBar::tab{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
-    f"border-bottom:none;padding:4px 10px;font-size:10px;min-width:60px;}}"
-    f"QTabBar::tab:selected{{background:{BG2};color:{HEAD};border-bottom:1px solid {BG2};}}"
-    f"QTabBar::tab:hover{{color:{TEXT};}}"
+    f"border-bottom:none;padding:5px 14px;font-size:10px;font-weight:600;"
+    f"min-width:65px;border-radius:4px 4px 0 0;}}"
+    f"QTabBar::tab:selected{{background:{BG2};color:{ACCENT2};"
+    f"border-bottom:2px solid {ACCENT};border-top:1px solid {ACCENT}44;}}"
+    f"QTabBar::tab:hover{{color:{TEXT};background:{BG4};}}"
 )
 
 
@@ -318,7 +320,7 @@ class HistogramWidget(QWidget):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-#  CurvesWidget — per-channel curve editor
+#  CurvesWidget — per-channel curve editor  (v2 — aesthetic & precise)
 # ─────────────────────────────────────────────────────────────────────────────
 class CurvesWidget(QWidget):
     """
@@ -327,19 +329,26 @@ class CurvesWidget(QWidget):
     """
     curve_changed = pyqtSignal(str, object)
 
+    _GLOW = {
+        "L": ("#5bb8f0", "#2a7ec0", "#1a5080"),
+        "R": ("#ff6666", "#cc3333", "#801a1a"),
+        "G": ("#66ff88", "#33cc55", "#1a802a"),
+        "B": ("#6699ff", "#3366cc", "#1a3380"),
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(220, 220)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMouseTracking(True)
 
-        # Per-channel control points [(x,y), ...] in [0,1]
         self._pts  = {ch: [(0.0,0.0),(1.0,1.0)] for ch in ("L","R","G","B")}
         self._ch   = "L"
         self._drag_idx = None
         self._hdata    = {}
         self._hover_idx = None
-        self._pad = 20
+        self._pad = 24
+        self._coord_label = None   # (wx, wy, text)
 
     def set_image(self, img):
         if img is None: self._hdata = {}; self.update(); return
@@ -396,7 +405,7 @@ class CurvesWidget(QWidget):
         p  = self._pad
         W  = self.width()  - 2*p
         H  = self.height() - 2*p
-        return (np.clip((px-p)/W,0,1), np.clip(1-(py-p)/H,0,1))
+        return (float(np.clip((px-p)/W,0,1)), float(np.clip(1-(py-p)/H,0,1)))
 
     def paintEvent(self, event):
         p    = QPainter(self)
@@ -404,69 +413,178 @@ class CurvesWidget(QWidget):
         W, H = self.width(), self.height()
         pad  = self._pad
         ch   = self._ch
+        glow = self._GLOW.get(ch, self._GLOW["L"])
 
-        # Background
-        p.fillRect(0,0,W,H, QColor(BG))
+        # ── Background gradient ──
+        bg_grad = QLinearGradient(0, 0, 0, H)
+        bg_grad.setColorAt(0, QColor("#060e18"))
+        bg_grad.setColorAt(1, QColor("#0a1a2e"))
+        p.fillRect(0, 0, W, H, QBrush(bg_grad))
+
         inner = QRect(pad, pad, W-2*pad, H-2*pad)
-        p.fillRect(inner, QColor(BG2))
+        inner_grad = QLinearGradient(pad, pad, pad, H-pad)
+        inner_grad.setColorAt(0, QColor("#081520"))
+        inner_grad.setColorAt(0.5, QColor("#0c1c30"))
+        inner_grad.setColorAt(1, QColor("#081520"))
+        p.fillRect(inner, QBrush(inner_grad))
 
-        # Grid
-        pen = QPen(QColor(BORDER)); pen.setWidth(1); p.setPen(pen)
-        for i in range(1,4):
-            frac = i/4
-            x = pad + int(frac*(W-2*pad))
-            y = pad + int(frac*(H-2*pad))
+        # ── Grid — subtle ──
+        pen = QPen(QColor("#152535")); pen.setWidth(1); p.setPen(pen)
+        for i in range(1, 8):
+            frac = i / 8
+            x = pad + int(frac * (W - 2*pad))
+            y = pad + int(frac * (H - 2*pad))
+            p.drawLine(x, pad, x, H-pad)
+            p.drawLine(pad, y, W-pad, y)
+        # Major grid (quarters)
+        pen2 = QPen(QColor("#1e3548")); pen2.setWidth(1); p.setPen(pen2)
+        for i in (2, 4, 6):
+            frac = i / 8
+            x = pad + int(frac * (W - 2*pad))
+            y = pad + int(frac * (H - 2*pad))
             p.drawLine(x, pad, x, H-pad)
             p.drawLine(pad, y, W-pad, y)
 
-        # Diagonal reference
-        pen.setStyle(Qt.PenStyle.DotLine); pen.setColor(QColor(BORDER2)); p.setPen(pen)
+        # ── Diagonal reference ──
+        diag_pen = QPen(QColor("#2a4a6a")); diag_pen.setWidth(1)
+        diag_pen.setStyle(Qt.PenStyle.DashLine); p.setPen(diag_pen)
         p.drawLine(pad, H-pad, W-pad, pad)
 
-        # Histogram background
-        hdata = self._hdata.get(ch if ch!="L" else "L")
+        # ── Histogram background (smooth filled) ──
+        hdata = self._hdata.get(ch if ch != "L" else "L")
         if hdata is not None:
             mx = hdata.max()
             if mx > 0:
-                bw = (W-2*pad) / len(hdata)
-                for i, v in enumerate(hdata):
-                    bh = int((v/mx) * (H-2*pad))
-                    col = QColor(CH_COLORS.get(ch, ACCENT))
-                    col.setAlphaF(0.15)
-                    p.fillRect(int(pad+i*bw), H-pad-bh, max(1,int(bw)), bh, col)
+                hist_path = QPainterPath()
+                hist_path.moveTo(pad, H - pad)
+                n = len(hdata)
+                for i in range(n):
+                    bh = (hdata[i] / mx) * (H - 2*pad)
+                    hx = pad + (i / n) * (W - 2*pad)
+                    hist_path.lineTo(hx, H - pad - bh)
+                hist_path.lineTo(W - pad, H - pad)
+                hist_path.closeSubpath()
 
-        # Curve
+                hist_grad = QLinearGradient(0, pad, 0, H - pad)
+                col_top = QColor(glow[0]); col_top.setAlphaF(0.25)
+                col_bot = QColor(glow[2]); col_bot.setAlphaF(0.05)
+                hist_grad.setColorAt(0, col_top)
+                hist_grad.setColorAt(1, col_bot)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(hist_grad))
+                p.drawPath(hist_path)
+
+        # ── Curve fill (area under curve with gradient) ──
         pts  = sorted(self._pts[ch], key=lambda q:q[0])
         lut  = self._pts_to_lut(pts)
-        path = QPainterPath()
+        curve_path = QPainterPath()
+        w_pts = []
         for i, y_val in enumerate(lut):
-            wx, wy = self._to_widget(i/255, y_val).x(), self._to_widget(i/255, y_val).y()
-            if i == 0: path.moveTo(wx, wy)
-            else:      path.lineTo(wx, wy)
+            wp = self._to_widget(i/255, y_val)
+            w_pts.append(wp)
+            if i == 0: curve_path.moveTo(wp)
+            else:      curve_path.lineTo(wp)
 
-        col = QColor(CH_COLORS.get(ch, ACCENT2))
-        pen2 = QPen(col); pen2.setWidth(2); pen2.setStyle(Qt.PenStyle.SolidLine)
-        p.setPen(pen2); p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawPath(path)
+        # Area fill
+        fill_path = QPainterPath(curve_path)
+        fill_path.lineTo(self._to_widget(1.0, 0.0))
+        fill_path.lineTo(self._to_widget(0.0, 0.0))
+        fill_path.closeSubpath()
+        fill_grad = QLinearGradient(0, pad, 0, H - pad)
+        fill_top = QColor(glow[0]); fill_top.setAlphaF(0.12)
+        fill_bot = QColor(glow[2]); fill_bot.setAlphaF(0.02)
+        fill_grad.setColorAt(0, fill_top)
+        fill_grad.setColorAt(1, fill_bot)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(fill_grad))
+        p.drawPath(fill_path)
 
-        # Control points
+        # ── Glow layer (wide soft line) ──
+        glow_col = QColor(glow[0]); glow_col.setAlphaF(0.15)
+        glow_pen = QPen(glow_col); glow_pen.setWidth(8); glow_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(glow_pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(curve_path)
+
+        # ── Main curve line ──
+        main_col = QColor(glow[0])
+        main_pen = QPen(main_col); main_pen.setWidth(2); main_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        p.setPen(main_pen); p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(curve_path)
+
+        # ── Control points ──
         for idx, (cx, cy) in enumerate(self._pts[ch]):
             wp = self._to_widget(cx, cy)
             is_drag  = (idx == self._drag_idx)
             is_hover = (idx == self._hover_idx)
+
+            # Outer glow
+            if is_drag or is_hover:
+                glow_r = 14 if is_drag else 11
+                gc = QColor(glow[0]); gc.setAlphaF(0.25 if is_drag else 0.15)
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(gc))
+                p.drawEllipse(wp, glow_r, glow_r)
+
+            # Ring
             r = 7 if is_drag else (6 if is_hover else 5)
-            fill = QColor(ACCENT2) if is_drag else QColor(BG3)
-            pen3 = QPen(col); pen3.setWidth(2); p.setPen(pen3)
-            p.setBrush(QBrush(fill))
+            ring_pen = QPen(QColor(glow[0]))
+            ring_pen.setWidth(2 if is_drag else 2)
+            p.setPen(ring_pen)
+
+            # Fill gradient for point
+            pt_grad = QLinearGradient(wp.x()-r, wp.y()-r, wp.x()+r, wp.y()+r)
+            if is_drag:
+                pt_grad.setColorAt(0, QColor("#ffffff"))
+                pt_grad.setColorAt(1, QColor(glow[0]))
+            elif is_hover:
+                pt_grad.setColorAt(0, QColor(glow[0]))
+                pt_grad.setColorAt(1, QColor(glow[1]))
+            else:
+                pt_grad.setColorAt(0, QColor("#0e2238"))
+                pt_grad.setColorAt(1, QColor("#081828"))
+            p.setBrush(QBrush(pt_grad))
             p.drawEllipse(wp, r, r)
 
-        # Border
-        pen4 = QPen(QColor(BORDER)); p.setPen(pen4); p.setBrush(Qt.BrushStyle.NoBrush)
+            # Center dot
+            if is_drag:
+                p.setPen(Qt.PenStyle.NoPen)
+                p.setBrush(QBrush(QColor("#ffffff")))
+                p.drawEllipse(wp, 2, 2)
+
+        # ── Coordinate tooltip near dragged point ──
+        if self._coord_label and self._drag_idx is not None:
+            wx, wy, txt = self._coord_label
+            label_bg = QColor("#000000"); label_bg.setAlphaF(0.75)
+            fm = p.fontMetrics()
+            tw = fm.horizontalAdvance(txt) + 10
+            th = fm.height() + 4
+            lx = min(wx + 12, W - tw - 4)
+            ly = max(wy - th - 4, 4)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(label_bg))
+            p.drawRoundedRect(int(lx), int(ly), tw, th, 3, 3)
+            p.setPen(QColor(glow[0]))
+            p.setFont(QFont("Consolas", 8))
+            p.drawText(int(lx) + 5, int(ly) + th - 4, txt)
+
+        # ── Scale labels ──
+        p.setPen(QColor("#3a5a7a"))
+        p.setFont(QFont("Consolas", 7))
+        for i in range(0, 5):
+            v = i / 4
+            x = pad + int(v * (W - 2*pad))
+            y = pad + int((1-v) * (H - 2*pad))
+            p.drawText(x - 8, H - pad + 12, f"{v:.1f}"[1:])
+            p.drawText(2, y + 4, f"{v:.0%}"[:-1] if v < 1 else "1")
+
+        # ── Border ──
+        border_pen = QPen(QColor("#1a3a5c")); border_pen.setWidth(1)
+        p.setPen(border_pen); p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawRect(inner)
 
         p.end()
 
-    def _nearest(self, px, py, tol=14):
+    def _nearest(self, px, py, tol=16):
         best_i, best_d = None, tol
         for i, (cx, cy) in enumerate(self._pts[self._ch]):
             wp  = self._to_widget(cx, cy)
@@ -480,8 +598,13 @@ class CurvesWidget(QWidget):
         if idx is not None:
             if ev.button() == Qt.MouseButton.RightButton and len(self._pts[self._ch]) > 2:
                 self._pts[self._ch].pop(idx)
+                self._coord_label = None
                 self.update(); self._emit(); return
             self._drag_idx = idx
+            cx, cy = self._pts[self._ch][idx]
+            wp = self._to_widget(cx, cy)
+            self._coord_label = (wp.x(), wp.y(), f"({cx:.3f}, {cy:.3f})")
+            self.update()
         else:
             if ev.button() == Qt.MouseButton.LeftButton:
                 x, y = self._from_widget(px, py)
@@ -490,6 +613,8 @@ class CurvesWidget(QWidget):
                 self._drag_idx = next(
                     (i for i,pt in enumerate(self._pts[self._ch])
                      if abs(pt[0]-x)<0.001), None)
+                wp = self._to_widget(x, y)
+                self._coord_label = (wp.x(), wp.y(), f"({x:.3f}, {y:.3f})")
                 self.update(); self._emit()
 
     def mouseMoveEvent(self, ev):
@@ -497,20 +622,27 @@ class CurvesWidget(QWidget):
         if self._drag_idx is not None:
             x, y = self._from_widget(px, py)
             pts  = self._pts[self._ch]
-            # Clamp X between neighbours
             lo = pts[self._drag_idx-1][0]+0.005 if self._drag_idx>0 else 0.0
             hi = pts[self._drag_idx+1][0]-0.005 if self._drag_idx<len(pts)-1 else 1.0
             x  = float(np.clip(x, lo, hi))
-            pts[self._drag_idx] = (x, float(np.clip(y,0,1)))
+            y  = float(np.clip(y, 0, 1))
+            pts[self._drag_idx] = (x, y)
+            wp = self._to_widget(x, y)
+            self._coord_label = (wp.x(), wp.y(), f"({x:.3f}, {y:.3f})")
             self.update(); self._emit()
         else:
             self._hover_idx = self._nearest(px, py)
-            cur = Qt.CursorShape.CrossCursor if self._hover_idx is None else Qt.CursorShape.SizeAllCursor
-            self.setCursor(cur)
+            if self._hover_idx is not None:
+                self.setCursor(Qt.CursorShape.SizeAllCursor)
+            else:
+                self.setCursor(Qt.CursorShape.CrossCursor)
+            self._coord_label = None
             self.update()
 
     def mouseReleaseEvent(self, ev):
         self._drag_idx = None
+        self._coord_label = None
+        self.update()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -606,27 +738,40 @@ class HistogramEditorPanel(QWidget):
         root.setContentsMargins(6,6,6,6); root.setSpacing(4)
 
         # ── Channel selector ──────────────────────────────────────────────
-        ch_row = QHBoxLayout(); ch_row.setSpacing(4)
-        ch_row.addWidget(QLabel("Channel:"))
+        ch_row = QHBoxLayout(); ch_row.setSpacing(3)
+        ch_lbl = QLabel("Channel")
+        ch_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;font-weight:600;letter-spacing:0.5px;")
+        ch_row.addWidget(ch_lbl)
         self._ch_btns = {}
         _ch_cols = {"L": ACCENT2, "R": RED, "G": GREEN, "B": "#6699ff"}
         for ch, col in _ch_cols.items():
-            b = QPushButton(ch); b.setFixedSize(26, 22); b.setCheckable(True)
+            b = QPushButton(ch); b.setFixedSize(30, 24); b.setCheckable(True)
             b.setStyleSheet(
                 f"QPushButton{{background:{BG3};color:{SUBTEXT};border:1px solid {BORDER};"
-                f"border-radius:3px;font-size:10px;font-weight:700;}}"
-                f"QPushButton:checked{{background:{col}33;color:{col};border:1px solid {col};}}"
-                f"QPushButton:hover{{color:{col};}}")
+                f"border-radius:4px;font-size:11px;font-weight:800;}}"
+                f"QPushButton:checked{{background:{col}40;color:{col};"
+                f"border:1px solid {col};border-bottom:2px solid {col};}}"
+                f"QPushButton:hover{{color:{col};background:{col}18;border-color:{col}66;}}")
             b.clicked.connect(lambda _, c=ch: self._set_channel(c))
             ch_row.addWidget(b); self._ch_btns[ch] = b
         self._ch_btns["L"].setChecked(True)
-        ch_row.addSpacing(6)
+        ch_row.addSpacing(8)
         self._chk_link = QCheckBox("Link RGB")
-        self._chk_link.setChecked(True); self._chk_link.setStyleSheet(CHECK_CSS)
+        self._chk_link.setChecked(True)
+        self._chk_link.setStyleSheet(
+            f"QCheckBox{{color:{MUTED};font-size:9px;spacing:4px;}}"
+            f"QCheckBox::indicator{{width:14px;height:14px;border-radius:3px;"
+            f"border:1px solid {BORDER};background:{BG3};}}"
+            f"QCheckBox::indicator:checked{{background:{ACCENT}88;border:1px solid {ACCENT};}}")
         ch_row.addWidget(self._chk_link)
         ch_row.addStretch()
         self._chk_live = QCheckBox("Live")
-        self._chk_live.setChecked(True); self._chk_live.setStyleSheet(CHECK_CSS)
+        self._chk_live.setChecked(True)
+        self._chk_live.setStyleSheet(
+            f"QCheckBox{{color:{MUTED};font-size:9px;spacing:4px;}}"
+            f"QCheckBox::indicator{{width:14px;height:14px;border-radius:3px;"
+            f"border:1px solid {BORDER};background:{BG3};}}"
+            f"QCheckBox::indicator:checked{{background:{GREEN}88;border:1px solid {GREEN};}}")
         ch_row.addWidget(self._chk_live)
         root.addLayout(ch_row)
 
@@ -642,19 +787,29 @@ class HistogramEditorPanel(QWidget):
         self._adjustments_tab()
 
         # ── Bottom buttons ────────────────────────────────────────────────
-        btn_row = QHBoxLayout(); btn_row.setSpacing(6)
+        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
         b_reset = QPushButton("↺ Reset All")
-        b_reset.setStyleSheet(BTN_CSS); b_reset.setFixedHeight(24)
+        b_reset.setFixedHeight(28)
+        b_reset.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{MUTED};"
+            f"border:1px solid {BORDER};border-radius:5px;"
+            f"padding:3px 12px;font-size:10px;font-weight:600;}}"
+            f"QPushButton:hover{{color:{TEXT};background:{BG4};"
+            f"border-color:{ACCENT};}}"
+            f"QPushButton:pressed{{background:{BG};}}")
         b_reset.clicked.connect(self._reset_all)
         btn_row.addWidget(b_reset)
         btn_row.addStretch()
         b_apply = QPushButton("✅  Apply to Image")
+        b_apply.setFixedHeight(30)
         b_apply.setStyleSheet(
-            f"QPushButton{{background:{ACCENT};color:#000;border:none;"
-            f"border-radius:4px;padding:3px 14px;font-size:11px;font-weight:700;}}"
-            f"QPushButton:hover{{background:{ACCENT2};}}"
+            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {GREEN},stop:1 #2aaa55);color:#ffffff;"
+            f"border:none;border-radius:5px;padding:4px 18px;"
+            f"font-size:11px;font-weight:700;letter-spacing:0.3px;}}"
+            f"QPushButton:hover{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 #5ad48a,stop:1 #3dbd6e);}}"
             f"QPushButton:pressed{{background:{BG4};}}")
-        b_apply.setFixedHeight(26)
         b_apply.clicked.connect(lambda: self._apply(emit=True))
         btn_row.addWidget(b_apply)
         root.addLayout(btn_row)
@@ -704,19 +859,26 @@ class HistogramEditorPanel(QWidget):
 
     def _curves_tab(self):
         w = QWidget(); w.setStyleSheet(f"background:{BG2};")
-        lay = QVBoxLayout(w); lay.setContentsMargins(6,6,4,4); lay.setSpacing(4)
+        lay = QVBoxLayout(w); lay.setContentsMargins(4,4,4,4); lay.setSpacing(3)
 
         self._curves_wgt = CurvesWidget()
         self._curves_wgt.curve_changed.connect(self._on_curve_changed)
         lay.addWidget(self._curves_wgt, 1)
 
-        hint = QLabel("Left-click: add point   Right-click: remove point")
-        hint.setStyleSheet(f"color:{SUBTEXT};font-size:9px;")
+        hint = QLabel("🖱 Left: add point  •  Right: remove  •  Drag: adjust")
+        hint.setStyleSheet(f"color:{SUBTEXT};font-size:8px;letter-spacing:0.3px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(hint)
 
         b_reset_curve = QPushButton("↺ Reset Curve")
-        b_reset_curve.setStyleSheet(BTN_CSS); b_reset_curve.setFixedHeight(22)
+        b_reset_curve.setFixedHeight(24)
+        b_reset_curve.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{MUTED};"
+            f"border:1px solid {BORDER};border-radius:4px;"
+            f"font-size:10px;font-weight:600;}}"
+            f"QPushButton:hover{{color:{ACCENT2};border-color:{ACCENT};"
+            f"background:{BG4};}}"
+            f"QPushButton:pressed{{background:{BG};}}")
         b_reset_curve.clicked.connect(lambda: self._curves_wgt.reset_channel(self._ch))
         lay.addWidget(b_reset_curve)
         self._tabs.addTab(w, "Curves")
