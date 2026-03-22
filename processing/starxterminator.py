@@ -81,31 +81,39 @@ def reduce_stars(
     result  : İşlenmiş görüntü (float32)
     mask    : Yıldız maskesi görselleştirme (float32)
     """
-    H, W, C = image.shape
+    # Mono görüntü desteği
+    if image.ndim == 2:
+        H, W = image.shape
+        C = 1
+        work = image[:, :, np.newaxis]
+    else:
+        H, W, C = image.shape
+        work = image
 
     # Luminans (maksimum kanal)
-    gray = image.max(axis=2)
+    gray = work.max(axis=2)
 
-    print("[1/4] Yıldız maskesi hesaplanıyor...")
     star_mask_bin = build_star_mask(gray, sensitivity)
-
-    print("[2/4] Maske yumuşatılıyor...")
     soft_mask = feather_mask(star_mask_bin, feather_radius) * strength
 
-    print("[3/4] Arka plan tahmin ediliyor...")
-    result = image.copy()
-    for c in range(C):
-        bg = estimate_background(image[:, :, c], bg_sigma)
+    result = work.copy()
 
-        # Yıldız çekirdeği: daha fazla baskı
-        core_mask = binary_erosion(star_mask_bin > 0.5, iterations=1).astype(np.float32)
-        core_soft  = gaussian_filter(core_mask, sigma=1.0) * strength
+    # Çekirdek maskesini döngü dışına al (her kanal için aynı)
+    core_mask = binary_erosion(star_mask_bin > 0.5, iterations=1).astype(np.float32)
+    core_soft = gaussian_filter(core_mask, sigma=1.0) * strength
+
+    for c in range(C):
+        bg = estimate_background(work[:, :, c], bg_sigma)
 
         # Önce dış halka → arka planla değiştir
-        result[:, :, c] = image[:, :, c] * (1 - soft_mask) + bg * soft_mask
+        result[:, :, c] = work[:, :, c] * (1 - soft_mask) + bg * soft_mask
         # Sonra çekirdek → hafif karart
         result[:, :, c] = result[:, :, c] * (1 - core_soft * 0.4) + bg * (core_soft * 0.4)
 
-    print("[4/4] Tamamlandı.")
     result = np.clip(result, 0, 1)
+
+    # Mono girdi ise mono çıktı döndür
+    if image.ndim == 2:
+        return result[:, :, 0], soft_mask
+
     return result, soft_mask

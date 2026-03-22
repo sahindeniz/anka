@@ -1,7 +1,30 @@
 __pycache__/
 *.pyc
 *.pyo
-settings.json
+*.pyd
 .claude/
 .cache/
 gui/.cache/
+
+# User settings (generated at runtime)
+settings.json
+nonexistent.ini
+
+# Test images (too large for git)
+test_*.png
+test_*.jpg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Virtual env
+venv/
+.venv/
+env/

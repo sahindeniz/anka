@@ -54,6 +54,8 @@ class HistoryPanel(QWidget):
 
     # ── API ─────────────────────────────────────────────────────────────────
 
+    MAX_HISTORY = 30
+
     def push(self, label: str, image: np.ndarray):
         """Yeni bir durum ekle. Mevcut pozisyondan sonrasını sil."""
         if self._current < len(self._states) - 1:
@@ -62,6 +64,11 @@ class HistoryPanel(QWidget):
         # Thumbnail için küçük kopya sakla
         thumb = _make_thumb(image)
         self._states.append((label, image.copy(), thumb))
+
+        # Bellek sınırı: en eski durumları sil
+        while len(self._states) > self.MAX_HISTORY:
+            self._states.pop(0)
+
         self._current = len(self._states) - 1
         self._rebuild_list()
         self._update_buttons()

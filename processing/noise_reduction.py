@@ -21,7 +21,7 @@ def reduce_noise(image, strength=0.7, method="bilateral", iterations=1, **kw):
         sw, sh = max(4, int(w * scale)), max(4, int(h * scale))
         small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
     else:
-        small = img.copy()
+        small = img
 
     fn = {"gaussian": _gauss, "median": _median, "nlm": _nlm}.get(method, _bilateral)
     for _ in range(n):

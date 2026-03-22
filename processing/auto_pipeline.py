@@ -67,9 +67,10 @@ def run_auto_pipeline(input_path: str, *, custom_settings: dict | None = None) -
     # --- Color saturation boost ---
     sat_boost = float(settings.get("color_saturation_boost", 1.30))
     if img_f.ndim == 3 and sat_boost != 1.0:
-        hsv = cv2.cvtColor((img_f * 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * sat_boost, 0, 255)
-        img_f = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
+        img_u8 = (img_f * 255).astype(np.uint8)
+        hsv = cv2.cvtColor(img_u8, cv2.COLOR_BGR2HSV)
+        hsv[:, :, 1] = np.clip(hsv[:, :, 1].astype(np.float32) * sat_boost, 0, 255).astype(np.uint8)
+        img_f = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
 
     # --- Sharpen ---
     sharpen_amt = float(settings.get("sharpen_amount", 1.15))

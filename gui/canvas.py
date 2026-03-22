@@ -5,7 +5,7 @@ Görüntü gösterimi: zoom, pan, histogram preview
 import numpy as np
 from PyQt6.QtWidgets import QGraphicsView, QGraphicsScene, QGraphicsPixmapItem
 from PyQt6.QtCore import Qt, QPointF, pyqtSignal
-from PyQt6.QtGui import QPixmap, QImage, QWheelEvent, QMouseEvent
+from PyQt6.QtGui import QPixmap, QImage, QWheelEvent
 
 
 class ImageCanvas(QGraphicsView):
@@ -80,12 +80,14 @@ class ImageCanvas(QGraphicsView):
         self.centerOn(center_scene)
 
     def zoom_in(self):
-        self.scale(1.25, 1.25)
-        self._zoom += 1
+        if self._zoom < 20:
+            self.scale(1.25, 1.25)
+            self._zoom += 1
 
     def zoom_out(self):
-        self.scale(0.8, 0.8)
-        self._zoom -= 1
+        if self._zoom > -10:
+            self.scale(0.8, 0.8)
+            self._zoom -= 1
 
     def zoom_reset(self):
         self.resetTransform()

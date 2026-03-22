@@ -16,12 +16,11 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox, QCheckBox, QComboBox, QSlider, QFrame,
     QSizePolicy, QTabWidget, QGridLayout, QScrollArea, QSpacerItem
 )
-from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QRect
+from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QPoint, QPointF, QRect
 from PyQt6.QtGui import (
     QPainter, QColor, QPen, QBrush, QLinearGradient,
     QFont, QPainterPath, QPixmap, QPolygonF
 )
-from PyQt6.QtCore import QPointF
 
 # ── Colours (match app.py) ────────────────────────────────────────────────────
 BG      = "#050e1a"
@@ -779,10 +778,13 @@ class HistogramEditorPanel(QWidget):
         return sp
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    def set_image(self, img: np.ndarray):
+    def set_image(self, img: np.ndarray, reset: bool = False):
         self._img = np.clip(img, 0, 1).astype(np.float32) if img is not None else None
+        self._orig_img = self._img.copy() if self._img is not None else None
         self._hist_wgt.set_image(self._img)
         self._curves_wgt.set_image(self._img)
+        if reset:
+            self._reset_all_silent()
 
     def _set_channel(self, ch):
         self._ch = ch
@@ -874,6 +876,31 @@ class HistogramEditorPanel(QWidget):
         self._sync_spins_from_state([0.0,0.5,1.0,0.0,1.0])
         self._schedule_preview()
 
+    def _reset_all_silent(self):
+        """Reset all controls without emitting preview (used after Apply).
+        Image stays as-is; only the editor UI resets to defaults."""
+        # Stop any pending preview timer
+        self._debounce.stop()
+        # Block signals so reset doesn't trigger preview chain
+        self._hist_wgt.blockSignals(True)
+        self._curves_wgt.blockSignals(True)
+        # Reset levels: all channels → [0, 0.5, 1, 0, 1]
+        for c in list(self._hist_wgt._state.keys()):
+            self._hist_wgt._state[c] = [0.0, 0.5, 1.0, 0.0, 1.0]
+        # Reset curves: all channels → diagonal line
+        for c in list(self._curves_wgt._pts.keys()):
+            self._curves_wgt._pts[c] = [(0.0, 0.0), (1.0, 1.0)]
+        # Unblock signals
+        self._hist_wgt.blockSignals(False)
+        self._curves_wgt.blockSignals(False)
+        # Reset adjustment sliders
+        self._reset_adjustments()
+        # Sync spinboxes to default
+        self._sync_spins_from_state([0.0, 0.5, 1.0, 0.0, 1.0])
+        # Force immediate repaint (not deferred)
+        self._hist_wgt.repaint()
+        self._curves_wgt.repaint()
+
     def _reset_adjustments(self):
         defaults = {
             "_adj_exposure":0.0,"_adj_brightness":0.0,"_adj_contrast":0.0,
@@ -937,6 +964,12 @@ class HistogramEditorPanel(QWidget):
 
         if emit:
             self.apply_requested.emit(img)
+            # After apply: update baseline and reset all controls to defaults
+            self._img = img.copy()
+            self._orig_img = img.copy()
+            self._hist_wgt.set_image(self._img)
+            self._curves_wgt.set_image(self._img)
+            self._reset_all_silent()
         return img
 
     def _apply_adjustments(self, img: np.ndarray) -> np.ndarray:

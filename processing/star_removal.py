@@ -40,6 +40,7 @@ def remove_stars(image, max_sigma=6, min_sigma=1, threshold=0.03,
             return (np.stack(channels, axis=2).astype(np.float32) / 255.0)
 
     # local_median / global_median
+    global_med = float(np.median(image))
     for y, x, r in stars:
         r = max(1, int(r * 2.83))
         y0, y1 = max(0, int(y) - r), min(h, int(y) + r)
@@ -50,9 +51,9 @@ def remove_stars(image, max_sigma=6, min_sigma=1, threshold=0.03,
             ry0, ry1 = max(0, int(y) - pad), min(h, int(y) + pad)
             rx0, rx1 = max(0, int(x) - pad), min(w, int(x) + pad)
             patch = image[ry0:ry1, rx0:rx1]
-            fill = float(np.median(patch)) if patch.size else float(np.median(image))
+            fill = float(np.median(patch)) if patch.size else global_med
         else:  # global_median
-            fill = float(np.median(image))
+            fill = global_med
 
         result[y0:y1, x0:x1] = fill
 

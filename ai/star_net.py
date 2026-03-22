@@ -16,7 +16,6 @@ quality through classical + AI-guided methods.
 import cv2
 import numpy as np
 from skimage.feature import blob_log
-from skimage.morphology import disk, binary_dilation
 
 
 def separate_stars(image,

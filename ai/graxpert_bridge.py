@@ -143,12 +143,14 @@ def run_graxpert(image: np.ndarray,
 
         cb("[5/5] Tamam!")
         key = "denoised" if command == "denoising" else "background_removed"
-        return {
+        out = {
             key: result_img,
-            "background_removed": result_img,
             "background_model":   bg_model,
             "exe_used":           exe_path,
         }
+        if command != "denoising":
+            out["background_removed"] = result_img
+        return out
 
     finally:
         # work_dir'i temizle (input + output)

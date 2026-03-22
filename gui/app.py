@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
     QScrollArea, QStatusBar, QProgressBar, QSpinBox, QDoubleSpinBox,
     QComboBox, QTabWidget, QFrame, QMessageBox, QToolTip,
     QSplitter, QSizePolicy, QGroupBox, QListWidget, QListWidgetItem,
-    QDialog, QTextEdit, QGridLayout, QLineEdit, QTabBar, QStyleFactory
+    QDialog, QTextEdit, QGridLayout, QLineEdit, QTabBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QSize
 from PyQt6.QtGui import (QPalette, QColor, QFont, QCursor,
@@ -27,7 +27,6 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from gui.histogram_editor import HistogramEditorPanel
 from gui.script_editor import ScriptEditorDialog
-from matplotlib.widgets import RectangleSelector
 
 # ═══════════════════════════════ THEME ══════════════════════════════════════
 BG      = "#050e1a"
@@ -171,9 +170,12 @@ class Worker(QThread):
             params_with_cb["_progress_cb"] = self._progress_cb
             try:
                 result = self.fn(self.image, **params_with_cb)
-            except TypeError:
-                # Function doesn't accept _progress_cb — call without it
-                result = self.fn(self.image, **self.params)
+            except TypeError as te:
+                # Only retry without _progress_cb if the error is about that param
+                if "_progress_cb" in str(te) or "unexpected keyword" in str(te):
+                    result = self.fn(self.image, **self.params)
+                else:
+                    raise
             if not self.isInterruptionRequested():
                 self.finished.emit(result)
         except Exception:
@@ -1278,7 +1280,9 @@ class RecompositionDialog(QDialog):
         self.lbl_sl_file = QLabel("No starless loaded")
         self.lbl_sl_file.setStyleSheet(f"color:{MUTED};font-size:9px;")
         b_load_sl = QPushButton("📂 Starless"); b_load_sl.setStyleSheet(_btn(h=22)); b_load_sl.setFixedHeight(22)
-        sl_row.addWidget(b_load_sl); sl_row.addWidget(self.lbl_sl_file, 1)
+        b_pick_sl = QPushButton("🖼"); b_pick_sl.setStyleSheet(_btn(h=22)); b_pick_sl.setFixedHeight(22); b_pick_sl.setFixedWidth(28)
+        b_pick_sl.setToolTip("Açık resimlerden seç")
+        sl_row.addWidget(b_load_sl); sl_row.addWidget(b_pick_sl); sl_row.addWidget(self.lbl_sl_file, 1)
         fgl.addLayout(sl_row)
 
         # Stars-only row
@@ -1286,11 +1290,15 @@ class RecompositionDialog(QDialog):
         self.lbl_st_file = QLabel("No stars-only loaded")
         self.lbl_st_file.setStyleSheet(f"color:{MUTED};font-size:9px;")
         b_load_st = QPushButton("📂 Stars Only"); b_load_st.setStyleSheet(_btn(h=22)); b_load_st.setFixedHeight(22)
-        st_row.addWidget(b_load_st); st_row.addWidget(self.lbl_st_file, 1)
+        b_pick_st = QPushButton("🖼"); b_pick_st.setStyleSheet(_btn(h=22)); b_pick_st.setFixedHeight(22); b_pick_st.setFixedWidth(28)
+        b_pick_st.setToolTip("Açık resimlerden seç")
+        st_row.addWidget(b_load_st); st_row.addWidget(b_pick_st); st_row.addWidget(self.lbl_st_file, 1)
         fgl.addLayout(st_row)
 
         b_load_sl.clicked.connect(self._load_starless_file)
         b_load_st.clicked.connect(self._load_stars_file)
+        b_pick_sl.clicked.connect(lambda: self._pick_from_open("starless"))
+        b_pick_st.clicked.connect(lambda: self._pick_from_open("stars"))
         cl.addWidget(file_grp)
 
         scroll = QScrollArea(); scroll.setWidgetResizable(True)
@@ -1542,6 +1550,91 @@ class RecompositionDialog(QDialog):
         else:
             self.lbl_st_file.setText("No stars-only loaded")
             self.lbl_st_file.setStyleSheet(f"color:{MUTED};font-size:9px;")
+
+    def _pick_from_open(self, target):
+        """Filmstrip'teki açık resimlerden veya mevcut görüntüden seç."""
+        app = self.parent()
+        if app is None:
+            QMessageBox.warning(self, "Hata", "Ana uygulama bulunamadı")
+            return
+
+        # Seçenekleri topla
+        options = []
+        # 1. Mevcut aktif görüntü
+        if hasattr(app, '_current') and app._current is not None:
+            options.append(("🖼  Mevcut görüntü (aktif)", app._current.copy(), "current"))
+        # 2. Orijinal görüntü
+        if hasattr(app, '_orig') and app._orig is not None:
+            options.append(("📌  Orijinal görüntü", app._orig.copy(), "original"))
+        # 3. Filmstrip'teki resimler
+        if hasattr(app, '_filmstrip_data'):
+            for entry in app._filmstrip_data:
+                fname = os.path.basename(entry["path"])
+                options.append((f"📂  {fname}", entry["img"].copy(), entry["path"]))
+        # 4. History'deki adımlar
+        if hasattr(app, '_history'):
+            for idx, (label, hist_img) in enumerate(app._history):
+                if idx == 0 and len(options) > 1:
+                    continue  # Orijinal zaten var
+                options.append((f"📜  Step {idx}: {label}", hist_img.copy(), f"history_{idx}"))
+
+        if not options:
+            QMessageBox.information(self, "Bilgi", "Açık resim bulunamadı.\nÖnce dosya açın.")
+            return
+
+        # Seçim dialog'u
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{'Starless' if target=='starless' else 'Stars Only'} Seç")
+        dlg.setMinimumSize(400, 300)
+        dlg.setStyleSheet(f"background:{BG};color:{TEXT};")
+        lay = QVBoxLayout(dlg)
+
+        info = QLabel(f"{'Starless' if target=='starless' else 'Stars-only'} olarak kullanılacak resmi seçin:")
+        info.setStyleSheet(f"color:{HEAD};font-size:11px;padding:8px;")
+        lay.addWidget(info)
+
+        lst = QListWidget()
+        lst.setStyleSheet(
+            f"QListWidget{{background:{BG2};color:{TEXT};border:1px solid {BORDER};"
+            f"font-size:11px;padding:4px;}}"
+            f"QListWidget::item{{padding:6px;}}"
+            f"QListWidget::item:selected{{background:{ACCENT};color:#000;}}"
+            f"QListWidget::item:hover{{background:{BG3};}}")
+        for label, img_data, src_id in options:
+            item = QListWidgetItem(label)
+            lst.addItem(item)
+        lay.addWidget(lst, 1)
+
+        btn_row = QHBoxLayout()
+        b_cancel = QPushButton("İptal")
+        b_cancel.setStyleSheet(_btn(h=28))
+        b_ok = QPushButton("✅  Seç")
+        b_ok.setStyleSheet(_run_btn(GREEN))
+        b_ok.setFixedHeight(30)
+        btn_row.addWidget(b_cancel); btn_row.addWidget(b_ok)
+        lay.addLayout(btn_row)
+
+        b_cancel.clicked.connect(dlg.reject)
+        b_ok.clicked.connect(dlg.accept)
+        lst.doubleClicked.connect(dlg.accept)
+
+        if dlg.exec() and lst.currentRow() >= 0:
+            idx = lst.currentRow()
+            label, img_data, src_id = options[idx]
+
+            if target == "starless":
+                self._starless = img_data
+                h_i, w_i = img_data.shape[:2]
+                self.lbl_sl_file.setText(f"✅  {label}  ({w_i}×{h_i})")
+                self.lbl_sl_file.setStyleSheet(f"color:{GREEN};font-size:9px;")
+                self._show_slot(img_data, "Starless", 0)
+            else:
+                self._stars = img_data
+                h_i, w_i = img_data.shape[:2]
+                self.lbl_st_file.setText(f"✅  {label}  ({w_i}×{h_i})")
+                self.lbl_st_file.setStyleSheet(f"color:{GREEN};font-size:9px;")
+                self._show_slot(img_data, "Stars Only", 1)
+            self._schedule_preview()
 
     def _load_starless_file(self):
         from core.loader import load_image
@@ -1981,75 +2074,120 @@ class ProcessFlyout(QFrame):
         super().closeEvent(e)
 
 
-# ═══════════════════════════════ PANEL CUSTOMIZE DIALOG ═════════════════════
-class PanelCustomizeDialog(QDialog):
-    """\n    Reorder and show/hide process panels.\n    Drag-like Up/Down buttons to reorder, checkboxes to show/hide.\n    """
-    def __init__(self, panels: dict, order: list, visible: dict, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("🔧  Customize Panels")
-        self.setMinimumSize(400, 480)
-        self.setStyleSheet(f"background:{BG};color:{TEXT};font-size:11px;")
+# ═══════════════════════════════ PANEL CUSTOMIZE FLYOUT ═════════════════════
+class PanelCustomizeFlyout(QFrame):
+    """\n    Reorder and show/hide process panels — embedded flyout popup.\n    Stays inside the app, doesn't open a separate window.\n    """
+    applied = pyqtSignal(list, dict)   # order, visible
+    closed  = pyqtSignal()
+
+    def __init__(self, panels: dict, order: list, visible: dict,
+                 anchor_btn: QPushButton = None, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup)
         self._panels  = panels
         self._order   = list(order)
         self._visible = dict(visible)
+        self._anchor  = anchor_btn
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet(
+            f"PanelCustomizeFlyout{{background:{BG2};border:2px solid {ACCENT};"
+            f"border-radius:8px;}}")
+        self.setMinimumWidth(360)
+        self.setMaximumHeight(520)
         self._build()
 
     def _build(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(12,12,12,12); root.setSpacing(8)
+        root.setContentsMargins(0,0,0,0); root.setSpacing(0)
 
-        title = QLabel("🔧  Customize Process Panels")
-        title.setStyleSheet(f"color:{ACCENT2};font-size:13px;font-weight:700;padding:4px 0 8px 0;")
-        root.addWidget(title)
+        # Header
+        hdr = QWidget()
+        hdr.setFixedHeight(36)
+        hdr.setStyleSheet(
+            f"background:{BG4};border-radius:6px 6px 0 0;"
+            f"border-bottom:1px solid {BORDER};")
+        hl = QHBoxLayout(hdr)
+        hl.setContentsMargins(10,0,8,0); hl.setSpacing(6)
+        title_lbl = QLabel("🔧  Customize Panels")
+        title_lbl.setStyleSheet(f"color:{HEAD};font-size:12px;font-weight:700;")
+        hl.addWidget(title_lbl, 1)
 
-        info = QLabel("Check/uncheck to show or hide panels.  Use ▲▼ to reorder.")
+        close_btn = QPushButton("✕")
+        close_btn.setFixedSize(22, 22)
+        close_btn.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{SUBTEXT};"
+            f"border:none;font-size:12px;}}"
+            f"QPushButton:hover{{color:{RED};}}")
+        close_btn.clicked.connect(self.close)
+        hl.addWidget(close_btn)
+        root.addWidget(hdr)
+
+        # Body
+        body = QWidget()
+        body.setStyleSheet(f"background:{BG2};")
+        blay = QVBoxLayout(body)
+        blay.setContentsMargins(10,8,10,8); blay.setSpacing(6)
+
+        info = QLabel("☑ Göster/gizle  |  ▲▼ Sıralama")
         info.setStyleSheet(f"color:{MUTED};font-size:10px;")
-        root.addWidget(info)
+        blay.addWidget(info)
 
         # Panel list
         self._list = QListWidget()
         self._list.setStyleSheet(
-            f"QListWidget{{background:{BG2};border:1px solid {BORDER};"
+            f"QListWidget{{background:{BG};border:1px solid {BORDER};"
             f"border-radius:4px;color:{TEXT};font-size:11px;}}"
-            f"QListWidget::item{{padding:6px 8px;border-bottom:1px solid {BORDER};}}"
+            f"QListWidget::item{{padding:5px 8px;border-bottom:1px solid {BORDER};}}"
             f"QListWidget::item:selected{{background:{BG4};color:{ACCENT2};}}")
         self._list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         self._refresh_list()
-        root.addWidget(self._list, 1)
+        blay.addWidget(self._list, 1)
 
         # Up/Down buttons
-        btn_row = QHBoxLayout()
-        b_up   = QPushButton("▲  Move Up");   b_up.setStyleSheet(_btn()); b_up.setFixedHeight(28)
-        b_down = QPushButton("▼  Move Down"); b_down.setStyleSheet(_btn()); b_down.setFixedHeight(28)
-        b_all  = QPushButton("☑  Show All");  b_all.setStyleSheet(_btn(color="#0a2a0a",hover=GREEN))
-        b_none = QPushButton("☐  Hide All");  b_none.setStyleSheet(_btn(color="#2a0a0a",hover=RED))
-        for b in (b_up,b_down,b_all,b_none): b.setFixedHeight(28); btn_row.addWidget(b)
-        root.addLayout(btn_row)
+        btn_row = QHBoxLayout(); btn_row.setSpacing(4)
+        b_up   = QPushButton("▲"); b_up.setToolTip("Move Up")
+        b_down = QPushButton("▼"); b_down.setToolTip("Move Down")
+        b_all  = QPushButton("☑ All")
+        b_none = QPushButton("☐ None")
+        for b in (b_up, b_down):
+            b.setFixedSize(32, 26)
+            b.setStyleSheet(_btn())
+        for b in (b_all, b_none):
+            b.setFixedHeight(26)
+            b.setStyleSheet(_btn())
+        btn_row.addWidget(b_up); btn_row.addWidget(b_down)
+        btn_row.addStretch()
+        btn_row.addWidget(b_all); btn_row.addWidget(b_none)
+        blay.addLayout(btn_row)
 
         b_up.clicked.connect(self._move_up)
         b_down.clicked.connect(self._move_down)
         b_all.clicked.connect(lambda: self._set_all(True))
         b_none.clicked.connect(lambda: self._set_all(False))
 
-        # OK/Cancel
-        ok_row = QHBoxLayout(); ok_row.addStretch()
-        b_cancel = QPushButton("Cancel"); b_cancel.setStyleSheet(_btn()); b_cancel.setFixedHeight(30)
-        b_ok = QPushButton("✅  Apply"); b_ok.setStyleSheet(_run_btn(ACCENT)); b_ok.setFixedHeight(32)
-        ok_row.addWidget(b_cancel); ok_row.addWidget(b_ok)
-        root.addLayout(ok_row)
-        b_cancel.clicked.connect(self.reject)
+        # Apply button
+        b_ok = QPushButton("✅  Uygula")
+        b_ok.setFixedHeight(30)
+        b_ok.setStyleSheet(
+            f"QPushButton{{background:{GREEN};color:#fff;border:none;"
+            f"border-radius:5px;font-size:11px;font-weight:700;}}"
+            f"QPushButton:hover{{background:#5ad48a;}}"
+            f"QPushButton:pressed{{background:#2a9a50;}}")
         b_ok.clicked.connect(self._apply)
+        blay.addWidget(b_ok)
+
+        root.addWidget(body)
+        self.adjustSize()
 
     _LABELS = {
         "bg":      "🌌  Background Extraction",
         "noise":   "✨  Noise Reduction",
-        "stars":   "⭐  Star Removal",
+        "stars":   "⭐  Star Smaller",
         "deconv":  "🔭  Deconvolution",
         "sharp":   "🔪  Sharpening",
         "nebula":  "🌠  Nebula Enhancement",
         "color":   "🎨  Color Calibration",
         "morph":   "🔮  Morphology",
-        "galaxy":  "🌀  Galaxy Detection",
+        "aberration":  "🌀  Aberration Remover",
         "stretch": "📊  Histogram Stretch",
     }
 
@@ -2091,7 +2229,22 @@ class PanelCustomizeDialog(QDialog):
             key  = item.data(Qt.ItemDataRole.UserRole)
             self._order.append(key)
             self._visible[key] = (item.checkState() == Qt.CheckState.Checked)
-        self.accept()
+        self.applied.emit(self._order, self._visible)
+        self.close()
+
+    def _position(self):
+        if not self._anchor: return
+        btn_global = self._anchor.mapToGlobal(
+            self._anchor.rect().bottomLeft())
+        self.move(btn_global.x(), btn_global.y() + 2)
+
+    def showEvent(self, e):
+        super().showEvent(e)
+        self._position()
+
+    def closeEvent(self, e):
+        self.closed.emit()
+        super().closeEvent(e)
 
     def get_order(self):   return list(self._order)
     def get_visible(self): return dict(self._visible)
@@ -3307,6 +3460,119 @@ class StackingDialog(QDialog):
     def get_result(self):
         return self._result
 
+# ── Draggable toolbar helpers ──────────────────────────────────────────────
+class _DragGroup(QWidget):
+    """Toolbar'da bir grup widget — sürüklenebilir birim."""
+    def __init__(self, name="", parent=None):
+        super().__init__(parent)
+        self.name = name
+        self.widgets = []
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(0,0,0,0)
+        self._lay.setSpacing(2)
+        self.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+
+    def add(self, w):
+        self.widgets.append(w)
+        self._lay.addWidget(w)
+
+
+class _DragBar(QWidget):
+    """Grupları yatay sıralayan, drag-drop ile yer değiştiren container."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lay = QHBoxLayout(self)
+        self._lay.setContentsMargins(0,0,0,0)
+        self._lay.setSpacing(4)
+        self._groups = []
+        self._dragged = None
+        self._drag_start = None
+        self.setAcceptDrops(True)
+
+    def add_group(self, grp):
+        if self._groups:
+            sep = QLabel("│")
+            sep.setStyleSheet("color:#555;font-size:12px;padding:0 2px;")
+            sep.setFixedWidth(10)
+            grp._sep = sep
+            self._lay.addWidget(sep)
+        else:
+            grp._sep = None
+        self._groups.append(grp)
+        self._lay.addWidget(grp)
+        grp.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        from PyQt6.QtCore import QEvent, QMimeData, QPoint
+        from PyQt6.QtGui import QDrag
+        if not isinstance(obj, _DragGroup):
+            return False
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._dragged = obj
+                self._drag_start = event.pos()
+                obj.setCursor(QCursor(Qt.CursorShape.ClosedHandCursor))
+        elif event.type() == QEvent.Type.MouseMove:
+            if self._dragged and self._drag_start is not None:
+                dist = (event.pos() - self._drag_start).manhattanLength()
+                if dist > 10:
+                    drag = QDrag(self._dragged)
+                    mime = QMimeData()
+                    mime.setText(self._dragged.name)
+                    drag.setMimeData(mime)
+                    drag.exec(Qt.DropAction.MoveAction)
+                    self._dragged.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+                    self._dragged = None
+                    self._drag_start = None
+        elif event.type() == QEvent.Type.MouseButtonRelease:
+            if self._dragged:
+                self._dragged.setCursor(QCursor(Qt.CursorShape.OpenHandCursor))
+            self._dragged = None
+            self._drag_start = None
+        return False
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        source_name = event.mimeData().text()
+        drop_pos = event.position().toPoint()
+        src_idx = dst_idx = None
+        for i, grp in enumerate(self._groups):
+            if grp.name == source_name:
+                src_idx = i
+            if grp.geometry().contains(drop_pos):
+                dst_idx = i
+        if src_idx is None or dst_idx is None or src_idx == dst_idx:
+            event.ignore(); return
+        grp = self._groups.pop(src_idx)
+        self._groups.insert(dst_idx, grp)
+        self._rebuild_layout()
+        event.acceptProposedAction()
+
+    def _rebuild_layout(self):
+        while self._lay.count():
+            item = self._lay.takeAt(0)
+            w = item.widget()
+            if w: w.setParent(None)
+        for i, grp in enumerate(self._groups):
+            if i > 0:
+                sep = QLabel("│")
+                sep.setStyleSheet("color:#555;font-size:12px;padding:0 2px;")
+                sep.setFixedWidth(10)
+                grp._sep = sep
+                self._lay.addWidget(sep)
+            else:
+                grp._sep = None
+            grp.setParent(self)
+            self._lay.addWidget(grp)
+
+
 class ImageViewer(QWidget):
     """\n    Multi-panel image viewer with:\n      • 1/2/4 panel layout (side by side comparison)\n      • Scroll wheel zoom + pan on each panel\n      • Draggable histogram black/white point lines → live image update\n      • Crop, Stats tabs\n    """
     stretch_changed = pyqtSignal(float, float)   # black_pt, white_pt
@@ -3322,6 +3588,7 @@ class ImageViewer(QWidget):
         self._layout_n = 1    # 1, 2 or 4 panels
         self._pre_stf_slots = [None, None, None, None]  # STF toggle: slot basina orijinal
         self._welcome_visible = False  # arka plan composite gorunuyor mu
+        self._channel_mode = "RGB"    # kanal görünümü: RGB/R/G/B/L
 
         # Histogram per-channel state
         # Each channel: [black, midtone, white]
@@ -3353,16 +3620,21 @@ class ImageViewer(QWidget):
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
 
-        # ── Top bar ───────────────────────────────────────────────────────
+        # ── Top bar (draggable groups) ────────────────────────────────────
         tb = QWidget(); tb.setFixedHeight(30)
         tb.setStyleSheet(f"background:{BG2};border-bottom:1px solid {BORDER};")
-        tbl = QHBoxLayout(tb); tbl.setContentsMargins(6,2,6,2); tbl.setSpacing(6)
+        tbl = QHBoxLayout(tb); tbl.setContentsMargins(6,2,6,2); tbl.setSpacing(0)
 
         self.lbl_info = QLabel("—")
         self.lbl_info.setStyleSheet(f"color:{MUTED};font-size:10px;")
         tbl.addWidget(self.lbl_info, 1)
 
-        # Layout buttons
+        # ── Draggable toolbar container ──────────────────────────
+        self._drag_bar = _DragBar(self)
+        tbl.addWidget(self._drag_bar)
+
+        # -- GROUP: Layout --
+        grp_layout = _DragGroup("layout")
         for n, icon in [(1,"▣"),(2,"▣▣"),(4,"⊞")]:
             b = QPushButton(icon); b.setFixedSize(30, 22)
             b.setCheckable(True)
@@ -3374,13 +3646,13 @@ class ImageViewer(QWidget):
                 f"QPushButton:hover{{color:{TEXT};}}")
             b.setToolTip(f"{n} panel")
             b.clicked.connect(lambda _, nn=n: self._set_layout(nn))
-            tbl.addWidget(b)
-        self._layout_btns = [tbl.itemAt(tbl.count()-3).widget(),
-                              tbl.itemAt(tbl.count()-2).widget(),
-                              tbl.itemAt(tbl.count()-1).widget()]
+            grp_layout.add(b)
+        self._layout_btns = grp_layout.widgets[-3:]
         self._layout_btns[0].setChecked(True)
+        self._drag_bar.add_group(grp_layout)
 
-        # Zoom buttons
+        # -- GROUP: Zoom --
+        grp_zoom = _DragGroup("zoom")
         b_zi = QPushButton("🔍+"); b_zi.setFixedSize(32,22)
         b_zo = QPushButton("🔍−"); b_zo.setFixedSize(32,22)
         b_fit= QPushButton("⛶");   b_fit.setFixedSize(28,22)
@@ -3389,7 +3661,12 @@ class ImageViewer(QWidget):
         b_zi.clicked.connect(lambda: self._zoom_step(1.25))
         b_zo.clicked.connect(lambda: self._zoom_step(0.80))
         b_fit.clicked.connect(self._zoom_fit)
-        b_stf = QPushButton("💡STF"); b_stf.setFixedSize(44,22)
+        grp_zoom.add(b_zi); grp_zoom.add(b_zo); grp_zoom.add(b_fit)
+        self._drag_bar.add_group(grp_zoom)
+
+        # -- GROUP: STF --
+        grp_stf = _DragGroup("stf")
+        b_stf = QPushButton("💡STF"); b_stf.setFixedSize(50,22)
         b_stf.setCheckable(True)
         b_stf.setStyleSheet(
             f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
@@ -3399,14 +3676,38 @@ class ImageViewer(QWidget):
             f"QPushButton:hover{{color:{TEXT};}}")
         b_stf.setToolTip("Auto Stretch (STF) — Toggle\nTikla: stretch / Tekrar tikla: geri al")
         b_stf.clicked.connect(self._auto_stf_preview)
-        self._b_stf = b_stf  # toggle state icin referans
-        tbl.addWidget(b_zi); tbl.addWidget(b_zo); tbl.addWidget(b_fit); tbl.addWidget(b_stf)
+        self._b_stf = b_stf
+        grp_stf.add(b_stf)
+        self._drag_bar.add_group(grp_stf)
 
+        # -- GROUP: Colormap --
+        grp_cmap = _DragGroup("colormap")
         cmap_lbl = QLabel("Colormap:"); cmap_lbl.setStyleSheet(LBL_CSS)
         self.cmap_cb = QComboBox()
         self.cmap_cb.addItems(["gray","inferno","plasma","viridis","hot","coolwarm","nipy_spectral"])
         self.cmap_cb.setStyleSheet(COMBO_CSS); self.cmap_cb.setFixedWidth(100)
-        tbl.addWidget(cmap_lbl); tbl.addWidget(self.cmap_cb)
+        grp_cmap.add(cmap_lbl); grp_cmap.add(self.cmap_cb)
+        self._drag_bar.add_group(grp_cmap)
+
+        # -- GROUP: Channels --
+        grp_ch = _DragGroup("channels")
+        CH_BTN_CSS = (
+            f"QPushButton{{background:{BG3};color:{{clr}};border:1px solid {BORDER};"
+            f"border-radius:3px;font-size:10px;font-weight:bold;padding:2px 5px;min-width:22px;}}"
+            f"QPushButton:checked{{background:{{clr}};color:#000;border:1px solid {{clr}};}}"
+            f"QPushButton:hover{{border:1px solid {{clr}};}}")
+        self._ch_view_btns = {}
+        for ch, clr in [("RGB","#aaaaaa"),("R","#ff4444"),("G","#44cc44"),("B","#4488ff"),("L","#cccccc")]:
+            btn = QPushButton(ch)
+            btn.setCheckable(True)
+            btn.setFixedHeight(22)
+            btn.setStyleSheet(CH_BTN_CSS.replace("{clr}", clr))
+            btn.clicked.connect(lambda _, c=ch: self._switch_channel(c))
+            grp_ch.add(btn)
+            self._ch_view_btns[ch] = btn
+        self._ch_view_btns["RGB"].setChecked(True)
+        self._drag_bar.add_group(grp_ch)
+
         lay.addWidget(tb)
 
         # ── Tabs ──────────────────────────────────────────────────────────
@@ -3649,7 +3950,23 @@ class ImageViewer(QWidget):
 
         ax.clear(); self._sax_style(ax)
         display = self._apply_hist_points(img)
-        cmap = self.cmap_cb.currentText() if img.ndim==2 else None
+
+        # ── Kanal filtresi ────────────────────────────────────────
+        ch_mode = getattr(self, '_channel_mode', 'RGB')
+        cmap = None
+        if display.ndim == 3 and ch_mode != "RGB":
+            if ch_mode == "R":
+                display = display[:, :, 0]; cmap = "gray"
+            elif ch_mode == "G":
+                display = display[:, :, 1]; cmap = "gray"
+            elif ch_mode == "B":
+                display = display[:, :, 2]; cmap = "gray"
+            elif ch_mode == "L":
+                display = 0.2126*display[:,:,0] + 0.7152*display[:,:,1] + 0.0722*display[:,:,2]
+                cmap = "gray"
+        elif display.ndim == 2:
+            cmap = self.cmap_cb.currentText()
+
         ax.imshow(display, cmap=cmap, origin="upper",
                   aspect="equal", interpolation="nearest")
         if self._titles[slot]:
@@ -3759,33 +4076,6 @@ class ImageViewer(QWidget):
 
     # _show_crop_context replaced by _show_crop_menu
 
-    def _draw_hist(self, img):
-        pass  # handled by HistogramEditorPanel
-
-    def _hist_set_channel(self, ch: str):
-        """Compat stub."""
-        pass
-
-    def _hist_spin_changed(self):
-        pass
-
-    def _set_hist_pts(self, ch, b, m, w):
-        pass
-
-    def _hist_press(self,e): pass
-    def _hist_motion(self,e): pass
-    def _hist_release(self,e): pass
-    def _reset_hist_points(self): pass
-
-    def _apply_hist_points(self, img: np.ndarray) -> np.ndarray:
-        """Compat stub — actual processing now done in HistogramEditorPanel."""
-        return img  # Editor handles its own apply
-
-    def _hist_bake(self):
-        """Compat stub — Apply button is inside HistogramEditorPanel."""
-        pass
-
-
     def _toggle_hist_panel(self):
         """Hide/show histogram panel by collapsing splitter."""
         sizes = self._main_splitter.sizes()
@@ -3841,6 +4131,16 @@ class ImageViewer(QWidget):
         try: fig.canvas.draw_idle()
         except Exception: pass
 
+    def _switch_channel(self, ch: str):
+        """R/G/B/L/RGB kanal görünümünü değiştir."""
+        for key, btn in self._ch_view_btns.items():
+            btn.setChecked(key == ch)
+        # parent app'e de kaydet
+        if hasattr(self, '_parent_app'):
+            self._parent_app._channel_mode = ch
+        self._channel_mode = ch
+        self._redraw_all()
+
     def _auto_stf_preview(self):
         """Auto STF toggle — ilk tikla: stretch, tekrar tikla: geri al."""
         slot = self._active
@@ -3882,8 +4182,11 @@ class ImageViewer(QWidget):
         result = np.clip(result, 0, 1).astype(np.float32)
         slot = self._active
         self._imgs[slot] = result
-        # Update editor's original so next edit starts from here
-        self._hist_editor.set_image(result)
+        # Reset ImageViewer's own histogram state to defaults
+        self._hist_pts = {"L":[0.0,0.5,1.0],"R":[0.0,0.5,1.0],"G":[0.0,0.5,1.0],"B":[0.0,0.5,1.0]}
+        self._hist_black = 0.0
+        self._hist_white = 1.0
+        # Editor already reset itself inside _apply(); just redraw
         if self._hist_apply_cb is not None:
             self._hist_apply_cb(result)
         self._draw_slot(slot)
@@ -4350,6 +4653,8 @@ class AstroApp(QMainWindow):
         self._starnet_fn  = None  # holds last StarNet++ result accessor
         self._settings    = {}    # loaded at startup
         self._pre_stf_image = None  # toggle: STF oncesi orijinal (None = STF aktif degil)
+        self._last_solve_result = None  # plate solve sonucu (color calibration icin)
+        self._channel_mode = "RGB"     # kanal görünümü: RGB/R/G/B/L
         self._apply_theme(); self._build_ui()
         self._load_settings()
 
@@ -4475,7 +4780,7 @@ class AstroApp(QMainWindow):
             ("🌠  Nebula Güçlendir", "nebula"),
             ("🎨  Renk Kalibrasyonu","color"),
             ("🔮  Morfoloji",        "morph"),
-            ("🌀  Galaksi Tespiti",  "galaxy"),
+            ("🌀  Aberration Remover",  "aberration"),
             ("📊  Histogram Stretch","stretch"),
         ]
         for label, key in procs:
@@ -4614,6 +4919,9 @@ class AstroApp(QMainWindow):
             parent        = self,
         )
         dlg.exec()
+        # Plate solve sonucunu sakla (color calibration için)
+        if dlg._last_result and dlg._last_result.get("ra") is not None:
+            self._last_solve_result = dlg._last_result
         # Güncellenmiş ASTAP ayarlarını kaydet
         try:
             from gui.settings import save as _save
@@ -4815,7 +5123,7 @@ class AstroApp(QMainWindow):
             ("nebula",  "🌠","Nebula"),
             ("color",   "🎨","Color"),
             ("morph",   "🔮","Morph"),
-            ("galaxy",  "🌀","Galaxy"),
+            ("aberration","🌀","Aberr"),
             ("star_shrink","✦↓","StarShrink"),
             ("graxpert",  "🔬","GraXpert"),
             ("stretch", "📊","Stretch"),
@@ -4931,11 +5239,68 @@ class AstroApp(QMainWindow):
         hl.addWidget(self._slot_combo)
 
         lay.addWidget(hbar)
-        self.viewer=ImageViewer(); lay.addWidget(self.viewer,1)
+        self.viewer=ImageViewer(); self.viewer._parent_app = self; lay.addWidget(self.viewer,1)
         # Wire histogram Apply button → create new history step
         self.viewer._hist_apply_cb = lambda img: self._hist_apply(img)
         # Crop modu olmadan dogrudan crop uygulama callback'i
         self.viewer._direct_crop_cb = lambda cropped: self._direct_crop_apply(cropped)
+
+        # ── Filmstrip (thumbnail bar) ─────────────────────────────
+        self._filmstrip_data = []  # [(path, img_array, thumb_label), ...]
+        fs_wrap = QWidget()
+        fs_wrap.setStyleSheet(f"background:{BG2};border-top:1px solid {BORDER};")
+        fs_wrap.setFixedHeight(90)
+        fs_lay = QVBoxLayout(fs_wrap)
+        fs_lay.setContentsMargins(4,2,4,2); fs_lay.setSpacing(0)
+
+        # Başlık + gizle butonu
+        fs_hdr = QHBoxLayout(); fs_hdr.setSpacing(4)
+        fs_title = QLabel("📂 Açık Dosyalar")
+        fs_title.setStyleSheet(f"color:{HEAD};font-size:9px;font-weight:700;")
+        fs_hdr.addWidget(fs_title)
+        fs_hdr.addStretch()
+        fs_close_all = QPushButton("✕ Tümünü Kapat")
+        fs_close_all.setFixedHeight(16)
+        fs_close_all.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{MUTED};font-size:9px;"
+            f"border:none;}} QPushButton:hover{{color:#ff6666;}}")
+        fs_close_all.clicked.connect(self._filmstrip_clear)
+        fs_hdr.addWidget(fs_close_all)
+        fs_toggle = QPushButton("▼")
+        fs_toggle.setFixedSize(20,16)
+        fs_toggle.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
+            f"border-radius:2px;font-size:9px;}}"
+            f"QPushButton:hover{{color:{TEXT};}}")
+        fs_toggle.clicked.connect(lambda: self._filmstrip_toggle())
+        fs_hdr.addWidget(fs_toggle)
+        self._fs_toggle_btn = fs_toggle
+        fs_lay.addLayout(fs_hdr)
+
+        # Kaydırılabilir thumbnail alanı
+        self._fs_scroll = QScrollArea()
+        self._fs_scroll.setWidgetResizable(True)
+        self._fs_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self._fs_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._fs_scroll.setFixedHeight(62)
+        self._fs_scroll.setStyleSheet(
+            f"QScrollArea{{background:{BG};border:none;}}"
+            f"QScrollBar:horizontal{{height:6px;background:{BG2};}}"
+            f"QScrollBar::handle:horizontal{{background:{BORDER};border-radius:3px;}}")
+        self._fs_container = QWidget()
+        self._fs_container.setStyleSheet(f"background:{BG};")
+        self._fs_layout = QHBoxLayout(self._fs_container)
+        self._fs_layout.setContentsMargins(2,2,2,2)
+        self._fs_layout.setSpacing(4)
+        self._fs_layout.addStretch()
+        self._fs_scroll.setWidget(self._fs_container)
+        fs_lay.addWidget(self._fs_scroll)
+
+        self._filmstrip_widget = fs_wrap
+        lay.addWidget(fs_wrap)
+
         return w
 
     def _build_history_panel(self):
@@ -4950,10 +5315,15 @@ class AstroApp(QMainWindow):
         start_dir = (os.path.dirname(last_file)
                      if last_file and os.path.isfile(last_file)
                      else self._settings.get("last_open_dir", ""))
-        path,_=QFileDialog.getOpenFileName(self,"Open Image", start_dir,
+        paths,_=QFileDialog.getOpenFileNames(self,"Open Image(s)", start_dir,
             _FILE_FILTER)
-        if not path: return
-        self._load_path(path)
+        if not paths: return
+        # İlk dosyayı ana görüntü olarak yükle
+        self._load_path(paths[0])
+        # Ek dosyaları thumbnail şeridine ekle
+        if len(paths) > 1:
+            for p in paths[1:]:
+                self._add_to_filmstrip(p)
 
     def _load_path(self, path):
         """Verilen dosyayı yükle ve ayarlara kaydet."""
@@ -4970,8 +5340,129 @@ class AstroApp(QMainWindow):
             self._add_to_recent(path)
             from gui.settings import save as _save_cfg
             _save_cfg(self._settings)
+            # Filmstrip'e ekle
+            self._add_to_filmstrip(path, img)
         except Exception as e:
             QMessageBox.critical(self,"Error",f"{e}\n\n{traceback.format_exc()}")
+
+    # ── Filmstrip (multi-image thumbnail bar) ─────────────────────────
+    def _add_to_filmstrip(self, path, img=None):
+        """Dosyayı filmstrip'e thumbnail olarak ekle."""
+        import cv2
+        if img is None:
+            try:
+                from core.loader import load_image
+                img = load_image(path)
+            except Exception:
+                return
+
+        # Thumbnail oluştur (56px yüksekliğe sığdır)
+        h, w = img.shape[:2]
+        th = 52
+        tw = max(20, int(w * th / max(h, 1)))
+        thumb = cv2.resize(np.clip(img, 0, 1).astype(np.float32),
+                           (tw, th), interpolation=cv2.INTER_AREA)
+        thumb_u8 = (thumb * 255).clip(0, 255).astype(np.uint8)
+
+        if thumb_u8.ndim == 2:
+            qimg = QImage(thumb_u8.data, tw, th, tw,
+                          QImage.Format.Format_Grayscale8)
+        else:
+            thumb_u8 = np.ascontiguousarray(thumb_u8)
+            qimg = QImage(thumb_u8.data, tw, th, tw * 3,
+                          QImage.Format.Format_RGB888)
+
+        pix = QPixmap.fromImage(qimg.copy())
+
+        # Thumbnail widget
+        frame = QWidget()
+        frame.setFixedSize(tw + 6, 58)
+        frame.setStyleSheet(
+            f"QWidget{{background:{BG2};border:2px solid {BORDER};"
+            f"border-radius:3px;}}"
+            f"QWidget:hover{{border:2px solid {ACCENT};}}")
+        frame.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        frame.setToolTip(os.path.basename(path))
+
+        fl = QVBoxLayout(frame)
+        fl.setContentsMargins(1,1,1,1); fl.setSpacing(0)
+
+        lbl_img = QLabel()
+        lbl_img.setPixmap(pix)
+        lbl_img.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        fl.addWidget(lbl_img)
+
+        # Dosya adı (kısa)
+        fname = os.path.basename(path)
+        if len(fname) > 12:
+            fname = fname[:10] + "…"
+
+        # Tıklama → bu resmi ana viewer'da göster
+        entry = {"path": path, "img": img.copy(), "frame": frame}
+        frame.mousePressEvent = lambda ev, e=entry: self._filmstrip_click(e)
+
+        # Sağ tık → kaldır
+        from functools import partial
+        frame.contextMenuEvent = lambda ev, e=entry: self._filmstrip_remove(e)
+
+        # Stretch'den önce ekle
+        count = self._fs_layout.count()
+        self._fs_layout.insertWidget(count - 1, frame)  # stretch'den önce
+        self._filmstrip_data.append(entry)
+
+        # Aktif olanı vurgula
+        self._filmstrip_highlight(entry)
+
+    def _filmstrip_click(self, entry):
+        """Filmstrip'teki thumbnail'e tıkla → ana viewer'da göster."""
+        img = entry["img"]
+        path = entry["path"]
+        self._orig = img.copy()
+        self._set_image(img, "Original", reset=True)
+        self.lbl_file.setText(os.path.basename(path))
+        h, w = img.shape[:2]
+        ch = "RGB" if img.ndim == 3 else "Gray"
+        self.status.showMessage(
+            f"✅  {os.path.basename(path)}  |  {w}×{h}  |  {ch}")
+        self._filmstrip_highlight(entry)
+
+    def _filmstrip_highlight(self, active_entry):
+        """Aktif thumbnail'i vurgula."""
+        for e in self._filmstrip_data:
+            if e is active_entry:
+                e["frame"].setStyleSheet(
+                    f"QWidget{{background:{BG3};border:2px solid {ACCENT2};"
+                    f"border-radius:3px;}}")
+            else:
+                e["frame"].setStyleSheet(
+                    f"QWidget{{background:{BG2};border:2px solid {BORDER};"
+                    f"border-radius:3px;}}"
+                    f"QWidget:hover{{border:2px solid {ACCENT};}}")
+
+    def _filmstrip_remove(self, entry):
+        """Filmstrip'ten bir resmi kaldır."""
+        entry["frame"].setParent(None)
+        entry["frame"].deleteLater()
+        if entry in self._filmstrip_data:
+            self._filmstrip_data.remove(entry)
+
+    def _filmstrip_clear(self):
+        """Tüm filmstrip'i temizle."""
+        for e in self._filmstrip_data:
+            e["frame"].setParent(None)
+            e["frame"].deleteLater()
+        self._filmstrip_data.clear()
+
+    def _filmstrip_toggle(self):
+        """Filmstrip'i gizle/göster."""
+        vis = self._fs_scroll.isVisible()
+        self._fs_scroll.setVisible(not vis)
+        if vis:
+            self._filmstrip_widget.setFixedHeight(22)
+            self._fs_toggle_btn.setText("▲")
+        else:
+            self._filmstrip_widget.setFixedHeight(90)
+            self._fs_toggle_btn.setText("▼")
 
     def _save_file(self):
         if self._current is None: QMessageBox.information(self,"Info","No image loaded."); return
@@ -5175,36 +5666,22 @@ class AstroApp(QMainWindow):
         p.add_slider("noise_level","BE Noise",0.001,0.1,0.01,3,"Blur Exterminator noise level")
         p.run_requested.connect(lambda s,k="deconv": self._run_key(k,s))
 
-        # Star Removal (Deconv panelinin altinda)
-        p = _make("⭐","Star Removal","stars")
-        p.add_combo("method","Method",
-                    ["starcomposer","starsmalerx","star_shrink","local_median","global_median","inpaint"],
-                    "starcomposer",
-                    "starcomposer — Veralux StarComposer (yildiz yeniden birlestir)\n"
-                    "starsmalerx  — Wavelet yildiz kaldir\n"
-                    "star_shrink  — Yildiz kucultme (cekirdek/halo)\n"
-                    "local_median — Yerel medyan dolgu\n"
-                    "global_median— Genel medyan dolgu\n"
-                    "inpaint      — OpenCV inpainting")
+        # Star Smaller (Deconv panelinin altinda)
+        p = _make("⭐","Star Smaller","stars")
         p.add_slider("strength","Strength",0,1,0.9,2,
-                     "Yildiz azaltma gucu")
+                     "Yıldız küçültme gücü (0=yok, 1=maksimum)")
         p.add_slider("sensitivity","Sensitivity",0,1,0.5,2,
-                     "Yildiz tespiti hassasiyeti")
+                     "Yıldız tespiti hassasiyeti")
         p.add_slider("feather","Feather Radius",1,10,3,1,
-                     "Kenar yumusatma piksel")
+                     "Kenar yumuşatma piksel")
+        p.add_check("protect_nebula","Nebula/Galaksi Koru", True)
         p.add_sep()
-        p.add_slider("shrink_factor","Shrink Factor",0.1,3.0,1.0,2,
-                     "Cekirdek erozyon gucu (star_shrink)")
-        p.add_slider("halo_fill_ratio","Halo Fill Ratio",0,1,0.3,2,
-                     "Halo parlaklik orani (star_shrink)")
-        p.add_slider("star_noise_level","Noise Level",0,50,5.0,1,
-                     "Arka plan gurultu seviyesi (star_shrink)")
-        p.add_slider("star_density_threshold","Density Threshold",0.5,5.0,2.0,1,
-                     "Yildiz tespiti sigma esigi (star_shrink)")
-        p.add_sep()
-        p.add_slider("max_sigma","Max Sigma (klasik)",1,25,6,0)
-        p.add_slider("min_sigma","Min Sigma (klasik)",1,10,1,0)
-        p.add_slider("threshold","Threshold (klasik)",0.001,0.3,0.03,3)
+        p.add_slider("max_sigma","Max Sigma",1,25,6,0,
+                     "DoG filtre max sigma")
+        p.add_slider("min_sigma","Min Sigma",1,10,1,0,
+                     "DoG filtre min sigma")
+        p.add_slider("threshold","Threshold",0.001,0.3,0.03,3,
+                     "Yıldız tespit eşiği")
         p.run_requested.connect(lambda s,k="stars": self._run_key(k,s))
 
         # Star Shrink (dedicated panel)
@@ -5322,9 +5799,10 @@ class AstroApp(QMainWindow):
         # Color Calibration
         p = _make("🎨","Color Calibration","color")
         p.add_combo("method","Method",
-                    ["spcc_g2v","avg_spiral","vectra","alchemy","pcc","ai_neutral","photometric","white_balance"],
-                    "spcc_g2v",
-                    "spcc_g2v   — G2V Yildiz ref. (Gunes, 5778K) — EN DOGRU RENK\n"
+                    ["pcc_solve","spcc_g2v","avg_spiral","vectra","alchemy","pcc","ai_neutral","photometric","white_balance"],
+                    "pcc_solve",
+                    "pcc_solve  — Plate Solve + Katalog PCC (EN DOGRU)\n"
+                    "spcc_g2v   — G2V Yildiz ref. (Gunes, 5778K)\n"
                     "avg_spiral — Average Spiral Galaxy (PixInsight PCC default)\n"
                     "vectra     — Veralux Vectra (LCH renk cerrahisi)\n"
                     "alchemy    — Veralux Alchemy (narrowband karisim)\n"
@@ -5342,11 +5820,30 @@ class AstroApp(QMainWindow):
         p.add_slider("iterations","Iterations",1,5,1,0)
         p.run_requested.connect(lambda s,k="morph": self._run_key(k,s))
 
-        # Galaxy Detection
-        p = _make("🌀","Galaxy Detection","galaxy")
-        p.add_slider("percentile","Threshold (%)",50,99,95,0)
-        p.add_slider("blur_size","Blur (px)",11,101,31,0)
-        p.run_requested.connect(lambda s,k="galaxy": self._run_key(k,s))
+        # Star Aberration Remover
+        p = _make("🌀","Aberration Remover","aberration")
+        p.add_combo("method","Mod",
+                    ["auto","chromatic","coma","roundness","spike"],
+                    "auto",
+                    "auto      — Tüm aberasyonları otomatik düzelt\n"
+                    "chromatic — Kromatik aberasyon (renk saçağı)\n"
+                    "coma      — Koma düzeltme (kenar yıldızları)\n"
+                    "roundness — Yıldız yuvarlaklığı (astigmatizm)\n"
+                    "spike     — Difraksiyon spike temizleme")
+        p.add_sep()
+        p.add_slider("chromatic_strength","Kromatik Güç",0,1,0.8,2,
+                     "Renk saçağı (mor/yeşil fringe) düzeltme gücü")
+        p.add_slider("coma_strength","Koma Güç",0,1,0.7,2,
+                     "Kenar yıldız kuyruğu düzeltme gücü")
+        p.add_slider("roundness_strength","Yuvarlaklık Güç",0,1,0.6,2,
+                     "Eliptik yıldızları yuvarlaklaştırma gücü")
+        p.add_slider("spike_strength","Spike Güç",0,1,0.0,2,
+                     "Difraksiyon spike temizleme gücü")
+        p.add_sep()
+        p.add_slider("sensitivity","Hassasiyet",0.1,1.0,0.5,1,
+                     "Yıldız tespiti hassasiyeti — düşük=sadece parlak")
+        p.add_check("protect_nebula","Nebula Koru",True)
+        p.run_requested.connect(lambda s,k="aberration": self._run_key(k,s))
 
         # Histogram Stretch
         p = _make("📊","Histogram Stretch","stretch")
@@ -5782,7 +6279,7 @@ class AstroApp(QMainWindow):
             self.status.showMessage(f"🌌  {msg}")
 
         def _on_done(result):
-            self._workers_cleanup(worker)
+            self._cleanup_worker(worker)
             self._tb_starless.setEnabled(True)
             self._tb_starless.setText("🌌\nStarless")
             self.pbar.hide(); self.pbar.setRange(0, 100)
@@ -5817,15 +6314,6 @@ class AstroApp(QMainWindow):
         worker.finished.connect(lambda _: self._cleanup_worker(worker))
         worker.start()
 
-    def _cleanup_worker(self, worker):
-        try: self._workers.remove(worker)
-        except ValueError: pass
-
-    def _workers_cleanup(self, worker):
-        try: self._workers.remove(worker)
-        except ValueError: pass
-
-
     # ── Panel navigation & customization ────────────────────────────────
     def _jump_to_panel(self, key: str):
         """Scroll to and expand a specific panel, highlight its button."""
@@ -5850,17 +6338,37 @@ class AstroApp(QMainWindow):
             else:      panel.collapse()
 
     def _open_panel_customize(self):
-        """Dialog to reorder and show/hide process panels."""
-        dlg = PanelCustomizeDialog(
+        """Flyout to reorder and show/hide process panels (stays inside app)."""
+        # Close existing customize flyout if open
+        if hasattr(self, "_cust_flyout") and self._cust_flyout:
+            try: self._cust_flyout.close()
+            except Exception: pass
+            self._cust_flyout = None
+            return
+
+        # Find anchor button
+        anchor = getattr(self, "_tb_customize", None)
+        flyout = PanelCustomizeFlyout(
             panels      = self._panels,
             order       = self._panel_order,
             visible     = self._panel_visible,
+            anchor_btn  = anchor,
             parent      = self,
         )
-        if dlg.exec() == QDialog.DialogCode.Accepted:
-            self._panel_order   = dlg.get_order()
-            self._panel_visible = dlg.get_visible()
+
+        def _on_applied(order, visible):
+            self._panel_order   = order
+            self._panel_visible = visible
             self._apply_panel_layout()
+
+        def _on_closed():
+            self._cust_flyout = None
+
+        flyout.applied.connect(_on_applied)
+        flyout.closed.connect(_on_closed)
+        self._cust_flyout = flyout
+        flyout.show()
+        flyout._position()
 
     def _apply_panel_layout(self):
         """Re-order and show/hide panels according to current settings."""
@@ -5959,12 +6467,16 @@ class AstroApp(QMainWindow):
         self._redo_stack.clear()
         if reset:
             self._history=[(label,img.copy())]
-            self.hist_panel.lst.clear(); self.hist_panel.push(label,0)
+            self.hist_panel.lst.clear(); self.hist_panel.push(label, 0)
             self.lbl_step.setText(f"Step: {label}")
         else:
             self._history.append((label,img.copy()))
+            # Bellek sınırı: en eski durumları sil
+            _MAX_HIST = 30
+            while len(self._history) > _MAX_HIST:
+                self._history.pop(0)
             idx=len(self._history)-1
-            self.hist_panel.push(label,idx)
+            self.hist_panel.push(label, idx)
             self.lbl_step.setText(f"Step: {label}  ({idx})")
         self._update_undo_redo_btns()
         # Use selected slot
@@ -5990,17 +6502,18 @@ class AstroApp(QMainWindow):
     # ── Process key→function dispatch ───────────────────────────────────
     def _run_key(self, key, params, preview_only=False):
         """Dispatch process key to the correct function (no forward-ref issue)."""
+        print(f"[DEBUG _run_key] key={key}, params_keys={list(params.keys())}")
         self._preview_only = preview_only
         _dispatch = {
             "bg":      ("processing.background",       "remove_gradient_dispatch"),
             "noise":   ("processing.noise_reduction",   "reduce_noise"),
-            "stars":   ("processing.star_removal",      "remove_stars"),
+            "stars":   ("processing.starsmaller",        "reduce_stars"),
             "deconv":  ("processing.deconvolution", "deconvolve_dispatch"),
             "sharp":   ("processing.sharpening",        "sharpen"),
             "nebula":  ("ai.nebula_enhancer",           "enhance_nebula"),
             "color":   ("processing.color_calibration", "calibrate_color"),
             "morph":   ("processing.morphology",        "morphological"),
-            "galaxy":  ("ai.galaxy_detector",           "detect_galaxies"),
+            "aberration": ("processing.star_aberration",  "fix_aberration"),
             "stretch": ("processing.stretch",           "stretch"),  # veralux overrides below
             "star_shrink": ("processing.star_shrink",   "star_shrink"),
             "graxpert":    ("processing.graxpert_engine", "graxpert_extract"),
@@ -6032,6 +6545,29 @@ class AstroApp(QMainWindow):
 
         if key == "color":
             method = params.get("method","vectra")
+            if method == "pcc_solve":
+                # Plate solve sonucunu parametrelere ekle
+                solve = getattr(self, '_last_solve_result', None)
+                if solve and solve.get("ra") is not None:
+                    params["solve_ra"] = solve["ra"]
+                    params["solve_dec"] = solve["dec"]
+                    params["solve_scale"] = solve.get("scale_arcsec", 1.8)
+                    params["solve_rotation"] = solve.get("rotation_deg", 0.0)
+                else:
+                    # Settings'ten dene
+                    ra = self._settings.get("last_platesolve_ra")
+                    dec = self._settings.get("last_platesolve_dec")
+                    if ra and dec:
+                        params["solve_ra"] = float(ra)
+                        params["solve_dec"] = float(dec)
+                        params["solve_scale"] = float(self._settings.get("pixel_size_um", 4.63))
+                    else:
+                        QMessageBox.warning(self, "PCC",
+                            "Önce Plate Solve yapın!\n"
+                            "Plate solve sonucu olmadan katalog tabanlı\n"
+                            "renk kalibrasyonu yapılamaz.")
+                        return
+                self._run_worker(key, fn, params); return
             if method == "vectra":
                 def _vec_fn(img, **kw):
                     import numpy as _np
@@ -6060,60 +6596,18 @@ class AstroApp(QMainWindow):
             self._run_worker(key, fn, params); return
 
         if key == "stars":
-            method = params.get("method","starsmalerx")
-            if method == "starcomposer":
-                def _sc_fn(img, **kw):
-                    import numpy as _np
-                    from processing.veralux_starcomposer import process_star_pipeline
-                    strength = float(kw.get("strength", 0.9))
-                    d = strength * 5 + 0.5
-                    grip = float(kw.get("sensitivity", 0.5))
-                    # StarComposer expects (3,H,W) CHW
-                    img_chw = img.transpose(2,0,1).astype(_np.float32) if img.ndim==3 else img
-                    r = process_star_pipeline(img_chw, D=d, b=0.0, grip=grip,
-                                              shadow=0.0, reduction=0.0, healing=0.0,
-                                              lsr=0.0, weights=(0.2126,0.7152,0.0722),
-                                              use_adaptive=True)
-                    if r is not None and isinstance(r, _np.ndarray):
-                        # output (3,H,W) → (H,W,3)
-                        if r.ndim==3 and r.shape[0]==3: r=r.transpose(1,2,0)
-                        return _np.clip(r,0,1).astype("float32")
-                    return img
-                self._run_worker(key, _sc_fn, params); return
-            if method == "starsmalerx":
-                def _sxt_fn(img, **kw):
-                    from processing.starsmalerx import reduce_stars
-                    strength    = float(kw.get("strength",    0.9))
-                    sensitivity = float(kw.get("sensitivity", 0.5))
-                    feather     = float(kw.get("feather",     3.0))
-                    if img.ndim == 2:
-                        img3 = img[:,:,None]
-                        r, _ = reduce_stars(img3, strength=strength,
-                                            sensitivity=sensitivity,
-                                            feather_radius=feather)
-                        return r[:,:,0]
-                    r, _ = reduce_stars(img, strength=strength,
-                                        sensitivity=sensitivity,
-                                        feather_radius=feather)
-                    import numpy as _np
-                    return _np.clip(r, 0, 1).astype("float32")
-                self._run_worker(key, _sxt_fn, params)
-                return
-            if method == "star_shrink":
-                def _shrink_fn(img, **kw):
-                    from processing.star_shrink import star_shrink
-                    import numpy as _np
-                    return star_shrink(
-                        img,
-                        shrink_factor=float(kw.get("shrink_factor", 1.0)),
-                        halo_fill_ratio=float(kw.get("halo_fill_ratio", 0.3)),
-                        noise_level=float(kw.get("star_noise_level", 5.0)),
-                        star_density_threshold=float(kw.get("star_density_threshold", 2.0)),
-                    )
-                self._run_worker(key, _shrink_fn, params)
-                return
-            # fallback: eski remove_stars
-            self._run_worker(key, fn, params)
+            def _smaller_fn(img, **kw):
+                from processing.starsmaller import reduce_stars
+                import numpy as _np
+                r, _ = reduce_stars(img,
+                    strength=float(kw.get("strength", 0.9)),
+                    sensitivity=float(kw.get("sensitivity", 0.5)),
+                    feather=int(kw.get("feather", 3)),
+                    max_sigma=int(kw.get("max_sigma", 6)),
+                    min_sigma=int(kw.get("min_sigma", 1)),
+                    threshold=float(kw.get("threshold", 0.03)))
+                return _np.clip(r, 0, 1).astype("float32")
+            self._run_worker(key, _smaller_fn, params)
             return
 
         if key == "star_shrink":
@@ -6492,11 +6986,13 @@ class AstroApp(QMainWindow):
             self._run_worker(key, fn, params)
 
     def _run_worker(self, key, fn, params):
+        print(f"[DEBUG _run_worker] key={key}, fn={fn.__name__ if hasattr(fn,'__name__') else fn}, current={'set' if self._current is not None else 'None'}")
         if self._current is None:
             QMessageBox.information(self,"Info","Please open an image first."); return
 
         active = [w for w in self._workers if w.isRunning()]
         if active:
+            print(f"[DEBUG _run_worker] BLOCKED — {len(active)} workers still running")
             self.status.showMessage("⚠  A process is already running. Please wait…"); return
 
         panel = self._panels.get(key)
@@ -6556,10 +7052,10 @@ class AstroApp(QMainWindow):
         # Label oluştur
         method_names = {
             "bg":"BG Extract","noise":"Noise Reduce","deconv":"Deconvolve",
-            "stars":"Star Remove","star_shrink":"Star Shrink",
+            "stars":"Star Smaller","star_shrink":"Star Shrink",
             "sharp":"Sharpen","color":"Color Cal",
             "stretch":"Stretch","nebula":"Nebula","morph":"Morph",
-            "galaxy":"Galaxy","crop":"Crop",
+            "aberration":"Aberr Fix","crop":"Crop",
         }
         label = method_names.get(key, key)
 

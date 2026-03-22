@@ -35,7 +35,7 @@ class ProcessWorker(QThread):
     def run(self):
         try:
             result = self._fn(self._image, **self._kwargs)
-            # Bazı fonksiyonlar (noisexterminator, starsmalerx) tuple döner
+            # Bazı fonksiyonlar (noisexterminator, starsmaller) tuple döner
             if isinstance(result, tuple):
                 result = result[0]
             self.finished.emit(result)

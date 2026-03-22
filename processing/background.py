@@ -42,7 +42,7 @@ def _dbe_spline(img, grid_size=16):
     ww = max(8, int(w * scale))
     wh = max(8, int(h * scale))
 
-    small = cv2.resize(img, (ww, wh), interpolation=cv2.INTER_AREA) if scale < 1 else img.copy()
+    small = cv2.resize(img, (ww, wh), interpolation=cv2.INTER_AREA) if scale < 1 else img
     gray_s = small if small.ndim == 2 else small.mean(axis=2)
     thr = np.percentile(gray_s, 70)
 
@@ -170,9 +170,8 @@ def _ai_gradient(img, degree=3):
     def fit_ch(ch):
         m = mask_fit.ravel() & (ch.ravel() < np.percentile(ch.ravel()[mask_fit.ravel()], 90))
         if m.sum() < len(feats) + 1:
-            return cv2.resize(_gaussian_bg(ch.reshape(fh, fw) if ch.ndim==1
-                                           else ch, 201), (w, h),
-                              interpolation=cv2.INTER_CUBIC).ravel()
+            ch2d = ch.reshape(fh, fw) if ch.ndim == 1 else ch
+            return _gaussian_bg(ch2d, 201).ravel()
         coef, _, _, _ = np.linalg.lstsq(A[m], ch.ravel()[m], rcond=None)
         return (A @ coef).astype(np.float32)
 

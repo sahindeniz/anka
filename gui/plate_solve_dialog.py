@@ -15,7 +15,7 @@ Siril'deki "Image Plate Solver" dialogunun tam karşılığı:
   • Progress log + sonuç kartı
 """
 
-import os, re, sys
+import os, sys
 import numpy as np
 
 from PyQt6.QtWidgets import (
@@ -91,6 +91,39 @@ _GRP = (
 _LBL = f"color:{MUTED};font-size:10px;"
 
 
+def _parse_coord(value, is_ra=False):
+    """FITS header RA/Dec değerini dereceye çevir.
+    Desteklenen formatlar:
+      - float/int (derece)
+      - "12 34 56.7" veya "12:34:56.7" (sexagesimal)
+      - "+02 06 10.5" (Dec, işaretli)
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip()
+    # Direkt sayı mı?
+    try:
+        return float(s)
+    except ValueError:
+        pass
+    # Sexagesimal parse: boşluk, iki nokta veya h/m/s ayırıcı
+    import re
+    s = s.replace("h", " ").replace("m", " ").replace("s", "")
+    s = s.replace("d", " ").replace("'", " ").replace('"', "")
+    parts = re.split(r"[:\s]+", s.strip())
+    if len(parts) >= 2:
+        sign = -1 if parts[0].startswith("-") else 1
+        vals = [abs(float(p)) for p in parts[:3]]
+        deg = vals[0] + vals[1] / 60.0
+        if len(vals) >= 3:
+            deg += vals[2] / 3600.0
+        deg *= sign
+        if is_ra:
+            deg *= 15.0  # saat → derece
+        return deg
+    raise ValueError(f"Koordinat parse edilemedi: {value}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  Worker thread
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,6 +146,7 @@ class _SolveWorker(QThread):
                 image         = self.image,
                 astap_exe     = p["astap_exe"],
                 db_path       = p["db_path"],
+                catalog_id    = p.get("catalog_id", ""),
                 search_radius = p["search_radius"],
                 downsample    = p["downsample"],
                 min_stars     = p["min_stars"],
@@ -935,23 +969,36 @@ class PlateSolveDialog(QDialog):
 
             found = []
             if focal:
-                # Focal length'i aperture ve ratio'dan ters hesapla
-                focal_val = float(focal)
-                aperture  = self._sp_aperture.value()
-                reducer   = self._sp_reducer.value()
-                if aperture > 0 and reducer > 0:
-                    new_ratio = focal_val / (aperture * reducer)
-                    self._sp_fratio.setValue(round(new_ratio, 1))
-                found.append(f"FL={focal_val:.1f}mm")
+                try:
+                    focal_val = float(focal)
+                    aperture  = self._sp_aperture.value()
+                    reducer   = self._sp_reducer.value()
+                    if aperture > 0 and reducer > 0:
+                        new_ratio = focal_val / (aperture * reducer)
+                        self._sp_fratio.setValue(round(new_ratio, 1))
+                    found.append(f"FL={focal_val:.1f}mm")
+                except (ValueError, TypeError):
+                    pass
             if pixel:
-                self._sp_pixel.setValue(float(pixel))
-                found.append(f"px={float(pixel):.2f}µm")
+                try:
+                    self._sp_pixel.setValue(float(pixel))
+                    found.append(f"px={float(pixel):.2f}µm")
+                except (ValueError, TypeError):
+                    pass
             if ra is not None:
-                self._ra_widget.set_from_deg(float(ra))
-                found.append(f"RA={float(ra):.4f}°")
+                try:
+                    ra_deg = _parse_coord(ra, is_ra=True)
+                    self._ra_widget.set_from_deg(ra_deg)
+                    found.append(f"RA={ra_deg:.4f}°")
+                except (ValueError, TypeError):
+                    pass
             if dec is not None:
-                self._dec_widget.set_from_deg(float(dec))
-                found.append(f"Dec={float(dec):+.4f}°")
+                try:
+                    dec_deg = _parse_coord(dec, is_ra=False)
+                    self._dec_widget.set_from_deg(dec_deg)
+                    found.append(f"Dec={dec_deg:+.4f}°")
+                except (ValueError, TypeError):
+                    pass
 
             if found:
                 self._log_line("📋 FITS header: " + "  ".join(found))
@@ -999,13 +1046,14 @@ class PlateSolveDialog(QDialog):
         params = {
             "astap_exe":     exe,
             "db_path":       self._get_catalog_db_path(),
+            "catalog_id":    self._combo_catalog.currentText(),
             "search_radius": self._sp_radius.value(),
             "downsample":    (2 if self._chk_downsample.isChecked()
                               else self._sp_downsample.value()),
             "min_stars":     self._sp_min_stars.value(),
             "timeout":       self._sp_timeout.value(),
-            "ra_hint":       ra_deg  if ra_deg  != 0.0 else None,
-            "dec_hint":      dec_deg if dec_deg != 0.0 else None,
+            "ra_hint":       ra_deg  if (ra_deg != 0.0 or dec_deg != 0.0) else None,
+            "dec_hint":      dec_deg if (ra_deg != 0.0 or dec_deg != 0.0) else None,
             "fov_hint":      fov_deg if fov_deg > 0.01 else None,
         }
 
@@ -1185,44 +1233,26 @@ class _CollapsibleGroup(QWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 def _find_catalog(exe_dir: str, cat_id: str) -> str:
     """
-    ASTAP katalog dosyasının yolunu döner.
+    ASTAP katalog klasörünü döner (-d parametresi için).
 
-    .pkg dosyası için TAM DOSYA YOLUNU döner (ASTAP -d ile kullanmak için).
-    .dat klasörü için KLASÖR YOLUNU döner.
-
-    Dönüş değeri:
-      - "C:/.../d80_star_database.pkg"  →  .pkg tam yolu (astap -d bu yolu ister)
-      - "C:/.../G17"                    →  .dat klasörü
-      - ""                               →  bulunamadı
+    .pkg uzantılı klasörler dahil tüm formatları tanır.
+    Dönüş: .1476 dosyalarını İÇEREN klasör yolu, veya "".
     """
     if not exe_dir or not os.path.isdir(exe_dir):
         return ""
 
-    cat_lower  = cat_id.lower()
-    EXTENSIONS = (".pkg", ".dat", ".bin", ".cat")
+    cat_lower = cat_id.lower()
 
-    def _find_pkg_full_path(directory: str, prefix: str) -> str:
-        """Klasörde prefix.pkg dosyasının TAM YOLUNU döner."""
-        if not os.path.isdir(directory):
-            return ""
-        try:
-            for f in sorted(os.listdir(directory)):
-                fl = f.lower()
-                if fl.startswith(prefix) and fl.endswith(".pkg"):
-                    return os.path.join(directory, f)  # TAM DOSYA YOLU
-        except Exception:
-            pass
-        return ""
-
-    def _has_dat_files(directory: str, prefix: str) -> bool:
-        """Klasörde prefix ile başlayan .dat/.bin dosyası var mı?"""
+    def _has_db_files(directory: str, prefix: str) -> bool:
+        """Klasörde prefix ile başlayan veritabanı dosyası var mı?"""
         if not os.path.isdir(directory):
             return False
         try:
             for f in os.listdir(directory):
                 fl = f.lower()
                 if fl.startswith(prefix) and any(
-                        fl.endswith(e) for e in (".dat", ".bin", ".cat")):
+                        fl.endswith(e) for e in
+                        (".1476", ".290", ".dat", ".bin", ".cat", ".pkg")):
                     return True
         except Exception:
             pass
@@ -1234,47 +1264,24 @@ def _find_catalog(exe_dir: str, cat_id: str) -> str:
         if not base or not os.path.isdir(base):
             continue
 
-        # 1. Direkt klasörde .pkg dosyası var mı? → TAM DOSYA YOLU döndür
-        pkg_path = _find_pkg_full_path(base, cat_lower)
-        if pkg_path:
-            return pkg_path  # "C:/Program Files\astap/d80_star_database.pkg"
-
-        # 2. Alt klasörde .pkg var mı? (D80/d80_star_database.pkg)
-        for sub_name in [cat_id, cat_id.lower(), cat_id.upper()]:
-            sub = os.path.join(base, sub_name)
-            if os.path.isdir(sub):
-                pkg_path2 = _find_pkg_full_path(sub, cat_lower)
-                if pkg_path2:
-                    return pkg_path2  # TAM DOSYA YOLU
-
-                # .dat formatı — klasör yolunu döndür
-                if _has_dat_files(sub, cat_lower):
-                    return sub
-
-                # Klasör var, içinde dosya var (format bilinmiyor)
-                try:
-                    if os.listdir(sub):
-                        return sub
-                except Exception:
-                    pass
-
-        # 3. Direkt klasörde .dat dosyaları var mı?
-        if _has_dat_files(base, cat_lower):
-            return base
-
-        # 4. Büyük/küçük harf farklı alt klasörler
+        # 1. Alt klasör veya .pkg klasörü ara (d80_star_database.pkg/ gibi)
         try:
             for entry in os.listdir(base):
-                if entry.upper() == cat_id.upper():
-                    full = os.path.join(base, entry)
-                    if os.path.isdir(full):
-                        pkg3 = _find_pkg_full_path(full, cat_lower)
-                        if pkg3:
-                            return pkg3
-                        if _has_dat_files(full, cat_lower):
-                            return full
+                full = os.path.join(base, entry)
+                if not os.path.isdir(full):
+                    continue
+                el = entry.lower()
+                # Tam eşleşme (D80, d80) veya prefix eşleşme (d80_star_database.pkg)
+                if el == cat_lower or el.startswith(cat_lower):
+                    # İçinde .1476 dosyaları var mı?
+                    if _has_db_files(full, cat_lower):
+                        return full
         except Exception:
             pass
+
+        # 2. Direkt klasörde .1476/.dat dosyaları var mı?
+        if _has_db_files(base, cat_lower):
+            return base
 
     return ""
 

@@ -20,7 +20,7 @@ def sharpen(image, method="multiscale_vlc", radius=2.0, amount=1.0,
         sw, sh = max(4, int(w * scale)), max(4, int(h * scale))
         small = cv2.resize(img, (sw, sh), interpolation=cv2.INTER_AREA)
     else:
-        small = img.copy()
+        small = img
 
     fn_map = {
         "multiscale_vlc": lambda x: _multiscale_vlc(x, int(scale_levels), float(amount)),
@@ -55,7 +55,7 @@ def _unsharp(img, radius, amount, threshold):
 
 def _multiscale_vlc(img, levels, amount):
     """Wavelet-like multiscale — fully vectorised, uint8 gaussian."""
-    residual = img.copy()
+    residual = img.astype(np.float32)
     u8 = (img * 255).astype(np.uint8)
     for lv in range(min(levels, 4)):
         sigma = 2.0 ** lv

@@ -21,7 +21,6 @@ import tempfile
 import shutil
 import glob
 import time
-import re
 import numpy as np
 
 
@@ -29,6 +28,7 @@ def solve_image(
     image,
     astap_exe: str,
     db_path: str = "",
+    catalog_id: str = "",
     search_radius: float = 30.0,
     downsample: int = 0,
     min_stars: int = 10,
@@ -52,6 +52,9 @@ def solve_image(
             "'🔍 ASTAP Bul' butonunu kullanın."
         )
 
+    # CLI sürümü varsa onu tercih et (GUI exe pencere açabilir)
+    astap_exe = _prefer_cli_exe(astap_exe)
+
     img = np.clip(image, 0, 1).astype(np.float32)
     h, w = img.shape[:2]
     cb(f"[1/4] Hazirlanıyor ({w}x{h})...")
@@ -71,24 +74,53 @@ def solve_image(
         else:
             cb("[1/4] FITS kaydedildi")
 
-        cmd = _build_cmd(
-            astap_exe, fits_in, db_path,
-            search_radius, downsample, min_stars,
-            ra_hint, dec_hint, fov_hint
-        )
-        # Tam komutu log'a yaz (debug için)
-        cmd_str = " ".join(f'"{c}"' if " " in str(c) else str(c) for c in cmd)
-        cb(f"[2/4] Komut:\n      {cmd_str}")
+        # ── RA/Dec ipucu varsa radius'u otomatik küçült ──
+        effective_radius = search_radius
+        if ra_hint is not None and dec_hint is not None and search_radius >= 90:
+            effective_radius = 30.0
+            cb(f"  ℹ RA/Dec ipucu verildi, radius {search_radius}° → {effective_radius}° olarak küçültüldü")
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                cwd=tmpdir,
+        # ── FOV retry stratejisi: verilen FOV başarısızsa 2x ve 4x dene ──
+        fov_attempts = [fov_hint]
+        if fov_hint and float(fov_hint) > 0:
+            fov_attempts += [float(fov_hint) * 2, float(fov_hint) * 4]
+        else:
+            fov_attempts = [None]  # sadece auto
+
+        proc = None
+        for attempt_i, fov_try in enumerate(fov_attempts):
+            cmd = _build_cmd(
+                astap_exe, fits_in, db_path, catalog_id,
+                effective_radius, downsample, min_stars,
+                ra_hint, dec_hint, fov_try
             )
-        except subprocess.TimeoutExpired:
+            cmd_str = " ".join(
+                f'"{c}"' if " " in str(c) else str(c) for c in cmd)
+            attempt_label = (f" [deneme {attempt_i+1}/{len(fov_attempts)},"
+                             f" FOV={fov_try:.1f}°]") if fov_try else ""
+            cb(f"[2/4] Komut{attempt_label}:\n      {cmd_str}")
+
+            try:
+                # Her denemeye tam timeout ver (bölme)
+                proc = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(60, timeout),
+                    cwd=tmpdir,
+                )
+            except subprocess.TimeoutExpired:
+                cb(f"      ⏱ Zaman aşımı (deneme {attempt_i+1})")
+                continue
+            except FileNotFoundError:
+                return _err(f"ASTAP başlatılamadı:\n{astap_exe}")
+
+            if proc.returncode == 0:
+                break  # Çözüm bulundu
+            elif attempt_i < len(fov_attempts) - 1:
+                cb(f"      Çözüm bulunamadı (FOV={fov_try}°), farklı FOV deneniyor…")
+
+        if proc is None:
             return _err(
                 f"ASTAP {timeout} saniyede tamamlanamadı.\n\n"
                 "Öneriler:\n"
@@ -96,8 +128,6 @@ def solve_image(
                 "• Search radius'u küçültün\n"
                 "• RA/Dec ipucu girin"
             )
-        except FileNotFoundError:
-            return _err(f"ASTAP başlatılamadı:\n{astap_exe}")
 
         solve_time = time.time() - t_start
         cb(f"[3/4] Çıkış kodu: {proc.returncode}  ({solve_time:.1f}s)")
@@ -147,15 +177,24 @@ def solve_image(
                 reason_parts.append(f"ASTAP: {warning}")
             reason = ("\n• ".join(reason_parts) + "\n\n") if reason_parts else ""
 
+            tips = []
+            if search_radius < 180:
+                tips.append(
+                    f"• Search radius'u artırın ({search_radius:.0f}° → {min(180, search_radius*2):.0f}°)")
+            if min_stars > 5:
+                tips.append(
+                    f"• Min Stars'ı azaltın ({min_stars} → {max(5, min_stars//2)})")
+            tips.append("• RA/Dec ipucu girin")
+            tips.append("• FOV ipucu girin")
+            tips.append("• Katalog yolunu kontrol edin")
+            if search_radius >= 180:
+                tips.append("• Görüntü kalitesini kontrol edin (çok karanlık/parlak olabilir)")
+                tips.append("• Downsample=0 (auto) deneyin")
+
             return _err(
                 f"Plate solve başarısız.\n\n"
                 f"{'• ' + reason if reason else ''}"
-                f"Öneriler:\n"
-                f"• Search radius'u artırın ({search_radius}° → {min(180, search_radius*2):.0f}°)\n"
-                f"• Min Stars'ı azaltın ({min_stars} → {max(5, min_stars//2)})\n"
-                f"• RA/Dec ipucu girin\n"
-                f"• FOV ipucu girin\n"
-                f"• Katalog yolunu kontrol edin",
+                f"Öneriler:\n" + "\n".join(tips),
                 extra=result,
             )
 
@@ -194,63 +233,79 @@ def _save_mono_fits(img, path: str):
             new_h = int(h * scale + 0.5)
             mono = cv2.resize(mono, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
 
-    # 16-bit uint — ASTAP ile en uyumlu format
+    # 16-bit uint — astropy BZERO/BSCALE'i otomatik yonetir
     mono16 = np.clip(mono * 65535.0, 0, 65535).astype(np.uint16)
 
     hdu = _fits.PrimaryHDU(mono16)
-    hdu.header["SIMPLE"]  = True
-    hdu.header["BITPIX"]  = 16
-    hdu.header["NAXIS"]   = 2
-    hdu.header["NAXIS1"]  = mono16.shape[1]
-    hdu.header["NAXIS2"]  = mono16.shape[0]
-    hdu.header["BZERO"]   = 32768
-    hdu.header["BSCALE"]  = 1
+    # NOT: BZERO/BSCALE elle ayarlamayın — astropy uint16 için
+    # otomatik BZERO=32768 ekler. Elle eklersek çift uygulanır.
     hdu.writeto(path, overwrite=True)
 
 
-def _build_cmd(exe, fits_in, db_path, radius, downsample, min_stars,
+def _build_cmd(exe, fits_in, db_path, catalog_id, radius, downsample, min_stars,
                ra_hint, dec_hint, fov_hint):
     """
-    ASTAP parametreleri:
-      -d    : katalog yolu — .pkg için TAM DOSYA YOLU, klasör için klasör yolu
-      -ra   : RA SAAT cinsinden (H.HHHH)
+    ASTAP CLI parametreleri (CLI-2025 referans):
+      -f    : giriş dosyası
+      -d    : veritabanı KLASÖR yolu
+      -D    : veritabanı kısaltması (d80, d50, g17 vb.)
+      -r    : arama yarıçapı (derece)
+      -s    : maksimum yıldız sayısı (varsayılan 500)
+      -m    : minimum yıldız boyutu arcsec (varsayılan 1.5)
+      -z    : downsample (0=auto, 1=yok, 2=2x, 4=4x)
+      -ra   : RA saat cinsinden (H.HHHH)
       -spd  : SPD = Dec + 90 (derece)
+      -fov  : görüş alanı çapı (derece, 0=auto)
     """
     cmd = [exe, "-f", fits_in]
 
-    # ── Database yolu — ASTAP klasor yolu + veritabani adi bekler ──
+    # ── Database — -d klasör yolu ──
     if db_path:
-        db_path_str = str(db_path).strip()
-        if os.path.isfile(db_path_str):
-            # .pkg dosya yolu → klasoru al
-            db_dir = os.path.dirname(db_path_str)
-            cmd += ["-d", db_dir]
-        elif os.path.isdir(db_path_str):
+        db_path_str = str(db_path).strip().strip('"').strip("'")
+
+        # .pkg uzantılı ama KLASÖR olabilir (ASTAP paket formatı)
+        if os.path.isdir(db_path_str):
             cmd += ["-d", db_path_str]
+        elif os.path.isfile(db_path_str):
+            # Gerçek dosya ise klasörünü al
+            cmd += ["-d", os.path.dirname(db_path_str)]
         else:
-            # Belki prefix verilmistir (d80 gibi) — oldugu gibi gonder
-            cmd += ["-d", db_path_str]
+            # Belki kisaltma verilmistir (d80 gibi) — -D ile gonder
+            cmd += ["-D", db_path_str]
 
     cmd += ["-r", f"{float(radius):.1f}"]
-    cmd += ["-m", str(int(min_stars))]
 
-    # ── Downsample — kucuk goruntuler icin ASLA downsample yapma ──
-    if downsample and int(downsample) > 0:
+    # -s max yildiz sayisi (varsayilan 500, dusuk deger cozumu zorlastirir)
+    cmd += ["-s", "500"]
+
+    # ── Downsample — ASTAP: 0=auto, 1=yok, 2=2x, 4=4x ──
+    if downsample and int(downsample) > 1:
         cmd += ["-z", str(int(downsample))]
     else:
-        # ASTAP auto-downsample yapmasin — kucuk resimlerde sorun cikarir
+        # -z 0 = auto-detect (ASTAP kendi karar verir)
         cmd += ["-z", "0"]
 
-    if ra_hint is not None and float(ra_hint) != 0.0:
-        hours = float(ra_hint) / 15.0
-        cmd += ["-ra", f"{hours:.6f}"]
+    if ra_hint is not None:
+        ra_val = float(ra_hint)
+        if ra_val != 0.0 or dec_hint is not None:
+            hours = ra_val / 15.0
+            cmd += ["-ra", f"{hours:.6f}"]
 
-    if dec_hint is not None and float(dec_hint) != 0.0:
+    if dec_hint is not None:
         spd = float(dec_hint) + 90.0
         cmd += ["-spd", f"{spd:.4f}"]
 
     if fov_hint is not None and float(fov_hint) > 0.0:
         cmd += ["-fov", f"{float(fov_hint):.3f}"]
+    else:
+        # FOV bilinmiyorsa auto-detect (0)
+        cmd += ["-fov", "0"]
+
+    # Daha yüksek tolerance — varsayılan 0.007 çok katı
+    cmd += ["-t", "0.02"]
+
+    # Progress log — çıktıyı zenginleştir
+    cmd += ["-progress"]
 
     return cmd
 
@@ -366,6 +421,15 @@ def _build_hint_message(proc, db_path: str) -> str:
     return "\n\n".join(parts)
 
 
+def _prefer_cli_exe(exe_path: str) -> str:
+    """astap.exe yerine astap_cli.exe varsa onu döndür (pencere açmaz)."""
+    d = os.path.dirname(exe_path)
+    cli = os.path.join(d, "astap_cli.exe")
+    if os.path.isfile(cli):
+        return cli
+    return exe_path
+
+
 def find_astap_exe() -> str:
     """ASTAP'ı yaygın konumlarda arar."""
     candidates = []
@@ -378,7 +442,7 @@ def find_astap_exe() -> str:
             os.path.expanduser("~"),
             r"C:\astap", r"D:\astap", r"C:\Program Files\astap",
         ]
-        names   = ["astap.exe", "ASTAP.exe"]
+        names   = ["astap_cli.exe", "astap.exe", "ASTAP.exe"]
         subdirs = ["", "astap", "ASTAP", "astap_cli", "astap-cli"]
         for root in roots:
             if not root: continue
