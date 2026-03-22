@@ -23,8 +23,8 @@ class ImageCanvas(QGraphicsView):
         self._scene.addItem(self._pix_item)
 
         self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
-        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
-        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorUnderMouse)
+        self.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setStyleSheet("background: #111111; border: none;")
@@ -67,10 +67,17 @@ class ImageCanvas(QGraphicsView):
     # ── Zoom ────────────────────────────────────────────────────────────────
 
     def wheelEvent(self, event: QWheelEvent):
+        """Zoom — görüntü viewport merkezinde sabit kalır."""
+        # Zoom öncesi merkez noktayı sahne koordinatlarında kaydet
+        center_scene = self.mapToScene(self.viewport().rect().center())
+
         factor = 1.25 if event.angleDelta().y() > 0 else 0.8
         self._zoom += 1 if event.angleDelta().y() > 0 else -1
         self._zoom = max(-10, min(20, self._zoom))
         self.scale(factor, factor)
+
+        # Zoom sonrası aynı noktayı merkeze geri getir
+        self.centerOn(center_scene)
 
     def zoom_in(self):
         self.scale(1.25, 1.25)

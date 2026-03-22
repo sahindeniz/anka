@@ -278,6 +278,37 @@ class DeconvPanel(BasePanel):
         }
 
 
+# ── Yıldız Küçültme (Star Shrink) ────────────────────────────────────────────
+
+class StarShrinkPanel(BasePanel):
+    """Yıldız küçültme — çekirdek/halo ayrımı ile."""
+    def __init__(self, parent=None):
+        super().__init__("✦ Yıldız Küçültme", parent)
+
+        info = QLabel(
+            "Yıldızların çekirdeklerini koruyarak\n"
+            "halolarını zayıflatır ve küçültür."
+        )
+        info.setWordWrap(True)
+        info.setStyleSheet("color: #aaa; font-size: 9pt;")
+        self._layout.addWidget(info)
+
+        self._shrink = self._add_spinbox("Küçültme Faktörü", 0.1, 3.0, 1.0, 0.1, "shrink_factor", 2)
+        self._halo = self._add_spinbox("Halo Dolgu Oranı", 0.0, 1.0, 0.3, 0.05, "halo_fill_ratio", 2)
+        self._noise = self._add_spinbox("Gürültü Seviyesi", 0.0, 50.0, 5.0, 1.0, "noise_level", 1)
+        self._threshold = self._add_spinbox("Yoğunluk Eşiği (σ)", 0.5, 5.0, 2.0, 0.1, "star_density_threshold", 1)
+
+        self._layout.addStretch()
+
+    def get_params(self):
+        return {
+            "shrink_factor": self._shrink.value(),
+            "halo_fill_ratio": self._halo.value(),
+            "noise_level": self._noise.value(),
+            "star_density_threshold": self._threshold.value(),
+        }
+
+
 # ── Yıldız Yeniden Birleştirme ───────────────────────────────────────────────
 
 class RecompPanel(BasePanel):

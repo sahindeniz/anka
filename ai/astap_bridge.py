@@ -54,7 +54,7 @@ def solve_image(
 
     img = np.clip(image, 0, 1).astype(np.float32)
     h, w = img.shape[:2]
-    cb(f"[1/4] Hazırlanıyor ({w}×{h})…")
+    cb(f"[1/4] Hazirlanıyor ({w}x{h})...")
 
     tmpdir = tempfile.mkdtemp(prefix="amp_astap_")
 
@@ -63,7 +63,13 @@ def solve_image(
         t_start = time.time()
 
         _save_mono_fits(img, fits_in)
-        cb("[1/4] FITS kaydedildi")
+        # Upscale bilgisi
+        if max(h, w) < 2000:
+            scale = 2000.0 / max(h, w)
+            new_w, new_h = int(w * scale + 0.5), int(h * scale + 0.5)
+            cb(f"[1/4] FITS kaydedildi (upscale {w}x{h} -> {new_w}x{new_h})")
+        else:
+            cb("[1/4] FITS kaydedildi")
 
         cmd = _build_cmd(
             astap_exe, fits_in, db_path,
@@ -165,20 +171,40 @@ def solve_image(
 
 
 def _save_mono_fits(img, path: str):
-    """float32 [0,1] → mono float32 FITS."""
+    """float32 [0,1] → mono 16-bit FITS.
+    ASTAP 16-bit uint ile daha iyi calisir.
+    Kucuk goruntuler (<2000px) 2x upscale edilir — 'small image' uyarisini onler.
+    """
+    import cv2
     from astropy.io import fits as _fits
+
     if img.ndim == 3:
         mono = (0.2126 * img[:, :, 0]
                 + 0.7152 * img[:, :, 1]
                 + 0.0722 * img[:, :, 2]).astype(np.float32)
     else:
         mono = img.astype(np.float32)
-    hdu = _fits.PrimaryHDU(mono)
+
+    h, w = mono.shape
+    # Kucuk goruntuler icin upscale — ASTAP minimum ~2000px ister
+    if max(h, w) < 2000:
+        scale = 2000.0 / max(h, w)
+        if scale > 1.0:
+            new_w = int(w * scale + 0.5)
+            new_h = int(h * scale + 0.5)
+            mono = cv2.resize(mono, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+
+    # 16-bit uint — ASTAP ile en uyumlu format
+    mono16 = np.clip(mono * 65535.0, 0, 65535).astype(np.uint16)
+
+    hdu = _fits.PrimaryHDU(mono16)
     hdu.header["SIMPLE"]  = True
-    hdu.header["BITPIX"]  = -32
+    hdu.header["BITPIX"]  = 16
     hdu.header["NAXIS"]   = 2
-    hdu.header["NAXIS1"]  = mono.shape[1]
-    hdu.header["NAXIS2"]  = mono.shape[0]
+    hdu.header["NAXIS1"]  = mono16.shape[1]
+    hdu.header["NAXIS2"]  = mono16.shape[0]
+    hdu.header["BZERO"]   = 32768
+    hdu.header["BSCALE"]  = 1
     hdu.writeto(path, overwrite=True)
 
 
@@ -192,19 +218,28 @@ def _build_cmd(exe, fits_in, db_path, radius, downsample, min_stars,
     """
     cmd = [exe, "-f", fits_in]
 
+    # ── Database yolu — ASTAP klasor yolu + veritabani adi bekler ──
     if db_path:
-        if os.path.isfile(db_path):
-            # Tam dosya yolu (.pkg veya diğer) — ASTAP doğrudan kabul eder
-            cmd += ["-d", db_path]
-        elif os.path.isdir(db_path):
-            # Klasör yolu — içinde katalog dosyalarını arar
-            cmd += ["-d", db_path]
+        db_path_str = str(db_path).strip()
+        if os.path.isfile(db_path_str):
+            # .pkg dosya yolu → klasoru al
+            db_dir = os.path.dirname(db_path_str)
+            cmd += ["-d", db_dir]
+        elif os.path.isdir(db_path_str):
+            cmd += ["-d", db_path_str]
+        else:
+            # Belki prefix verilmistir (d80 gibi) — oldugu gibi gonder
+            cmd += ["-d", db_path_str]
 
     cmd += ["-r", f"{float(radius):.1f}"]
     cmd += ["-m", str(int(min_stars))]
 
+    # ── Downsample — kucuk goruntuler icin ASLA downsample yapma ──
     if downsample and int(downsample) > 0:
         cmd += ["-z", str(int(downsample))]
+    else:
+        # ASTAP auto-downsample yapmasin — kucuk resimlerde sorun cikarir
+        cmd += ["-z", "0"]
 
     if ra_hint is not None and float(ra_hint) != 0.0:
         hours = float(ra_hint) / 15.0

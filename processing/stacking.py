@@ -1,746 +1,581 @@
 """
-Astro Mastro Pro — Image Stacking (DeepSkyStacker-style)
+Astro Maestro Pro - Image Stacking Engine v2
+=============================================
+wkjarosz/astro-stacker temel alinarak yazildi.
+AKAZE feature detection + Homography + RANSAC hizalama.
+Temiz, guvenilir, float32 pipeline.
 
-Calibration pipeline:
-  1. Master Bias     = median of bias frames
-  2. Master Dark     = kappa-sigma median(darks) - bias
-  3. Master Flat     = normalize(median(flats) - dark_flat)
-  4. Calibrated Light= (Light - Dark) / Flat
-  5. Quality Score   = per-frame FWHM + SNR score → optional frame rejection
-  6. Alignment       = ECC / ORB / SURF / SIFT / star-based
-  7. Stacking        = Mean/Median/Kappa-Sigma/Winsorized/EntropyWeighted/Maximum
-
-Methods match DSS defaults:
-  - Default: Kappa-Sigma 2.0, 5 iterations
-  - Auto-rejection of bad frames (quality < threshold)
-  - Comet mode: star-aligned + comet-aligned dual stack
+Kaynak: https://github.com/wkjarosz/astro-stacker
 """
 
 import os
 import numpy as np
 import cv2
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Tuple, Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import multiprocessing
 
-# ─── Loader ───────────────────────────────────────────────────────────────────
-def _load(path: str) -> np.ndarray:
+_N_WORKERS = max(1, min(multiprocessing.cpu_count(), 8))
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  YARDIMCI FONKSIYONLAR
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _to_gray_float(img: np.ndarray) -> np.ndarray:
+    """float32 goruntu → float32 grayscale.  Asla uint8'e donusturulmez!"""
+    if img.ndim == 2:
+        return img.astype(np.float32)
+    return cv2.cvtColor(img.astype(np.float32), cv2.COLOR_RGB2GRAY)
+
+
+def _enhance_for_detection(gray: np.ndarray) -> np.ndarray:
+    """Lineer astro veride yildizlari one cikarmak icin agresif kontrast artirma.
+    1) Asinh stretch (astro standart — cok parlak yildizlari ezmeden faint detayi cikarir)
+    2) CLAHE (lokal kontrast artirma — feature detector icin ideal)
+    Sonuc: uint8 [0,255] — AKAZE/SIFT feature detection icin optimize."""
+    # Asinh stretch — lineer → logaritmik benzeri
+    stretch_factor = 10.0
+    stretched = np.arcsinh(gray * stretch_factor) / np.arcsinh(stretch_factor)
+    # [0,1] normalize
+    mn, mx = stretched.min(), stretched.max()
+    if mx - mn > 1e-7:
+        stretched = (stretched - mn) / (mx - mn)
+    # uint8 + CLAHE
+    u8 = np.clip(stretched * 255, 0, 255).astype(np.uint8)
+    clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(16, 16))
+    return clahe.apply(u8)
+
+
+def _compute_homography(
+    next_img: np.ndarray,
+    base_img: np.ndarray,
+    threshold: float = 0.85,
+    cache: Optional[dict] = None,
+    frame_num: int = 0,
+) -> Optional[np.ndarray]:
+    """AKAZE feature detection + BFMatcher + RANSAC homography.
+    astro-stacker yaklasimi — ORB yerine AKAZE (daha robust)."""
+
+    next_gray = _to_gray_float(next_img)
+    base_gray = _to_gray_float(base_img)
+
+    # Asinh + CLAHE kontrast artirma — lineer veride feature detection icin kritik
+    next_enh = _enhance_for_detection(next_gray)
+    base_enh = _enhance_for_detection(base_gray)
+
+    # AKAZE — binary descriptor, hizli ve robust
+    alg = cv2.AKAZE_create(
+        threshold=0.0005,  # daha dusuk esik = daha fazla keypoint
+    )
+
+    kp1, des1 = alg.detectAndCompute(next_enh, None)
+
+    # Base keypoint caching — bir kez hesapla
+    kp2, des2 = None, None
+    if cache is not None and "kp2" in cache and "des2" in cache:
+        kp2, des2 = cache["kp2"], cache["des2"]
+    else:
+        kp2, des2 = alg.detectAndCompute(base_enh, None)
+        if cache is not None:
+            cache["kp2"] = kp2
+            cache["des2"] = des2
+
+    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+        return None
+
+    # BFMatcher — kNN ile ratio test (Lowe's ratio)
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+    raw_matches = matcher.knnMatch(des1, des2, k=2)
+
+    # Lowe's ratio test — daha robust esleme
+    good = []
+    for m_pair in raw_matches:
+        if len(m_pair) == 2:
+            m, n = m_pair
+            if m.distance < 0.75 * n.distance:
+                good.append(m)
+
+    if len(good) < 6:
+        return None
+
+    pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
+    pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
+
+    # Affine (translation + rotation + scale) — astro karelerde perspektif yok
+    M, mask = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC,
+                                           ransacReprojThreshold=5.0)
+    if M is None or mask is None:
+        return None
+    inlier_ratio = np.sum(mask) / len(mask)
+    if inlier_ratio < 0.25:
+        return None
+
+    # 2x3 → 3x3
+    H = np.eye(3, dtype=np.float64)
+    H[:2, :] = M
+    return H
+
+
+def _warp_image(img: np.ndarray, H: np.ndarray) -> np.ndarray:
+    """Homography ile goruntu donusumu."""
+    h, w = img.shape[:2]
+    return cv2.warpPerspective(img, H, (w, h), flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+
+def _warp_mask(shape: tuple, H: np.ndarray) -> np.ndarray:
+    """Dondurulen karenin gecerli pixel maskesini olustur."""
+    h, w = shape[:2]
+    mask = np.ones((h, w), dtype=np.float32)
+    return cv2.warpPerspective(mask, H, (w, h), flags=cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  KALIBRASYON
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _build_master(paths: List[str], method: str = "median",
+                  progress_cb=None, label="") -> Optional[np.ndarray]:
+    """Kalibrasyon karelerinden master frame olustur."""
+    if not paths:
+        return None
     from core.loader import load_image
-    return load_image(path)
 
-def _to_gray(img):
-    if img.ndim == 3: return (img.mean(axis=2) * 255).astype(np.uint8)
-    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
-
-def _to_u8(img):
-    return (np.clip(img, 0, 1) * 255).astype(np.uint8)
-
-def _from_u8(img):
-    return img.astype(np.float32) / 255.0
-
-
-# ─── Quality Scoring (DSS-style) ─────────────────────────────────────────────
-def score_frame(img: np.ndarray) -> dict:
-    """
-    Kare kalite skoru. DSS'deki gibi yildizlari tespit et,
-    FWHM ve SNR hesapla.
-    Returns dict: score, fwhm, snr, star_count, stars
-    """
-    gray = img if img.ndim == 2 else img.mean(axis=2)
-    gray32 = gray.astype(np.float32)
-
-    # Arka plani cikar
-    from scipy.ndimage import gaussian_filter
-    bg = gaussian_filter(gray32, sigma=20)
-    residual = np.clip(gray32 - bg, 0, 1)
-
-    # Yildiz tespiti: blob detection
-    gray8 = (np.clip(residual, 0, 1) * 255).astype(np.uint8)
-    thresh = np.percentile(gray8, 96)
-    _, bw = cv2.threshold(gray8, int(thresh), 255, cv2.THRESH_BINARY)
-    kernel = np.ones((3,3), np.uint8)
-    bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
-
-    contours, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    stars = []
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if 3 <= area <= 500:
-            M = cv2.moments(cnt)
-            if M["m00"] > 0:
-                cx = M["m10"] / M["m00"]
-                cy = M["m01"] / M["m00"]
-                # Yaklasik FWHM: alan'dan daire yaricapi
-                fwhm = 2 * np.sqrt(area / np.pi)
-                stars.append({"x": cx, "y": cy, "fwhm": fwhm, "area": area})
-
-    n_stars = len(stars)
-    if n_stars == 0:
-        return {"score": 0.0, "fwhm": 99.0, "snr": 0.0,
-                "star_count": 0, "stars": []}
-
-    fwhm_vals = [s["fwhm"] for s in stars]
-    mean_fwhm = float(np.median(fwhm_vals))
-
-    # SNR: sinyal / gurultu
-    signal = float(np.percentile(gray32, 95))
-    noise  = float(np.std(gray32 - gaussian_filter(gray32, sigma=2)) + 1e-9)
-    snr    = signal / noise
-
-    # DSS benzeri skor: cok yildiz + dusuk FWHM + yuksek SNR
-    score = (min(n_stars, 500) / 500) * 0.4 \
-          + (1 / (1 + mean_fwhm / 4)) * 0.4 \
-          + min(snr / 30, 1.0) * 0.2
-
-    return {"score": float(score), "fwhm": mean_fwhm,
-            "snr": float(snr), "star_count": n_stars, "stars": stars}
-
-
-# ─── Calibration ──────────────────────────────────────────────────────────────
-def _kappa_median(stack: np.ndarray, kappa=2.5, iters=3) -> np.ndarray:
-    combined = stack.copy()
-    for _ in range(iters):
-        med = np.median(combined, axis=0)
-        std = combined.std(axis=0) + 1e-9
-        mask = np.abs(combined - med[None]) > kappa * std[None]
-        combined = np.where(mask, np.nan, combined)
-    result = np.nanmedian(combined, axis=0)
-    return np.where(np.isnan(result), np.median(stack, axis=0), result).astype(np.float32)
-
-
-def make_master_bias(bias_paths, progress_cb=None):
-    if not bias_paths: return None
     frames = []
-    for i, p in enumerate(bias_paths):
-        if progress_cb: progress_cb(i+1, len(bias_paths), os.path.basename(p))
-        frames.append(_load(p))
-    return np.median(np.stack(frames, 0), axis=0).astype(np.float32)
+    for i, p in enumerate(paths):
+        if progress_cb:
+            progress_cb(label, f"{i+1}/{len(paths)} yukleniyor…")
+        frames.append(load_image(p))
+
+    stack = np.stack(frames, axis=0)
+    if method == "median":
+        return np.median(stack, axis=0).astype(np.float32)
+    else:
+        return np.mean(stack, axis=0).astype(np.float32)
 
 
-def make_master_dark(dark_paths, master_bias=None, progress_cb=None):
-    if not dark_paths: return None
-    frames = []
-    for i, p in enumerate(dark_paths):
-        if progress_cb: progress_cb(i+1, len(dark_paths), os.path.basename(p))
-        f = _load(p).astype(np.float32)
-        if master_bias is not None: f = np.clip(f - master_bias, 0, 1)
-        frames.append(f)
-    return _kappa_median(np.stack(frames, 0)).astype(np.float32)
+def _calibrate_frame(
+    img: np.ndarray,
+    master_dark: Optional[np.ndarray],
+    master_flat: Optional[np.ndarray],
+    master_bias: Optional[np.ndarray],
+) -> np.ndarray:
+    """Tek kareye kalibrasyon uygula: (Light - Bias - Dark) / Flat"""
+    cal = img.astype(np.float32)
 
-
-def make_master_dark_flat(dark_flat_paths, progress_cb=None):
-    if not dark_flat_paths: return None
-    frames = []
-    for i, p in enumerate(dark_flat_paths):
-        if progress_cb: progress_cb(i+1, len(dark_flat_paths), os.path.basename(p))
-        frames.append(_load(p))
-    return np.median(np.stack(frames, 0), axis=0).astype(np.float32)
-
-
-def make_master_flat(flat_paths, dark_flat=None, master_bias=None, progress_cb=None):
-    if not flat_paths: return None
-    frames = []
-    for i, p in enumerate(flat_paths):
-        if progress_cb: progress_cb(i+1, len(flat_paths), os.path.basename(p))
-        f = _load(p).astype(np.float32)
-        if dark_flat is not None:
-            f = np.clip(f - dark_flat, 0, 1)
-        elif master_bias is not None:
-            f = np.clip(f - master_bias, 0, 1)
-        # Normalize
-        mn = f.mean()
-        if mn > 1e-9: f /= mn
-        frames.append(f)
-    master = np.median(np.stack(frames, 0), axis=0).astype(np.float32)
-    mn = master.mean()
-    if mn > 1e-9: master /= mn
-    return master
-
-
-def calibrate_light(light, master_dark=None, master_flat=None, master_bias=None):
-    img = light.astype(np.float32)
     if master_bias is not None:
-        img = np.clip(img - master_bias, 0, 1)
+        cal = cal - master_bias
+
     if master_dark is not None:
-        img = np.clip(img - master_dark, 0, 1)
+        cal = cal - master_dark
+
+    cal = np.clip(cal, 0, None)
+
     if master_flat is not None:
-        flat_safe = np.where(master_flat < 0.01, 1.0, master_flat)
-        img = np.clip(img / flat_safe, 0, 1)
-    return img.astype(np.float32)
+        # Flat normalizasyonu: mean(flat) / flat
+        flat = master_flat.copy()
+        if master_bias is not None:
+            flat = flat - master_bias
+        flat = np.clip(flat, 0, None)
+        flat_mean = np.mean(flat)
+        if flat_mean > 0:
+            flat_norm = flat / flat_mean
+            flat_norm[flat_norm < 0.01] = 1.0  # sifira bolunme engelle
+            cal = cal / flat_norm
+
+    return np.clip(cal, 0, None).astype(np.float32)
 
 
-# ─── Alignment ────────────────────────────────────────────────────────────────
-def align_frame(src: np.ndarray, ref: np.ndarray,
-                method: str = "ecc_euclidean") -> np.ndarray:
-    h, w = ref.shape[:2]
-    if method == "none":
-        return src
+# ═══════════════════════════════════════════════════════════════════════════════
+#  STACKING YONTEMLERI
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    src_g = _to_gray(src)
-    ref_g = _to_gray(ref)
+def _stack_mean(frames: List[np.ndarray], masks: List[np.ndarray]) -> np.ndarray:
+    """Maskeli ortalama stacking — her pikselde katki yapan karelerin ortalamasini al."""
+    accumulator = np.zeros_like(frames[0], dtype=np.float64)
+    weight = np.zeros(frames[0].shape[:2], dtype=np.float64)
 
-    if method.startswith("ecc"):
-        return _align_ecc(src, ref_g, src_g, method, h, w)
-    elif method == "orb_homography":
-        return _align_orb(src, ref_g, src_g, h, w)
-    elif method in ("sift_homography", "surf_homography"):
-        return _align_feature(src, ref_g, src_g, method, h, w)
-    elif method == "star_match":
-        return _align_stars(src, ref, h, w)
-    return src
-
-
-def _align_ecc(src, ref_g, src_g, method, h, w):
-    motion_map = {
-        "ecc_translation": cv2.MOTION_TRANSLATION,
-        "ecc_euclidean":   cv2.MOTION_EUCLIDEAN,
-        "ecc_affine":      cv2.MOTION_AFFINE,
-        "ecc_homography":  cv2.MOTION_HOMOGRAPHY,
-    }
-    mtype = motion_map.get(method, cv2.MOTION_EUCLIDEAN)
-    if mtype == cv2.MOTION_HOMOGRAPHY:
-        warp = np.eye(3, 3, dtype=np.float32)
-    else:
-        warp = np.eye(2, 3, dtype=np.float32)
-    try:
-        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 1000, 1e-6)
-        _, warp = cv2.findTransformECC(ref_g, src_g, warp, mtype, criteria)
-    except cv2.error:
-        return src
-    return _apply_warp(src, warp, h, w, mtype)
-
-
-def _align_orb(src, ref_g, src_g, h, w):
-    orb  = cv2.ORB_create(5000)
-    kp1, d1 = orb.detectAndCompute(ref_g, None)
-    kp2, d2 = orb.detectAndCompute(src_g, None)
-    if d1 is None or d2 is None or len(kp1) < 4:
-        return src
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
-    matches = bf.knnMatch(d1, d2, k=2)
-    good = [m for m,n in matches if m.distance < 0.75*n.distance]
-    if len(good) < 4:
-        return src
-    src_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1,1,2)
-    dst_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1,1,2)
-    H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-    if H is None: return src
-    return _apply_warp(src, H, h, w, cv2.MOTION_HOMOGRAPHY)
-
-
-def _align_feature(src, ref_g, src_g, method, h, w):
-    try:
-        if method == "sift_homography":
-            det = cv2.SIFT_create()
-            norm = cv2.NORM_L2
+    for fr, msk in zip(frames, masks):
+        if fr.ndim == 3:
+            m3 = msk[:, :, np.newaxis] if msk.ndim == 2 else msk
+            accumulator += fr.astype(np.float64) * m3
         else:
-            det = cv2.xfeatures2d.SURF_create(400) if hasattr(cv2,"xfeatures2d") else cv2.SIFT_create()
-            norm = cv2.NORM_L2
-        kp1, d1 = det.detectAndCompute(ref_g, None)
-        kp2, d2 = det.detectAndCompute(src_g, None)
-        if d1 is None or len(kp1) < 4: return src
-        bf = cv2.BFMatcher(norm, crossCheck=False)
-        matches = bf.knnMatch(d1, d2, k=2)
-        good = [m for m,n in matches if m.distance < 0.75*n.distance]
-        if len(good) < 4: return src
-        src_pts = np.float32([kp2[m.trainIdx].pt for m in good]).reshape(-1,1,2)
-        dst_pts = np.float32([kp1[m.queryIdx].pt for m in good]).reshape(-1,1,2)
-        H, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-        if H is None: return src
-        return _apply_warp(src, H, h, w, cv2.MOTION_HOMOGRAPHY)
-    except Exception:
-        return _align_orb(src, ref_g, src_g, h, w)
+            accumulator += fr.astype(np.float64) * msk
+        weight += msk.astype(np.float64)
+
+    weight[weight == 0] = 1
+    if accumulator.ndim == 3:
+        return (accumulator / weight[:, :, np.newaxis]).astype(np.float32)
+    return (accumulator / weight).astype(np.float32)
 
 
-def _align_stars(src, ref, h, w):
-    """Parlak yildizlari bul, koordinat eslesme ile hizala."""
-    def get_star_centers(img, n=30):
-        gray = img if img.ndim == 2 else img.mean(axis=2)
-        g8 = (np.clip(gray, 0, 1) * 255).astype(np.uint8)
-        thr = np.percentile(g8, 97)
-        _, bw = cv2.threshold(g8, int(thr), 255, cv2.THRESH_BINARY)
-        cnts, _ = cv2.findContours(bw, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        centers = []
-        for c in cnts:
-            if 4 < cv2.contourArea(c) < 400:
-                M = cv2.moments(c)
-                if M["m00"] > 0:
-                    centers.append((M["m10"]/M["m00"], M["m01"]/M["m00"],
-                                    cv2.contourArea(c)))
-        centers.sort(key=lambda x: -x[2])
-        return np.float32([[c[0],c[1]] for c in centers[:n]])
+def _stack_median(frames: List[np.ndarray], masks: List[np.ndarray]) -> np.ndarray:
+    """Median stacking — bellek verimli, satir satir isler."""
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    channels = frames[0].shape[2] if frames[0].ndim == 3 else 1
+    is_color = frames[0].ndim == 3
+    result = np.zeros_like(frames[0], dtype=np.float32)
 
-    ref_pts = get_star_centers(ref)
-    src_pts = get_star_centers(src)
-    if len(ref_pts) < 3 or len(src_pts) < 3:
-        return _align_orb(src, _to_gray(ref), _to_gray(src), h, w)
-    n = min(len(ref_pts), len(src_pts), 20)
-    H, _ = cv2.findHomography(src_pts[:n], ref_pts[:n], cv2.RANSAC, 3.0)
-    if H is None: return src
-    return _apply_warp(src, H, h, w, cv2.MOTION_HOMOGRAPHY)
+    # Satir bloklari halinde isle — tum kareleri belleğe almadan
+    block_size = max(1, min(64, h))
+    for y0 in range(0, h, block_size):
+        y1 = min(y0 + block_size, h)
+        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        result[y0:y1] = np.median(block, axis=0)
+
+    return result
 
 
-def _apply_warp(src, warp, h, w, mtype):
-    flags = cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP
-    if src.ndim == 2:
-        if mtype == cv2.MOTION_HOMOGRAPHY:
-            return cv2.warpPerspective(src, warp, (w,h), flags=cv2.INTER_LINEAR)
-        return cv2.warpAffine(src, warp, (w,h), flags=flags)
-    channels = []
-    for c in range(src.shape[2]):
-        if mtype == cv2.MOTION_HOMOGRAPHY:
-            channels.append(cv2.warpPerspective(src[:,:,c], warp, (w,h),
-                                                flags=cv2.INTER_LINEAR))
-        else:
-            channels.append(cv2.warpAffine(src[:,:,c], warp, (w,h), flags=flags))
-    return np.stack(channels, axis=2).astype(np.float32)
+def _stack_kappa_sigma(
+    frames: List[np.ndarray],
+    masks: List[np.ndarray],
+    kappa: float = 2.5,
+    iterations: int = 3,
+) -> np.ndarray:
+    """Kappa-sigma clipping — bellek verimli, satir bloklari halinde isler."""
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    result = np.zeros_like(frames[0], dtype=np.float32)
+
+    block_size = max(1, min(32, h))
+    for y0 in range(0, h, block_size):
+        y1 = min(y0 + block_size, h)
+        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        valid = np.ones(block.shape, dtype=bool)
+
+        for _ in range(iterations):
+            # Gecerli piksellerin ortalamasi
+            vcount = np.sum(valid, axis=0, keepdims=True).astype(np.float32)
+            vcount[vcount == 0] = 1
+            mean = np.sum(block * valid, axis=0, keepdims=True) / vcount
+            # Standart sapma
+            diff = block - mean
+            var = np.sum(diff * diff * valid, axis=0, keepdims=True) / vcount
+            std = np.sqrt(var)
+            std[std < 1e-8] = 1e-8
+            valid = valid & (np.abs(diff) <= kappa * std)
+
+        vcount = np.sum(valid, axis=0, keepdims=True).astype(np.float32)
+        vcount[vcount == 0] = 1
+        result[y0:y1] = (np.sum(block * valid, axis=0, keepdims=True) / vcount).squeeze(0)
+
+    return result
 
 
-# ─── Stacking Methods ─────────────────────────────────────────────────────────
-def _mean_stack(stack, **kw):
-    return stack.mean(axis=0).astype(np.float32)
+# ═══════════════════════════════════════════════════════════════════════════════
+#  SCORE FRAME
+# ═══════════════════════════════════════════════════════════════════════════════
 
-def _median_stack(stack, **kw):
-    return np.median(stack, axis=0).astype(np.float32)
+def score_frame(img: np.ndarray) -> dict:
+    """Basit kare kalite skoru — yildiz sayisi + FWHM tahmini."""
+    gray = _to_gray_float(img)
+    # Kontrast artirma — yildiz tespiti icin
+    thr8 = _enhance_for_detection(gray)
 
-def _kappa_sigma(stack, kappa=2.0, iterations=5, **kw):
-    combined = stack.astype(np.float64).copy()
-    for _ in range(iterations):
-        med = np.median(combined, axis=0)
-        std = np.nanstd(combined, axis=0) + 1e-9
-        mask = np.abs(combined - med[None]) > kappa * std[None]
-        combined = np.where(mask, np.nan, combined)
-    result = np.nanmean(combined, axis=0)
-    fallback = np.median(stack, axis=0)
-    return np.where(np.isnan(result), fallback, result).astype(np.float32)
+    # Blob detection
+    params = cv2.SimpleBlobDetector_Params()
+    params.filterByColor = True
+    params.blobColor = 255
+    params.filterByArea = True
+    params.minArea = 3
+    params.maxArea = 500
+    params.filterByCircularity = True
+    params.minCircularity = 0.3
+    params.filterByConvexity = False
+    params.filterByInertia = False
 
-def _winsorized(stack, kappa_low=2.0, kappa_high=2.0, iterations=5, **kw):
-    combined = stack.astype(np.float64).copy()
-    for _ in range(iterations):
-        med = np.median(combined, axis=0)
-        std = np.nanstd(combined, axis=0) + 1e-9
-        lo  = med - kappa_low  * std
-        hi  = med + kappa_high * std
-        combined = np.clip(combined, lo[None], hi[None])
-    return combined.mean(axis=0).astype(np.float32)
+    detector = cv2.SimpleBlobDetector_create(params)
+    kps = detector.detect(thr8)
+    star_count = len(kps)
 
-def _linear_fit(stack, **kw):
-    """Weighted linear fit — frames with lower noise get higher weight."""
-    n = stack.shape[0]
-    weights = np.array([1.0 / (stack[i].std() + 1e-9) for i in range(n)])
-    weights /= weights.sum()
-    return (stack * weights[:, None, None, None]).sum(axis=0).astype(np.float32) \
-        if stack.ndim == 4 else \
-        (stack * weights[:, None, None]).sum(axis=0).astype(np.float32)
+    fwhm = 0.0
+    if kps:
+        fwhm = np.mean([k.size for k in kps])
 
-def _entropy_weighted(stack, **kw):
-    """
-    Entropy-weighted stacking: frames with more detail get higher weight.
-    DSS'de de benzer bir agirliklandirma var.
-    """
-    n = stack.shape[0]
-    weights = []
-    for i in range(n):
-        frame = stack[i]
-        gray  = frame if frame.ndim == 2 else frame.mean(axis=2)
-        hist, _ = np.histogram(gray, bins=256, range=(0,1), density=True)
-        hist = hist[hist > 0]
-        entropy = float(-np.sum(hist * np.log2(hist + 1e-12)))
-        weights.append(entropy)
-    weights = np.array(weights, dtype=np.float32)
-    weights /= weights.sum() + 1e-9
-    if stack.ndim == 4:
-        return (stack * weights[:, None, None, None]).sum(axis=0).astype(np.float32)
-    return (stack * weights[:, None, None]).sum(axis=0).astype(np.float32)
+    # SNR tahmini — sinyal / gurultu
+    signal = np.mean(gray)
+    noise = np.std(gray)
+    snr = signal / max(noise, 1e-8)
 
-def _maximum_stack(stack, **kw):
-    """Maximum stacking — comet / meteor / satellite trails."""
-    return stack.max(axis=0).astype(np.float32)
-
-def _minimum_stack(stack, **kw):
-    return stack.min(axis=0).astype(np.float32)
-
-def _sum_stack(stack, **kw):
-    """Sum stacking (normalize sonra) — uzun pozlama simülasyonu."""
-    s = stack.sum(axis=0).astype(np.float32)
-    mx = s.max()
-    return s / mx if mx > 0 else s
-
-
-# ─── Main pipeline ────────────────────────────────────────────────────────────
-def stack_lights(
-    light_paths: List[str],
-    dark_paths=None,
-    flat_paths=None,
-    dark_flat_paths=None,
-    bias_paths=None,
-    method: str = "kappa_sigma",
-    align_method: str = "ecc_euclidean",
-    ref_index: int = 0,
-    ref_mode: str = "manual",       # manual | best_quality | median_quality
-    kappa: float = 2.0,
-    kappa_low: float = 2.0,
-    kappa_high: float = 2.0,
-    iterations: int = 5,
-    quality_reject: bool = True,    # DSS: kotu kareleri reddet
-    quality_threshold: float = 0.2, # alt eşik (0-1)
-    normalize: bool = True,         # DSS: kareleri normalize et
-    weight_mode: str = "none",      # none | snr | fwhm | stars
-    progress_cb: Optional[Callable] = None,
-) -> dict:
-
-    def _cb(step, msg):
-        if progress_cb: progress_cb(step, msg)
-
-    # ── Kalibrasyon kareleri ──────────────────────────────────────────────────
-    _cb(1, f"Master Bias hazırlaniyor..." if bias_paths else "Bias atlanıyor")
-    master_bias = make_master_bias(bias_paths,
-        lambda i,n,f: _cb(1, f"  Bias {i}/{n}: {f}")) if bias_paths else None
-
-    _cb(2, f"Master Dark hazırlaniyor..." if dark_paths else "Dark atlanıyor")
-    master_dark = make_master_dark(dark_paths, master_bias,
-        lambda i,n,f: _cb(2, f"  Dark {i}/{n}: {f}")) if dark_paths else None
-
-    _cb(3, f"Dark Flat hazırlaniyor..." if dark_flat_paths else "Dark Flat atlanıyor")
-    master_dark_flat = make_master_dark_flat(dark_flat_paths,
-        lambda i,n,f: _cb(3, f"  DarkFlat {i}/{n}: {f}")) if dark_flat_paths else None
-
-    _cb(4, f"Master Flat hazırlaniyor..." if flat_paths else "Flat atlanıyor")
-    master_flat = make_master_flat(flat_paths, master_dark_flat, master_bias,
-        lambda i,n,f: _cb(4, f"  Flat {i}/{n}: {f}")) if flat_paths else None
-
-    # ── Light kalibrasyonu ────────────────────────────────────────────────────
-    _cb(5, f"Isik kareleri kalibre ediliyor ({len(light_paths)} kare)...")
-    calibrated = []
-    for i, p in enumerate(light_paths):
-        _cb(5, f"  Kalibrasyon {i+1}/{len(light_paths)}: {os.path.basename(p)}")
-        raw = _load(p)
-        cal = calibrate_light(raw, master_dark, master_flat, master_bias)
-        calibrated.append(cal)
-
-    # ── Kalite skorlama ve referans secme ─────────────────────────────────────
-    _cb(6, "Kalite skorlanıyor...")
-    scores = []
-    for i, img in enumerate(calibrated):
-        sc = score_frame(img)
-        scores.append(sc)
-        _cb(6, f"  Kare {i+1}: skor={sc['score']:.3f} "
-              f"FWHM={sc['fwhm']:.1f}px "
-              f"yildiz={sc['star_count']} "
-              f"SNR={sc['snr']:.1f}")
-
-    # Referans kare sec
-    if ref_mode == "best_quality":
-        ref_idx = int(np.argmax([s["score"] for s in scores]))
-        _cb(6, f"  En iyi kare: #{ref_idx+1} (skor={scores[ref_idx]['score']:.3f})")
-    elif ref_mode == "median_quality":
-        sc_arr = [s["score"] for s in scores]
-        med_sc = np.median(sc_arr)
-        ref_idx = int(np.argmin([abs(s - med_sc) for s in sc_arr]))
-        _cb(6, f"  Medyan kalite kare: #{ref_idx+1}")
-    else:
-        ref_idx = max(0, min(int(ref_index), len(calibrated)-1))
-        _cb(6, f"  Manuel referans: #{ref_idx+1}")
-
-    # Kotu kareleri reddet (DSS stili)
-    keep_idx = list(range(len(calibrated)))
-    rejected = []
-    if quality_reject and len(calibrated) > 3:
-        sc_vals = [s["score"] for s in scores]
-        max_sc  = max(sc_vals) if sc_vals else 1.0
-        auto_thr = max(quality_threshold, max_sc * 0.15)
-        keep_idx = [i for i in keep_idx if scores[i]["score"] >= auto_thr]
-        rejected = [i for i in range(len(calibrated)) if i not in keep_idx]
-        if ref_idx not in keep_idx:
-            keep_idx.append(ref_idx)
-        if rejected:
-            _cb(6, f"  ⚠ Reddedilen kareler: {[i+1 for i in rejected]} "
-                  f"(eşik={auto_thr:.3f})")
-
-    used_frames = [calibrated[i] for i in keep_idx]
-    used_paths  = [light_paths[i] for i in keep_idx]
-    used_scores = [scores[i] for i in keep_idx]
-    new_ref     = keep_idx.index(ref_idx) if ref_idx in keep_idx else 0
-    reference   = used_frames[new_ref]
-
-    _cb(6, f"  Kullanılacak kare: {len(used_frames)}/{len(calibrated)}")
-
-    # ── Normalize ─────────────────────────────────────────────────────────────
-    if normalize:
-        _cb(6, "  Normalizasyon uygulanıyor...")
-        ref_med = float(np.median(reference))
-        for i in range(len(used_frames)):
-            f_med = float(np.median(used_frames[i]))
-            if f_med > 1e-9:
-                used_frames[i] = np.clip(
-                    used_frames[i] * (ref_med / f_med), 0, 1).astype(np.float32)
-
-    # ── Hizalama ──────────────────────────────────────────────────────────────
-    if align_method != "none":
-        _cb(7, f"Hizalanıyor ({align_method}, {len(used_frames)} kare)...")
-        aligned = []
-        for i, frame in enumerate(used_frames):
-            if i == new_ref:
-                aligned.append(frame)
-            else:
-                _cb(7, f"  Hizalama {i+1}/{len(used_frames)}: {os.path.basename(used_paths[i])}")
-                try:
-                    al = align_frame(frame, reference, method=align_method)
-                    aligned.append(al)
-                except Exception as e:
-                    _cb(7, f"  ⚠ Hizalama basarisiz kare {i+1}: {e}")
-                    aligned.append(frame)
-    else:
-        _cb(7, "Hizalama atlandı")
-        aligned = used_frames
-
-    stack = np.stack(aligned, axis=0).astype(np.float32)
-
-    # ── Agirliklandirma ───────────────────────────────────────────────────────
-    frame_weights = None
-    if weight_mode == "snr":
-        snr_vals = np.array([s["snr"] for s in used_scores], dtype=np.float32)
-        snr_vals = np.clip(snr_vals, 0.1, None)
-        frame_weights = snr_vals / snr_vals.sum()
-        _cb(7, f"  SNR agirlandirma: {frame_weights.round(3).tolist()}")
-    elif weight_mode == "fwhm":
-        fwhm_vals = np.array([max(s["fwhm"], 0.5) for s in used_scores], dtype=np.float32)
-        fw = 1.0 / fwhm_vals
-        frame_weights = fw / fw.sum()
-    elif weight_mode == "stars":
-        star_vals = np.array([max(s["star_count"], 1) for s in used_scores], dtype=np.float32)
-        frame_weights = star_vals / star_vals.sum()
-
-    # ── Stack ─────────────────────────────────────────────────────────────────
-    _cb(8, f"Stack yapılıyor ({method}, {len(aligned)} kare)...")
-
-    if frame_weights is not None and method in ("mean","entropy_weighted"):
-        if stack.ndim == 4:
-            result = (stack * frame_weights[:, None, None, None]).sum(axis=0)
-        else:
-            result = (stack * frame_weights[:, None, None]).sum(axis=0)
-        result = result.astype(np.float32)
-    else:
-        stack_fns = {
-            "mean":             _mean_stack,
-            "median":           _median_stack,
-            "kappa_sigma":      lambda s: _kappa_sigma(s, kappa=kappa, iterations=int(iterations)),
-            "kappa_sigma_dual": lambda s: _kappa_sigma(s, kappa=kappa, iterations=int(iterations)),
-            "winsorized":       lambda s: _winsorized(s, kappa_low=kappa_low,
-                                                      kappa_high=kappa_high,
-                                                      iterations=int(iterations)),
-            "linear_fit":       _linear_fit,
-            "entropy_weighted": _entropy_weighted,
-            "maximum":          _maximum_stack,
-            "minimum":          _minimum_stack,
-            "sum":              _sum_stack,
-        }
-        fn = stack_fns.get(method, _kappa_sigma)
-        result = fn(stack)
-
-    result = np.clip(result, 0, 1).astype(np.float32)
-    _cb(8, f"✅ Tamamlandi — {len(aligned)} kare birlestirildi")
+    score = min(1.0, star_count / 100.0) * 0.5 + min(1.0, snr * 10) * 0.3 + (1.0 / max(fwhm, 1.0)) * 0.2
 
     return {
-        "result":         result,
-        "master_dark":    master_dark,
-        "master_flat":    master_flat,
-        "master_bias":    master_bias,
-        "n_lights":       len(aligned),
-        "n_rejected":     len(rejected),
-        "rejected_frames":rejected,
-        "frame_scores":   scores,
-        "method":         method,
-        "align_method":   align_method,
-        "ref_index":      ref_idx,
+        "score": float(score),
+        "star_count": star_count,
+        "fwhm": float(fwhm),
+        "snr": float(snr),
     }
 
 
-# ─── 2-Aşamalı Pipeline ────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+#  ANA API — GUI UYUMLU
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def align_frames_only(
     light_paths: List[str],
-    dark_paths=None,
-    flat_paths=None,
-    dark_flat_paths=None,
-    bias_paths=None,
-    align_method: str = "ecc_euclidean",
+    dark_paths: List[str] = None,
+    flat_paths: List[str] = None,
+    dark_flat_paths: List[str] = None,
+    bias_paths: List[str] = None,
+    align_method: str = "AKAZE",
     ref_index: int = 0,
-    ref_mode: str = "best_quality",
+    ref_mode: str = "first",
     normalize: bool = True,
-    quality_reject: bool = True,
-    quality_threshold: float = 0.2,
-    progress_cb: Optional[Callable] = None,
+    quality_reject: bool = False,
+    quality_threshold: float = 0.3,
+    progress_cb: Callable = None,
+    **kwargs,
 ) -> List[np.ndarray]:
-    """
-    Faz 1: Sadece kalibrasyon + kalite eleme + hizalama.
-    Hizalanmış np.ndarray listesi döndürür (stacking yapılmaz).
-    """
-    def _cb(step, msg):
-        if progress_cb: progress_cb(step, msg)
+    """Hizalama — hizalanmis frame listesi dondurur."""
+    from core.loader import load_image
 
-    _cb(1, f"Master Bias..." if bias_paths else "Bias atlanıyor")
-    master_bias = make_master_bias(bias_paths,
-        lambda i,n,f: _cb(1, f"  Bias {i}/{n}: {f}")) if bias_paths else None
+    n = len(light_paths)
+    if n == 0:
+        return []
 
-    _cb(2, "Master Dark..." if dark_paths else "Dark atlanıyor")
-    master_dark = make_master_dark(dark_paths, master_bias,
-        lambda i,n,f: _cb(2, f"  Dark {i}/{n}: {f}")) if dark_paths else None
+    def cb(step, msg):
+        if progress_cb:
+            progress_cb(step, msg)
 
-    _cb(3, "Dark Flat..." if dark_flat_paths else "Dark Flat atlanıyor")
-    master_dark_flat = make_master_dark_flat(dark_flat_paths,
-        lambda i,n,f: _cb(3, f"  DarkFlat {i}/{n}: {f}")) if dark_flat_paths else None
+    # ── 1. Master kareleri olustur ──
+    cb(1, "Master Bias olusturuluyor…")
+    master_bias = _build_master(bias_paths or [], "median", progress_cb, "1")
 
-    _cb(4, "Master Flat..." if flat_paths else "Flat atlanıyor")
-    master_flat = make_master_flat(flat_paths, master_dark_flat, master_bias,
-        lambda i,n,f: _cb(4, f"  Flat {i}/{n}: {f}")) if flat_paths else None
+    cb(2, "Master Dark olusturuluyor…")
+    master_dark = _build_master(dark_paths or [], "median", progress_cb, "2")
 
-    # Kalibrasyon
-    _cb(5, f"Kalibrasyon ({len(light_paths)} kare)...")
-    calibrated = []
+    cb(3, "Master Flat olusturuluyor…")
+    master_flat = _build_master(flat_paths or [], "median", progress_cb, "3")
+
+    # dark_flat varsa flat'tan cikar
+    if dark_flat_paths:
+        cb(3, "Dark Flat olusturuluyor…")
+        dark_flat = _build_master(dark_flat_paths, "median", progress_cb, "3")
+        if dark_flat is not None and master_flat is not None:
+            master_flat = np.clip(master_flat - dark_flat, 0, None)
+
+    # ── 2. Tum kareleri yukle + kalibre et ──
+    cb(4, f"{n} kare yukleniyor ve kalibre ediliyor…")
+    frames = []
     for i, p in enumerate(light_paths):
-        _cb(5, f"  {i+1}/{len(light_paths)}: {os.path.basename(p)}")
-        raw = _load(p)
-        cal = calibrate_light(raw, master_dark, master_flat, master_bias)
-        calibrated.append(cal)
+        cb(4, f"Kare {i+1}/{n}: {os.path.basename(p)}")
+        img = load_image(p)
+        img = _calibrate_frame(img, master_dark, master_flat, master_bias)
+        frames.append(img)
 
-    # Kalite skorlama
-    _cb(6, "Kalite skorlanıyor...")
-    scores = [score_frame(img) for img in calibrated]
-    for i, sc in enumerate(scores):
-        _cb(6, f"  #{i+1}: skor={sc['score']:.3f} yıldız={sc['star_count']}")
-
-    # Referans seçimi
-    if ref_mode == "best_quality":
-        ref_idx = int(np.argmax([s["score"] for s in scores]))
-    elif ref_mode == "median_quality":
-        sc_arr = [s["score"] for s in scores]
-        ref_idx = int(np.argmin([abs(s - np.median(sc_arr)) for s in sc_arr]))
+    # ── 3. Referans kare sec ──
+    if ref_mode == "best" and len(frames) > 1:
+        cb(5, "En iyi referans kare seciliyor…")
+        best_idx = 0
+        best_score = -1
+        for i, fr in enumerate(frames):
+            sc = score_frame(fr)
+            if sc["score"] > best_score:
+                best_score = sc["score"]
+                best_idx = i
+        ref_index = best_idx
+        cb(5, f"Referans: #{ref_index+1} (skor: {best_score:.3f})")
     else:
-        ref_idx = max(0, min(int(ref_index), len(calibrated)-1))
+        ref_index = max(0, min(ref_index, len(frames) - 1))
 
-    _cb(6, f"  Referans kare: #{ref_idx+1}")
+    base = frames[ref_index]
 
-    # Kalite eleme
-    keep_idx = list(range(len(calibrated)))
-    if quality_reject and len(calibrated) > 3:
-        sc_vals = [s["score"] for s in scores]
-        max_sc  = max(sc_vals) if sc_vals else 1.0
-        auto_thr = max(quality_threshold, max_sc * 0.15)
-        keep_idx = [i for i in keep_idx if scores[i]["score"] >= auto_thr]
-        if ref_idx not in keep_idx:
-            keep_idx.append(ref_idx)
-        rejected = [i+1 for i in range(len(calibrated)) if i not in keep_idx]
-        if rejected:
-            _cb(6, f"  Reddedilen: {rejected}")
-
-    used = [calibrated[i] for i in keep_idx]
-    used_paths = [light_paths[i] for i in keep_idx]
-    new_ref = keep_idx.index(ref_idx) if ref_idx in keep_idx else 0
-    reference = used[new_ref]
-
-    # Normalize
-    if normalize:
-        ref_med = float(np.median(reference))
-        for i in range(len(used)):
-            f_med = float(np.median(used[i]))
-            if f_med > 1e-9:
-                used[i] = np.clip(used[i] * (ref_med / f_med), 0, 1).astype(np.float32)
-
-    # Hizalama
-    if align_method == "none":
-        _cb(7, "Hizalama atlandı")
-        return used
-
-    _cb(7, f"Hizalanıyor ({align_method}, {len(used)} kare)...")
+    # ── 4. AKAZE Hizalama — her kare dogrudan referansa hizalanir ──
+    cb(6, "AKAZE hizalama basliyor…")
     aligned = []
-    for i, frame in enumerate(used):
-        if i == new_ref:
-            aligned.append(frame)
-        else:
-            _cb(7, f"  {i+1}/{len(used)}: {os.path.basename(used_paths[i])}")
-            try:
-                al = align_frame(frame, reference, method=align_method)
-                aligned.append(al)
-            except Exception as e:
-                _cb(7, f"  ⚠ #{i+1} hizalama başarısız: {e}")
-                aligned.append(frame)
+    n_ok = 0
+    n_fail = 0
 
-    _cb(7, f"✅ Hizalama tamamlandı — {len(aligned)} kare")
+    # Referans kare keypoint cache — bir kez hesapla, tum kareler icin kullan
+    base_cache = {}
+
+    for i, fr in enumerate(frames):
+        cb(6, f"Hizalama {i+1}/{n}")
+        if i == ref_index:
+            aligned.append(base.copy())
+            n_ok += 1
+            continue
+
+        H = _compute_homography(fr, base, threshold=0.85,
+                                cache=base_cache, frame_num=i)
+
+        # AKAZE basarili — transform parametrelerini kontrol et
+        if H is not None:
+            tx, ty = H[0, 2], H[1, 2]
+            scale = np.sqrt(H[0, 0]**2 + H[1, 0]**2)
+            # Olcek ~1.0 olmali (astro karelerde zoom degismez)
+            if abs(scale - 1.0) > 0.05:
+                cb(6, f"  ⚠ Kare {i+1}: scale={scale:.3f} — AKAZE yanlis eslesme")
+                H = None
+
+        if H is not None:
+            warped = _warp_image(fr, H)
+            aligned.append(warped)
+            n_ok += 1
+        else:
+            # ECC fallback
+            H_ecc = _ecc_fallback(fr, base)
+            if H_ecc is not None:
+                warped = _warp_image(fr, H_ecc)
+                aligned.append(warped)
+                n_ok += 1
+                cb(6, f"  Kare {i+1}: ECC fallback ile hizalandi")
+            else:
+                n_fail += 1
+                cb(6, f"  ⚠ Kare {i+1}: hizalanamadi — atlandi")
+
+    cb(7, f"✅ Hizalama tamamlandi — {n_ok} basarili, {n_fail} hizalanamayan")
     return aligned
+
+
+def _ecc_fallback(img: np.ndarray, base: np.ndarray) -> Optional[np.ndarray]:
+    """ECC (Enhanced Correlation Coefficient) hizalama — AKAZE basarisiz olursa.
+    Asinh + CLAHE ile normalize eder — farkli parlakliktaki seanslar icin."""
+    try:
+        # Ayni enhance pipeline'i kullan — parlaklık farklarini giderir
+        g1 = _enhance_for_detection(_to_gray_float(img))
+        g2 = _enhance_for_detection(_to_gray_float(base))
+
+        # Kucultulmus goruntu ile ECC — hiz icin
+        scale = 0.25
+        h, w = g1.shape[:2]
+        small1 = cv2.resize(g1, (int(w * scale), int(h * scale)))
+        small2 = cv2.resize(g2, (int(w * scale), int(h * scale)))
+
+        warp_matrix = np.eye(2, 3, dtype=np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6)
+        _, warp_matrix = cv2.findTransformECC(
+            small2.astype(np.float32), small1.astype(np.float32),
+            warp_matrix, cv2.MOTION_EUCLIDEAN, criteria,
+            inputMask=None, gaussFiltSize=5
+        )
+
+        # Kucuk olcekteki transformu tam olcege cevir
+        warp_matrix[0, 2] /= scale
+        warp_matrix[1, 2] /= scale
+
+        H = np.eye(3, dtype=np.float64)
+        H[:2, :] = warp_matrix
+        return H
+    except cv2.error:
+        return None
 
 
 def stack_aligned(
     aligned_frames: List[np.ndarray],
     method: str = "kappa_sigma",
-    kappa: float = 2.0,
-    kappa_low: float = 2.0,
-    kappa_high: float = 2.0,
-    iterations: int = 5,
+    kappa: float = 2.5,
+    kappa_low: float = 2.5,
+    kappa_high: float = 2.5,
+    iterations: int = 3,
+    weight_mode: str = "equal",
     quality_reject: bool = False,
-    quality_threshold: float = 0.2,
-    weight_mode: str = "none",
-    progress_cb: Optional[Callable] = None,
+    quality_threshold: float = 0.3,
+    drizzle_scale: int = 0,
+    progress_cb: Callable = None,
+    **kwargs,
 ) -> dict:
-    """
-    Faz 2: Önceden hizalanmış karelerden stacking.
-    align_frames_only çıktısını alır.
-    """
-    def _cb(step, msg):
-        if progress_cb: progress_cb(step, msg)
-
+    """Onceden hizalanmis kareleri stackle."""
     if not aligned_frames:
-        return {"result": None, "n_lights": 0}
+        raise ValueError("Hizalanmis kare yok!")
 
-    _cb(1, f"Stack ({method}, {len(aligned_frames)} kare)...")
-    stack = np.stack(aligned_frames, axis=0).astype(np.float32)
+    def cb(step, msg):
+        if progress_cb:
+            progress_cb(step, msg)
 
-    # Ağırlıklandırma
-    frame_weights = None
-    if weight_mode in ("snr","fwhm","stars"):
-        _cb(1, "Kare kalitesi ölçülüyor (ağırlıklandırma için)...")
-        w_scores = [score_frame(f) for f in aligned_frames]
-        if weight_mode == "snr":
-            w_vals = np.array([max(s["snr"],0.1) for s in w_scores], dtype=np.float32)
-        elif weight_mode == "fwhm":
-            w_vals = 1.0 / np.array([max(s["fwhm"],0.5) for s in w_scores], dtype=np.float32)
-        else:
-            w_vals = np.array([max(s["star_count"],1) for s in w_scores], dtype=np.float32)
-        frame_weights = w_vals / w_vals.sum()
+    n = len(aligned_frames)
+    cb(8, f"{n} kare stackleniyor — metot: {method}")
 
-    stack_fns = {
-        "mean":             _mean_stack,
-        "median":           _median_stack,
-        "kappa_sigma":      lambda s: _kappa_sigma(s, kappa=kappa, iterations=int(iterations)),
-        "kappa_sigma_dual": lambda s: _kappa_sigma(s, kappa=kappa, iterations=int(iterations)),
-        "winsorized":       lambda s: _winsorized(s, kappa_low=kappa_low,
-                                                   kappa_high=kappa_high,
-                                                   iterations=int(iterations)),
-        "linear_fit":       _linear_fit,
-        "entropy_weighted": _entropy_weighted,
-        "maximum":          _maximum_stack,
-        "minimum":          _minimum_stack,
-        "sum":              _sum_stack,
-    }
+    # Maskeleri olustur (siyah kenarlar icin)
+    masks = []
+    for fr in aligned_frames:
+        gray = _to_gray_float(fr)
+        mask = (gray > 1e-6).astype(np.float32)
+        masks.append(mask)
 
-    if frame_weights is not None and method in ("mean","entropy_weighted"):
-        if stack.ndim == 4:
-            result = (stack * frame_weights[:, None, None, None]).sum(axis=0)
-        else:
-            result = (stack * frame_weights[:, None, None]).sum(axis=0)
-        result = result.astype(np.float32)
+    # Stack
+    if method == "median":
+        result = _stack_median(aligned_frames, masks)
+    elif method in ("kappa_sigma", "median_kappa_sigma"):
+        result = _stack_kappa_sigma(aligned_frames, masks,
+                                    kappa=kappa, iterations=iterations)
     else:
-        fn = stack_fns.get(method, _kappa_sigma)
-        result = fn(stack)
+        # Varsayilan: maskeli ortalama (mean)
+        result = _stack_mean(aligned_frames, masks)
 
-    result = np.clip(result, 0, 1).astype(np.float32)
-    _cb(2, f"✅ Stack tamamlandı — {len(aligned_frames)} kare birleştirildi")
+    cb(8, f"✅ Stacking tamamlandi — {n} kare birlestirildi")
 
     return {
-        "result":          result,
-        "n_lights":        len(aligned_frames),
-        "n_rejected":      0,
+        "result": result,
+        "n_lights": n,
+        "n_rejected": 0,
+        "method": method,
+        "frame_scores": [],
         "rejected_frames": [],
-        "frame_scores":    [],
-        "method":          method,
-        "align_method":    "pre-aligned",
-        "ref_index":       0,
     }
+
+
+def stack_lights(
+    light_paths: List[str],
+    dark_paths: List[str] = None,
+    flat_paths: List[str] = None,
+    dark_flat_paths: List[str] = None,
+    bias_paths: List[str] = None,
+    method: str = "kappa_sigma",
+    align_method: str = "AKAZE",
+    ref_index: int = 0,
+    ref_mode: str = "first",
+    kappa: float = 2.5,
+    kappa_low: float = 2.5,
+    kappa_high: float = 2.5,
+    iterations: int = 3,
+    quality_reject: bool = False,
+    quality_threshold: float = 0.3,
+    normalize: bool = True,
+    weight_mode: str = "equal",
+    dark_optimize: bool = False,
+    drizzle_scale: int = 0,
+    hot_pixel_removal: bool = True,
+    progress_cb: Callable = None,
+    **kwargs,
+) -> dict:
+    """Tam pipeline: yukle → kalibre → hizala → stackle."""
+
+    # 1. Hizala
+    aligned = align_frames_only(
+        light_paths=light_paths,
+        dark_paths=dark_paths,
+        flat_paths=flat_paths,
+        dark_flat_paths=dark_flat_paths,
+        bias_paths=bias_paths,
+        align_method=align_method,
+        ref_index=ref_index,
+        ref_mode=ref_mode,
+        normalize=normalize,
+        quality_reject=quality_reject,
+        quality_threshold=quality_threshold,
+        progress_cb=progress_cb,
+    )
+
+    if not aligned:
+        raise ValueError("Hizalanmis kare yok — stacking yapilamaz.")
+
+    # 2. Stackle
+    result = stack_aligned(
+        aligned_frames=aligned,
+        method=method,
+        kappa=kappa,
+        kappa_low=kappa_low,
+        kappa_high=kappa_high,
+        iterations=iterations,
+        weight_mode=weight_mode,
+        quality_reject=quality_reject,
+        quality_threshold=quality_threshold,
+        drizzle_scale=drizzle_scale,
+        progress_cb=progress_cb,
+    )
+
+    return result

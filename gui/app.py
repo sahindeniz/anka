@@ -6,6 +6,8 @@ import re
 import traceback
 import numpy as np
 
+from core.loader import FILE_FILTER as _FILE_FILTER
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QLabel, QSlider, QCheckBox,
@@ -298,8 +300,9 @@ class PC(QWidget):
 
 # ═══════════════════════════════ PROCESS PANEL ══════════════════════════════
 class ProcessPanel(QWidget):
-    """\n    Collapsible process panel.\n    Header: icon + title (click to expand/collapse) + ▶ Run button\n    Body: parameters (hidden when collapsed)\n    """
+    """\n    Collapsible process panel.\n    Header: icon + title (click to expand/collapse) + ▶ Run button\n    Body: parameters (hidden when collapsed)\n    Live preview: slider/combo changes trigger debounced preview.\n    """
     run_requested = pyqtSignal(dict)
+    preview_requested = pyqtSignal(dict)
 
     def __init__(self, icon, title, key="", parent=None):
         super().__init__(parent)
@@ -340,10 +343,25 @@ class ProcessPanel(QWidget):
         self.btn_run.setToolTip("Run this process")
         self.btn_run.clicked.connect(self._emit)
 
+        # Live preview toggle
+        self._live_cb = QCheckBox("👁")
+        self._live_cb.setChecked(False)
+        self._live_cb.setToolTip("Canlı Önizleme — parametre değişince anında uygula")
+        self._live_cb.setStyleSheet(
+            f"QCheckBox{{color:{ACCENT2};font-size:12px;spacing:2px;}}"
+            f"QCheckBox::indicator{{width:14px;height:14px;}}")
+
         hlay.addWidget(self._arrow)
         hlay.addWidget(self._title_lbl, 1)
+        hlay.addWidget(self._live_cb)
         hlay.addWidget(self.btn_run)
         outer.addWidget(self._hdr)
+
+        # ── Live preview debounce timer ──────────────────────────────────
+        self._preview_timer = QTimer()
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(400)  # ms
+        self._preview_timer.timeout.connect(self._emit_preview)
 
         # ── Body ──────────────────────────────────────────────────────────
         self._body = QWidget()
@@ -388,7 +406,27 @@ class ProcessPanel(QWidget):
     def add(self, key, widget, getter=None):
         self._bl.addWidget(widget)
         self._params[key] = (widget, getter or (lambda w: w.v()))
+        # Connect live preview signals
+        self._connect_live(widget)
         return widget
+
+    def _connect_live(self, widget):
+        """Connect widget change signals to live preview debounce."""
+        if isinstance(widget, PS):
+            widget.sl.valueChanged.connect(self._schedule_preview)
+        elif isinstance(widget, PC):
+            widget.cb.currentIndexChanged.connect(self._schedule_preview)
+        elif isinstance(widget, QCheckBox):
+            widget.stateChanged.connect(self._schedule_preview)
+
+    def _schedule_preview(self, *_args):
+        """Start debounce timer if live preview is on."""
+        if self._live_cb.isChecked():
+            self._preview_timer.start()
+
+    def _emit_preview(self):
+        """Emit preview signal with current params."""
+        self.preview_requested.emit(self.collect())
 
     def add_sep(self):
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -1509,7 +1547,7 @@ class RecompositionDialog(QDialog):
         from core.loader import load_image
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Starless Image", "",
-            "Images (*.fits *.fit *.tif *.tiff *.png *.jpg *.jpeg);;All (*)")
+            _FILE_FILTER)
         if not path: return
         try:
             self._starless = load_image(path)
@@ -1525,7 +1563,7 @@ class RecompositionDialog(QDialog):
         from core.loader import load_image
         path, _ = QFileDialog.getOpenFileName(
             self, "Select Stars-Only Image", "",
-            "Images (*.fits *.fit *.tif *.tiff *.png *.jpg *.jpeg);;All (*)")
+            _FILE_FILTER)
         if not path: return
         try:
             self._stars = load_image(path)
@@ -1652,6 +1690,8 @@ class WorkflowPanel(QFrame):
          "Lineer→Non-lineer. Veralux HMS önerilen. Bu noktadan sonra lineer işlem yapılmaz!"),
         ("stars",   "⭐", "Star Removal",        "#884488", "NON-LİNEER",
          "Yıldızları ayır (StarNet++). Yıldızsız katmanda kontrast işlemleri çok daha etkili."),
+        ("star_shrink","✦↓","Star Shrink",       "#884488", "NON-LİNEER",
+         "Yıldız küçültme — çekirdek/halo ayrımı ile yıldız boyutunu azalt."),
         ("sharp",   "🔪", "Sharpen",             "#884488", "NON-LİNEER",
          "Yapı ve doku detayları. Revela (Veralux) yıldızsız katmanda çok daha temiz çalışır."),
         ("color",   "🎨", "Color Grading",       "#884488", "NON-LİNEER",
@@ -2135,9 +2175,12 @@ class FrameTableWidget(QWidget):
     """
     frames_changed = pyqtSignal()
 
+    ref_changed = pyqtSignal(int)   # referans kare index'i değişti
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._frames = []   # list of dict: {path, name, info, score, rejected}
+        self._ref_index = 0  # referans kare index'i
         self._build()
 
     def _build(self):
@@ -2160,7 +2203,7 @@ class FrameTableWidget(QWidget):
         # Sütun başlıkları
         hdr = QWidget(); hdr.setStyleSheet(f"background:{BG3};border-bottom:1px solid {BORDER};")
         hdr_lay = QHBoxLayout(hdr); hdr_lay.setContentsMargins(4,2,4,2); hdr_lay.setSpacing(0)
-        for lbl, w in [("Durum",44),("Dosya",0),("Poz.",64),("Yıldız",52),("Skor",52),("Aksiyon",52)]:
+        for lbl, w in [("Durum",44),("Ref",30),("Dosya",0),("Poz.",64),("Yıldız",52),("Skor",52),("Aksiyon",52)]:
             l = QLabel(lbl); l.setStyleSheet(f"color:{SUBTEXT};font-size:8px;font-weight:700;")
             if w: l.setFixedWidth(w)
             else: l.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -2191,7 +2234,7 @@ class FrameTableWidget(QWidget):
     def _add_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, "Light karelerini seç", "",
-            "Görseller (*.fits *.fit *.fts *.tif *.tiff *.png *.jpg *.jpeg *.bmp);;Tümü (*)")
+            _FILE_FILTER)
         for p in paths:
             if not any(f["path"] == p for f in self._frames):
                 info = self._read_meta(p)
@@ -2269,6 +2312,23 @@ class FrameTableWidget(QWidget):
         status_lbl.setStyleSheet(f"color:{status_clr};font-size:13px;font-weight:700;")
         status_lbl.setFixedWidth(22); status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        # Referans kare butonu
+        is_ref = (idx == self._ref_index)
+        ref_btn = QPushButton("★" if is_ref else "☆")
+        ref_btn.setFixedSize(24, 22)
+        ref_btn.setToolTip("Referans kare olarak seç" if not is_ref else "Bu referans kare")
+        ref_btn.setStyleSheet(
+            f"QPushButton{{background:{'#2a2a0a' if is_ref else BG3};"
+            f"color:{GOLD if is_ref else MUTED};"
+            f"border:1px solid {GOLD if is_ref else BORDER};border-radius:3px;"
+            f"font-size:12px;font-weight:700;}}"
+            f"QPushButton:hover{{background:#2a2a1a;color:{GOLD};}}")
+        def _set_ref(i=idx):
+            self._ref_index = i
+            self._rebuild_rows()
+            self.ref_changed.emit(i)
+        ref_btn.clicked.connect(_set_ref)
+
         # Dosya adı
         name_lbl = QLabel(fr["name"])
         name_lbl.setStyleSheet(
@@ -2297,6 +2357,7 @@ class FrameTableWidget(QWidget):
         tog_btn.setToolTip("Reddet / Geri Al")
 
         rl.addWidget(status_lbl)
+        rl.addWidget(ref_btn)
         rl.addWidget(name_lbl, 1)
         rl.addWidget(exp_lbl)
         rl.addWidget(stars_lbl)
@@ -2329,31 +2390,53 @@ class FrameTableWidget(QWidget):
         return row
 
     def _scan_all(self):
-        """Tüm light karelerini analiz et (arka planda)."""
-        from processing.stacking import score_frame
-        from core.loader import load_image
+        """Tüm light karelerini analiz et (arka plan thread'de)."""
+        if hasattr(self, '_scan_thread') and self._scan_thread is not None and self._scan_thread.isRunning():
+            return
         self.btn_scan.setText("⏳ Analiz...")
         self.btn_scan.setEnabled(False)
-        total = len(self._frames)
 
-        for i, fr in enumerate(self._frames):
-            try:
-                img = load_image(fr["path"])
-                sc  = score_frame(img)
-                self._frames[i]["score"]   = sc["score"]
-                self._frames[i]["stars"]   = sc["star_count"]
-                self._frames[i]["fwhm"]    = sc["fwhm"]
-                self._frames[i]["snr"]     = sc["snr"]
-                # Düşük skor → auto-reject
-                if sc["score"] < 0.15:
-                    self._frames[i]["rejected"] = True
-            except Exception:
-                pass
+        class _ScanWorker(QThread):
+            progress = pyqtSignal(int, int, dict)  # idx, total, result
+            done = pyqtSignal()
 
-        self._rebuild_rows()
-        self.frames_changed.emit()
-        self.btn_scan.setText("📊 Analiz")
-        self.btn_scan.setEnabled(True)
+            def __init__(self, frames):
+                super().__init__()
+                self._frames = frames
+
+            def run(self):
+                from processing.stacking import score_frame
+                from core.loader import load_image
+                total = len(self._frames)
+                for i, fr in enumerate(self._frames):
+                    try:
+                        img = load_image(fr["path"])
+                        sc = score_frame(img)
+                        self.progress.emit(i, total, sc)
+                    except Exception:
+                        self.progress.emit(i, total, {})
+                self.done.emit()
+
+        self._scan_thread = _ScanWorker(self._frames)
+
+        def _on_progress(idx, total, sc):
+            if sc:
+                self._frames[idx]["score"] = sc.get("score", 0)
+                self._frames[idx]["stars"] = sc.get("star_count", 0)
+                self._frames[idx]["fwhm"] = sc.get("fwhm", 0)
+                self._frames[idx]["snr"] = sc.get("snr", 0)
+            self._rebuild_rows()
+            self.btn_scan.setText(f"⏳ {idx+1}/{total}")
+
+        def _on_done():
+            self._rebuild_rows()
+            self.frames_changed.emit()
+            self.btn_scan.setText("📊 Analiz")
+            self.btn_scan.setEnabled(True)
+
+        self._scan_thread.progress.connect(_on_progress)
+        self._scan_thread.done.connect(_on_done)
+        self._scan_thread.start()
 
     def _del_rejected(self):
         """Reddedilmiş kareleri listeden kaldır."""
@@ -2374,6 +2457,10 @@ class FrameTableWidget(QWidget):
 
     def count(self):
         return len(self._frames)
+
+    def get_ref_index(self):
+        """Seçili referans kare index'ini döndür."""
+        return self._ref_index
 
 
 class StackingDialog(QDialog):
@@ -2424,6 +2511,7 @@ class StackingDialog(QDialog):
         self._frame_table = FrameTableWidget()
         self._frame_table.setMinimumHeight(280)
         self._frame_table.frames_changed.connect(self._update_summary)
+        self._frame_table.ref_changed.connect(self._on_ref_selected)
         lg_lay.addWidget(self._frame_table)
         ll.addWidget(light_grp, 1)
 
@@ -2547,7 +2635,7 @@ class StackingDialog(QDialog):
     def _add_calib(self, key):
         paths, _ = QFileDialog.getOpenFileNames(
             self, f"{key} kareleri seç", "",
-            "Görseller (*.fits *.fit *.fts *.tif *.tiff *.png *.jpg *.jpeg *.bmp);;Tümü (*)")
+            _FILE_FILTER)
         lst = self._lists[key]
         for p in paths:
             item = QListWidgetItem(os.path.basename(p))
@@ -2588,7 +2676,8 @@ class StackingDialog(QDialog):
                 r.addWidget(ht)
             r.addStretch(); lay.addLayout(r)
         self.combo_method = QComboBox()
-        self.combo_method.addItems(["kappa_sigma","winsorized","median","mean",
+        self.combo_method.addItems(["kappa_sigma","median_kappa_sigma","adaptive_weighted",
+                                    "winsorized","median","mean",
                                     "linear_fit","entropy_weighted","maximum","minimum","sum"])
         self.combo_method.setStyleSheet(COMBO_CSS); self.combo_method.setFixedWidth(160)
         _row("Stacking Metodu:", self.combo_method)
@@ -2635,16 +2724,21 @@ class StackingDialog(QDialog):
 
         # Hizalama metodu
         self.combo_align = QComboBox()
-        self.combo_align.addItems(["ecc_euclidean","ecc_translation","ecc_affine",
-                                   "orb_homography","sift_homography","star_match","none"])
+        self.combo_align.addItems(["triangle_match","star_match",
+                                   "orb_homography","sift_homography",
+                                   "ecc_euclidean","ecc_translation","ecc_affine",
+                                   "none"])
         self.combo_align.setStyleSheet(COMBO_CSS); self.combo_align.setFixedWidth(160)
         self.combo_align.setToolTip(
-            "ecc_euclidean  — ECC öteleme+dönme (önerilen)\n"
-            "ecc_translation— ECC sadece öteleme (hızlı)\n"
-            "ecc_affine     — ECC tam affine\n"
+            "triangle_match — DSS üçgen eşleme (önerilen, hızlı)\n"
+            "star_match     — Yıldız eşleme\n"
             "orb_homography — ORB özellik eşleme\n"
             "sift_homography— SIFT özellik eşleme\n"
+            "ecc_euclidean  — ECC öteleme+dönme (yavaş, hassas)\n"
+            "ecc_translation— ECC sadece öteleme\n"
+            "ecc_affine     — ECC tam affine (en yavaş)\n"
             "star_match     — Yıldız koordinat eşleme\n"
+            "triangle_match — DSS üçgen eşleme (en doğru)\n"
             "none           — Hizalama yok")
         _row("Hizalama Metodu:", self.combo_align)
 
@@ -2746,7 +2840,36 @@ class StackingDialog(QDialog):
         b_browse.clicked.connect(lambda: self.edit_save_dir.setText(
             QFileDialog.getExistingDirectory(self,"Master kayıt klasörü seç") or self.edit_save_dir.text()))
         save_row.addWidget(self.edit_save_dir); save_row.addWidget(b_browse)
-        lay.addLayout(save_row); lay.addStretch(); return w
+        lay.addLayout(save_row)
+
+        lay.addWidget(self._sep())
+
+        # Dark optimization
+        self.chk_dark_optimize = QCheckBox("Dark optimization (entropi minimizasyonu)")
+        self.chk_dark_optimize.setChecked(True); self.chk_dark_optimize.setStyleSheet(CHECK_CSS)
+        self.chk_dark_optimize.setToolTip("DSS: Dark frame katsayisini entropi minimizasyonu ile optimize eder")
+        lay.addWidget(self.chk_dark_optimize)
+
+        lay.addWidget(self._sep())
+
+        # Drizzle
+        drz_row = QHBoxLayout(); drz_row.setSpacing(8)
+        dl = QLabel("Drizzle Scale:"); dl.setStyleSheet(LBL_CSS); dl.setFixedWidth(140)
+        self.combo_drizzle = QComboBox()
+        self.combo_drizzle.addItems(["none","2x","3x"])
+        self.combo_drizzle.setStyleSheet(COMBO_CSS); self.combo_drizzle.setFixedWidth(80)
+        self.combo_drizzle.setToolTip("Drizzle super-resolution: 2x veya 3x cozunurluk artirma\n"
+                                       "Dithering yapilmis kareler icin ideal")
+        drz_row.addWidget(dl); drz_row.addWidget(self.combo_drizzle); drz_row.addStretch()
+        lay.addLayout(drz_row)
+
+        # Hot pixel temizleme
+        self.chk_hot_pixel = QCheckBox("Hot pixel tespit ve temizleme (dark frame gerekli)")
+        self.chk_hot_pixel.setChecked(True); self.chk_hot_pixel.setStyleSheet(CHECK_CSS)
+        self.chk_hot_pixel.setToolTip("Master dark frame'den 16-sigma ile sicak piksel haritasi cikarir")
+        lay.addWidget(self.chk_hot_pixel)
+
+        lay.addStretch(); return w
 
     def _sep(self):
         line = QFrame(); line.setFrameShape(QFrame.Shape.HLine)
@@ -2755,10 +2878,44 @@ class StackingDialog(QDialog):
     def _on_ref_mode_change(self, mode):
         self.spin_ref.setEnabled(mode == "manual")
 
+    def _on_ref_selected(self, idx):
+        """FrameTableWidget'ten referans kare seçildi."""
+        self.combo_ref_mode.setCurrentText("manual")
+        self.spin_ref.setValue(idx + 1)
+        fr = self._frame_table._frames[idx] if idx < len(self._frame_table._frames) else None
+        if fr:
+            self._log(f"★ Referans kare: #{idx+1} — {fr['name']}")
+
     def _log(self, msg):
         self.log.append(msg)
         self.log.verticalScrollBar().setValue(self.log.verticalScrollBar().maximum())
         self._lbl_progress.setText(msg.split("\\n")[0][:80])
+
+    def _check_calibration_warn(self):
+        """Dark/Flat/Bias eksikse sadece eksik olanları uyar. True=devam, False=iptal."""
+        added = []
+        missing = []
+        for key, label in [("dark", "Dark"), ("flat", "Flat"),
+                           ("bias", "Bias"), ("dark_flat", "Dark Flat")]:
+            if self._get_calib_paths(key):
+                added.append(label)
+            else:
+                missing.append(label)
+        if not missing:
+            return True
+        lines = []
+        if added:
+            lines.append("Eklenen:  " + ", ".join(f"✓ {a}" for a in added))
+        lines.append("Eksik:    " + ", ".join(f"✗ {m}" for m in missing))
+        detail = "\n".join(lines)
+        msg = (f"{detail}\n\n"
+               f"Eksik kalibrasyon kareleri sonuç kalitesini düşürebilir.\n"
+               f"Yine de devam etmek istiyor musunuz?")
+        reply = QMessageBox.question(
+            self, "Kalibrasyon Uyarısı", msg,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        return reply == QMessageBox.StandardButton.Yes
 
     def _run_alignment(self):
         """Faz 1: Sadece hizalama — kareleri hizala, hafızada tut."""
@@ -2769,7 +2926,6 @@ class StackingDialog(QDialog):
             QMessageBox.information(self,"Bilgi",
                 "Hizalama metodu 'none' seçili.\n"
                 "Hizalama atlanıyor — direkt stacking yapabilirsiniz."); return
-
         self.btn_align.setEnabled(False)
         self.btn_align.setText("⏳ Hizalanıyor…")
         self.btn_stack.setEnabled(False)
@@ -2782,6 +2938,13 @@ class StackingDialog(QDialog):
         self._log(f"🎯 Hizalama başlıyor — {len(lights)} kare, "
                   f"metot: {self.combo_align.currentText()}")
 
+        # Referans: manual modda FrameTableWidget'ten al
+        ref_mode = self.combo_ref_mode.currentText()
+        if ref_mode == "manual":
+            ref_idx = self._frame_table.get_ref_index()
+        else:
+            ref_idx = int(self.spin_ref.value()) - 1
+
         params = {
             "light_paths":   lights,
             "dark_paths":    self._get_calib_paths("dark"),
@@ -2789,8 +2952,8 @@ class StackingDialog(QDialog):
             "dark_flat_paths": self._get_calib_paths("dark_flat"),
             "bias_paths":    self._get_calib_paths("bias"),
             "align_method":  self.combo_align.currentText(),
-            "ref_index":     int(self.spin_ref.value()) - 1,
-            "ref_mode":      self.combo_ref_mode.currentText(),
+            "ref_index":     ref_idx,
+            "ref_mode":      ref_mode,
             "normalize":     self.chk_normalize.isChecked(),
             "quality_reject":self.chk_quality_reject.isChecked(),
             "quality_threshold": float(self.spin_quality_thr.value()),
@@ -2840,6 +3003,9 @@ class StackingDialog(QDialog):
             QMessageBox.warning(self,"Uyarı","En az 1 kabul edilmiş Light karesi gerekli."); return
         self.spin_ref.setMaximum(len(lights))
 
+        if not self._check_calibration_warn():
+            return
+
         self.btn_stack.setEnabled(False); self.btn_stack.setText("⏳ Stack yapılıyor…")
         self._stack_pbar.setValue(0); self._stack_pbar.setFormat("Başlatılıyor…")
         self._pbar_lbl.setText("0%")
@@ -2849,6 +3015,8 @@ class StackingDialog(QDialog):
         if self._aligned_frames and len(self._aligned_frames) > 0:
             self._log(f"▶ Stacking (hizalanmış {len(self._aligned_frames)} kare) "
                       f"— {self.combo_method.currentText()}")
+            drz = self.combo_drizzle.currentText()
+            drizzle_scale = 0 if drz == "none" else int(drz.replace("x",""))
             params = {
                 "aligned_frames":    self._aligned_frames,
                 "method":            self.combo_method.currentText(),
@@ -2859,6 +3027,7 @@ class StackingDialog(QDialog):
                 "weight_mode":       self.combo_weight.currentText(),
                 "quality_reject":    self.chk_quality_reject.isChecked(),
                 "quality_threshold": float(self.spin_quality_thr.value()),
+                "drizzle_scale":     drizzle_scale,
             }
             self._worker = StackWorker(params, mode="stack")
         else:
@@ -2870,6 +3039,10 @@ class StackingDialog(QDialog):
             self._align_status.setStyleSheet(
                 f"color:{GOLD};font-size:10px;background:{BG3};"
                 f"border:1px solid {GOLD};border-radius:4px;padding:6px 10px;")
+            ref_mode_f = self.combo_ref_mode.currentText()
+            ref_idx_f = self._frame_table.get_ref_index() if ref_mode_f == "manual" else int(self.spin_ref.value()) - 1
+            drz2 = self.combo_drizzle.currentText()
+            drizzle_scale2 = 0 if drz2 == "none" else int(drz2.replace("x",""))
             params = {
                 "light_paths":       lights,
                 "dark_paths":        self._get_calib_paths("dark"),
@@ -2878,8 +3051,8 @@ class StackingDialog(QDialog):
                 "bias_paths":        self._get_calib_paths("bias"),
                 "method":            self.combo_method.currentText(),
                 "align_method":      self.combo_align.currentText(),
-                "ref_index":         int(self.spin_ref.value()) - 1,
-                "ref_mode":          self.combo_ref_mode.currentText(),
+                "ref_index":         ref_idx_f,
+                "ref_mode":          ref_mode_f,
                 "kappa":             float(self.spin_kappa.value()),
                 "kappa_low":         float(self.spin_kappa_low.value()),
                 "kappa_high":        float(self.spin_kappa_high.value()),
@@ -2888,14 +3061,34 @@ class StackingDialog(QDialog):
                 "quality_threshold": float(self.spin_quality_thr.value()),
                 "normalize":         self.chk_normalize.isChecked(),
                 "weight_mode":       self.combo_weight.currentText(),
+                "dark_optimize":     self.chk_dark_optimize.isChecked(),
+                "drizzle_scale":     drizzle_scale2,
+                "hot_pixel_removal": self.chk_hot_pixel.isChecked(),
             }
             self._worker = StackWorker(params, mode="full")
 
         self._score_table.clear()
-        self._worker.progress.connect(self._log)
+        self._stack_step_count = 0
+        self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_done)
         self._worker.error.connect(self._on_error)
         self._worker.start()
+
+    def _on_progress(self, msg):
+        """Progress sinyali — log + progress bar güncelle."""
+        self._log(msg)
+        self._stack_step_count += 1
+        # Step numarasından ilerleme tahmin et
+        # [1] Bias → [2] Dark → [3] DarkFlat → [4] Flat → [5] Kalibrasyon
+        # [6] Kalite → [7] Hizalama → [8] Stack
+        import re
+        m = re.match(r'\[(\d+)\]', msg)
+        if m:
+            step = int(m.group(1))
+            pct = min(95, int(step * 12))
+            self._stack_pbar.setValue(pct)
+            self._stack_pbar.setFormat(f"Adım {step}/8 — %p%")
+            self._pbar_lbl.setText(f"{pct}%")
 
     def _on_done(self, result):
         self._result = result
@@ -2926,37 +3119,181 @@ class StackingDialog(QDialog):
         if img is not None:
             self._save_result(img, n, result.get("method", "stack"))
 
-        self._close_timer = QTimer(self)
-        self._close_timer.setSingleShot(True)
-        self._close_timer.timeout.connect(self.accept)
-        self._close_timer.start(2500)
+        # Master kareleri kaydet (istenirse)
+        if self.chk_save_masters.isChecked():
+            self._save_masters(result)
+
+        # Final resmi dialog içinde önizleme olarak göster
+        if img is not None:
+            self._show_result_preview(img, n, result.get("method", "stack"))
+
+    def _show_result_preview(self, img, n_frames, method):
+        """Stacking sonucunu dialog içinde önizleme olarak göster."""
+        import numpy as _np
+        import cv2
+        try:
+            # Thumbnail oluştur
+            h, w = img.shape[:2]
+            max_dim = 500
+            scale = min(max_dim / w, max_dim / h, 1.0)
+            th, tw = int(h * scale), int(w * scale)
+            thumb = cv2.resize(img, (tw, th), interpolation=cv2.INTER_AREA)
+
+            # Auto-stretch for preview (lineer veri görünür olsun)
+            p_lo, p_hi = _np.percentile(thumb, [1, 99.5])
+            if p_hi - p_lo > 1e-6:
+                thumb = _np.clip((thumb - p_lo) / (p_hi - p_lo), 0, 1)
+
+            disp = (_np.clip(thumb, 0, 1) * 255).astype(_np.uint8)
+            if disp.ndim == 3:
+                disp = _np.ascontiguousarray(disp)
+                qimg = QImage(disp.data, tw, th, tw * 3, QImage.Format.Format_RGB888)
+            else:
+                disp = _np.ascontiguousarray(disp)
+                qimg = QImage(disp.data, tw, th, tw, QImage.Format.Format_Grayscale8)
+
+            pix = QPixmap.fromImage(qimg.copy())
+
+            # Preview dialog
+            preview = QDialog(self)
+            preview.setWindowTitle(f"✅ Stack Sonucu — {n_frames} kare × {method}")
+            preview.setMinimumSize(tw + 40, th + 120)
+            preview.setStyleSheet(f"background:{BG};color:{TEXT};")
+            play = QVBoxLayout(preview)
+
+            # Resim
+            img_lbl = QLabel()
+            img_lbl.setPixmap(pix)
+            img_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            play.addWidget(img_lbl, 1)
+
+            # Bilgi
+            info = QLabel(f"📐 {w}×{h}  |  📦 {n_frames} kare  |  ⚙ {method}\n"
+                         f"💾 Otomatik kaydedildi")
+            info.setStyleSheet(f"color:{MUTED};font-size:10px;padding:8px;")
+            info.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            play.addWidget(info)
+
+            # Butonlar
+            btn_row = QHBoxLayout()
+            btn_view = QPushButton("👁 Viewer'da Aç")
+            btn_view.setStyleSheet(_run_btn(ACCENT))
+            btn_view.setFixedHeight(32)
+            btn_close = QPushButton("Kapat")
+            btn_close.setStyleSheet(_btn())
+            btn_close.setFixedHeight(32)
+
+            def _open_in_viewer():
+                preview.accept()
+                self.accept()  # StackingDialog'u kapat → viewer'a yükle
+
+            btn_view.clicked.connect(_open_in_viewer)
+            btn_close.clicked.connect(preview.reject)
+            btn_row.addStretch()
+            btn_row.addWidget(btn_close)
+            btn_row.addWidget(btn_view)
+            play.addLayout(btn_row)
+
+            preview.exec()
+        except Exception as e:
+            self._log(f"⚠ Önizleme hatası: {e}")
+
+    def _save_masters(self, result):
+        """Master kalibrasyon karelerini kaydet."""
+        import numpy as _np, datetime as _dt, cv2
+        save_dir = self.edit_save_dir.text().strip()
+        if not save_dir:
+            # Light karelerin klasörünü kullan
+            lights = self._frame_table.get_accepted_paths()
+            if lights:
+                save_dir = os.path.dirname(os.path.abspath(lights[0]))
+            else:
+                return
+
+        os.makedirs(save_dir, exist_ok=True)
+        timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        for key, label in [("master_dark","dark"),("master_flat","flat"),("master_bias","bias")]:
+            master = result.get(key)
+            if master is not None:
+                fname = f"master_{label}_{timestamp}.tif"
+                path = os.path.join(save_dir, fname)
+                try:
+                    img16 = (_np.clip(master, 0, 1) * 65535).astype(_np.uint16)
+                    try:
+                        import tifffile as _tf
+                        _tf.imwrite(path, img16,
+                                    photometric="rgb" if master.ndim==3 else "minisblack")
+                    except ImportError:
+                        if master.ndim == 3:
+                            img16 = cv2.cvtColor(img16, cv2.COLOR_RGB2BGR)
+                        cv2.imwrite(path, img16)
+                    self._log(f"💾 Master {label}: {path}")
+                except Exception as e:
+                    self._log(f"⚠ Master {label} kayıt hatası: {e}")
 
     def _save_result(self, img, n_frames, method):
-        """Stacking sonucunu light karelerin klasörüne TIFF olarak kaydet."""
+        """Stacking sonucunu light karelerin klasörüne FITS + TIFF olarak kaydet."""
         import numpy as _np, datetime as _dt
         lights = self._frame_table.get_accepted_paths()
         if not lights:
             return
         save_dir = os.path.dirname(os.path.abspath(lights[0]))
         timestamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"stack_{n_frames}fr_{method}_{timestamp}.tif"
-        save_path = os.path.join(save_dir, fname)
+        base_name = f"stack_{n_frames}fr_{method}_{timestamp}"
+        saved_files = []
+
+        # ── TIFF (16-bit) ──
+        tif_path = os.path.join(save_dir, base_name + ".tif")
         try:
             img16 = (_np.clip(img, 0, 1) * 65535).astype(_np.uint16)
             try:
                 import tifffile as _tf
-                _tf.imwrite(save_path, img16,
-                            photometric="rgb" if img.ndim==3 else "minisblack",
+                _tf.imwrite(tif_path, img16,
+                            photometric="rgb" if img.ndim == 3 else "minisblack",
                             compression=None)
             except ImportError:
                 import cv2 as _cv2
                 if img.ndim == 3:
                     img16 = _cv2.cvtColor(img16, _cv2.COLOR_RGB2BGR)
-                _cv2.imwrite(save_path, img16, [_cv2.IMWRITE_TIFF_COMPRESSION, 1])
-            self._log(f"💾 Kaydedildi: {save_path}")
-            self._lbl_progress.setText(f"💾 {fname}")
+                _cv2.imwrite(tif_path, img16, [_cv2.IMWRITE_TIFF_COMPRESSION, 1])
+            saved_files.append(tif_path)
+            self._log(f"💾 TIFF kaydedildi: {tif_path}")
         except Exception as e:
-            self._log(f"⚠ Kayıt hatası: {e}")
+            self._log(f"⚠ TIFF kayıt hatası: {e}")
+
+        # ── FITS (32-bit float) ──
+        fits_path = os.path.join(save_dir, base_name + ".fits")
+        try:
+            from astropy.io import fits as _fits
+            hdr = _fits.Header()
+            hdr["NFRAMES"] = (n_frames, "Number of stacked frames")
+            hdr["METHOD"] = (method, "Stacking method")
+            hdr["DATE"] = (timestamp, "Processing date")
+            hdr["SOFTWARE"] = ("AstroMastroPro", "Stacking software")
+            hdr["BITPIX"] = (-32, "32-bit float")
+            img_f32 = _np.clip(img, 0, 1).astype(_np.float32)
+            if img_f32.ndim == 3:
+                # FITS convention: (channels, H, W)
+                fits_data = _np.transpose(img_f32, (2, 0, 1))
+                hdr["NAXIS"] = 3
+                hdr["NAXIS1"] = img_f32.shape[1]
+                hdr["NAXIS2"] = img_f32.shape[0]
+                hdr["NAXIS3"] = img_f32.shape[2]
+            else:
+                fits_data = img_f32
+            hdu = _fits.PrimaryHDU(data=fits_data, header=hdr)
+            hdu.writeto(fits_path, overwrite=True)
+            saved_files.append(fits_path)
+            self._log(f"💾 FITS kaydedildi: {fits_path}")
+        except ImportError:
+            self._log("⚠ FITS kayıt atlandı — astropy yüklü değil")
+        except Exception as e:
+            self._log(f"⚠ FITS kayıt hatası: {e}")
+
+        if saved_files:
+            names = ", ".join(os.path.basename(f) for f in saved_files)
+            self._lbl_progress.setText(f"💾 {names}")
 
     def _on_error(self, msg):
         self._log(f"❌ HATA:\n{msg}")
@@ -2965,6 +3302,7 @@ class StackingDialog(QDialog):
         self._pbar_lbl.setText("0%")
         QMessageBox.critical(self,"Stacking Hatası",msg[:1000])
         self.btn_stack.setEnabled(True); self.btn_stack.setText("🚀  Stacking Başlat")
+        self.btn_align.setEnabled(True); self.btn_align.setText("🎯  Hizala")
 
     def get_result(self):
         return self._result
@@ -2982,6 +3320,8 @@ class ImageViewer(QWidget):
         self._titles = ["", "", "", ""]
         self._active = 0      # which slot is "current"
         self._layout_n = 1    # 1, 2 or 4 panels
+        self._pre_stf_slots = [None, None, None, None]  # STF toggle: slot basina orijinal
+        self._welcome_visible = False  # arka plan composite gorunuyor mu
 
         # Histogram per-channel state
         # Each channel: [black, midtone, white]
@@ -3004,9 +3344,12 @@ class ImageViewer(QWidget):
         self._crop_rect   = None    # (x0,y0,x1,y1) piksel koordinatları
         self._crop_drag   = False   # sol tık basılı
         self._crop_start_pt = None  # sürükleme başlangıcı (data coords)
+        self._crop_start_xy = None  # sürükleme başlangıcı (Qt coords)
+        self._crop_edge_drag = None # hangi kenar surukluyor: 'left','right','top','bottom' veya None
         self._crop_patch    = None   # overlay patch
         self._crop_apply_cb  = None  # AstroApp tarafından set edilir
         self._crop_cancel_cb = None  # AstroApp tarafından set edilir
+        self._direct_crop_cb = None  # Crop modu olmadan dogrudan crop callback
 
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
 
@@ -3046,7 +3389,18 @@ class ImageViewer(QWidget):
         b_zi.clicked.connect(lambda: self._zoom_step(1.25))
         b_zo.clicked.connect(lambda: self._zoom_step(0.80))
         b_fit.clicked.connect(self._zoom_fit)
-        tbl.addWidget(b_zi); tbl.addWidget(b_zo); tbl.addWidget(b_fit)
+        b_stf = QPushButton("💡STF"); b_stf.setFixedSize(44,22)
+        b_stf.setCheckable(True)
+        b_stf.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
+            f"border-radius:3px;font-size:10px;}}"
+            f"QPushButton:checked{{background:#1a3a1a;color:#44ddff;"
+            f"border:1px solid #44ddff;}}"
+            f"QPushButton:hover{{color:{TEXT};}}")
+        b_stf.setToolTip("Auto Stretch (STF) — Toggle\nTikla: stretch / Tekrar tikla: geri al")
+        b_stf.clicked.connect(self._auto_stf_preview)
+        self._b_stf = b_stf  # toggle state icin referans
+        tbl.addWidget(b_zi); tbl.addWidget(b_zo); tbl.addWidget(b_fit); tbl.addWidget(b_stf)
 
         cmap_lbl = QLabel("Colormap:"); cmap_lbl.setStyleSheet(LBL_CSS)
         self.cmap_cb = QComboBox()
@@ -3104,6 +3458,8 @@ class ImageViewer(QWidget):
             canvas.mouseMoveEvent    = lambda ev, c=canvas: self._qt_move(ev, c._slot)
             canvas.mouseReleaseEvent = lambda ev, c=canvas: self._qt_release(ev, c._slot)
             canvas.contextMenuEvent  = lambda ev, c=canvas: None  # block default
+            # Mouse wheel zoom — hem Qt hem matplotlib event
+            canvas.wheelEvent = lambda ev, slot=i: self._qt_wheel(ev, slot)
             fig.canvas.mpl_connect("scroll_event",
                 lambda e,i=i: self._on_scroll(e,i))
             fig.canvas.mpl_connect("motion_notify_event",
@@ -3178,6 +3534,7 @@ class ImageViewer(QWidget):
 
         self.cmap_cb.currentTextChanged.connect(lambda _: self._redraw_all())
         self._set_layout(1)
+        self._show_welcome_bg()  # Bos ekranda kozmik arka plan goster
 
         # Pan state
         self._pan_start = {}   # slot → (x, y, xlim, ylim)
@@ -3187,6 +3544,44 @@ class ImageViewer(QWidget):
     def _sax_style(ax):
         ax.set_facecolor(BG); ax.tick_params(colors=ACCENT, labelsize=8)
         for sp in ax.spines.values(): sp.set_edgecolor(BORDER)
+
+    def _show_welcome_bg(self):
+        """Program acildiginda arka plan composite goster."""
+        try:
+            from gui.bg_composer import generate_composite_background, generate_welcome_overlay
+
+            # Senkron yukle — cache varsa <10ms, yoksa ~350ms (kabul edilir)
+            bg = generate_composite_background(1920, 1080)
+            bg = generate_welcome_overlay(bg)
+            self._welcome_bg = bg
+            self._welcome_visible = True
+            self._apply_welcome_bg()
+        except Exception:
+            self._welcome_bg = None
+            self._welcome_visible = False
+
+    def _apply_welcome_bg(self):
+        """Welcome arka planini canvas'a ciz."""
+        if self._welcome_bg is None:
+            return
+        if self._imgs[0] is not None:
+            return
+        ax = self._axes_view[0]
+        fig = self._figs_view[0]
+        ax.clear()
+        self._sax_style(ax)
+        ax.imshow(self._welcome_bg, aspect="auto", interpolation="bilinear", origin="upper")
+        ax.set_axis_off()
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        try:
+            fig.canvas.draw_idle()
+        except Exception:
+            pass
+        self._welcome_visible = True
+
+    def _hide_welcome_bg(self):
+        """Resim yuklendiginde arka plani kaldir."""
+        self._welcome_visible = False
 
     # ── Layout ───────────────────────────────────────────────────────────
     def _set_layout(self, n: int):
@@ -3218,6 +3613,9 @@ class ImageViewer(QWidget):
         self._active = slot
         self._hist_black = 0.0
         self._hist_white = 1.0
+        # Arka plan varsa kaldir
+        if hasattr(self, '_welcome_visible') and self._welcome_visible:
+            self._hide_welcome_bg()
         self._draw_slot(slot)
         self._hist_editor.set_image(img)
         self._draw_stats(img)
@@ -3277,6 +3675,34 @@ class ImageViewer(QWidget):
                 self._draw_slot(i)
 
     # ── Zoom & Pan ────────────────────────────────────────────────────────
+    def _qt_wheel(self, event, slot: int):
+        """Qt wheelEvent fallback — fare tekerleği ile zoom."""
+        delta = event.angleDelta().y()
+        if delta == 0:
+            return
+        factor = 1.2 if delta > 0 else (1 / 1.2)
+        if self._imgs[slot] is None:
+            return
+        ax = self._axes_view[slot]
+        # Zoom center: mouse position in data coords
+        pos = event.position()
+        # Transform Qt coords → data coords via inverse transform
+        inv = ax.transData.inverted()
+        try:
+            xdata, ydata = inv.transform((pos.x(), pos.y()))
+        except Exception:
+            xl = ax.get_xlim(); yl = ax.get_ylim()
+            xdata = (xl[0] + xl[1]) / 2
+            ydata = (yl[0] + yl[1]) / 2
+        xl = ax.get_xlim(); yl = ax.get_ylim()
+        ax.set_xlim(xdata + (xl[0] - xdata) / factor, xdata + (xl[1] - xdata) / factor)
+        ax.set_ylim(ydata + (yl[0] - ydata) / factor, ydata + (yl[1] - ydata) / factor)
+        try:
+            self._figs_view[slot].canvas.draw_idle()
+        except Exception:
+            pass
+        event.accept()
+
     def _zoom_step(self, factor: float):
         """Zoom all visible panels."""
         for i in range(self._layout_n):
@@ -3415,6 +3841,42 @@ class ImageViewer(QWidget):
         try: fig.canvas.draw_idle()
         except Exception: pass
 
+    def _auto_stf_preview(self):
+        """Auto STF toggle — ilk tikla: stretch, tekrar tikla: geri al."""
+        slot = self._active
+        img = self._imgs[slot]
+        if img is None:
+            return
+
+        # ── Toggle OFF: orijinale don ──
+        if self._pre_stf_slots[slot] is not None:
+            restored = self._pre_stf_slots[slot]
+            self._pre_stf_slots[slot] = None
+            self._imgs[slot] = restored
+            self._draw_slot(slot)
+            self._hist_editor.set_image(restored)
+            self._b_stf.setChecked(False)
+            if self._hist_apply_cb is not None:
+                self._hist_apply_cb(restored)
+            return
+
+        # ── Toggle ON: stretch uygula ──
+        try:
+            from processing.stretch import _auto_stf
+            self._pre_stf_slots[slot] = img.copy()  # orijinali sakla
+            med = float(np.median(img))
+            target = 0.20 if med < 0.15 else 0.25
+            stretched = _auto_stf(img.copy(), target=target, shadow_clip=-2.8)
+            self._imgs[slot] = stretched
+            self._draw_slot(slot)
+            self._hist_editor.set_image(stretched)
+            self._b_stf.setChecked(True)
+            if self._hist_apply_cb is not None:
+                self._hist_apply_cb(stretched)
+        except Exception:
+            self._pre_stf_slots[slot] = None
+            self._b_stf.setChecked(False)
+
     def _on_hist_apply(self, result):
         """User clicked Apply — bake to history and reset editor to new baseline."""
         result = np.clip(result, 0, 1).astype(np.float32)
@@ -3432,11 +3894,11 @@ class ImageViewer(QWidget):
         """Qt widget piksel → matplotlib data koordinatı."""
         canvas = self._canvases[slot]
         ax     = self._axes_view[slot]
-        # Matplotlib canvas yüksekliğini al (Y ekseni ters)
+        # Qt: top-left origin, Matplotlib display: bottom-left origin
         h_canvas = canvas.height()
-        # display coords (matplotlib uses bottom-left origin)
-        disp_x = qx
-        disp_y = h_canvas - qy
+        dpi_ratio = getattr(canvas, 'device_pixel_ratio', 1.0) or 1.0
+        disp_x = qx * dpi_ratio
+        disp_y = (h_canvas - qy) * dpi_ratio
         try:
             inv = ax.transData.inverted()
             dx, dy = inv.transform((disp_x, disp_y))
@@ -3444,63 +3906,189 @@ class ImageViewer(QWidget):
         except Exception:
             return None, None
 
+    def _clamp_to_image(self, slot, dx, dy):
+        """Koordinatları resim sınırlarına clamp'le."""
+        img = self._imgs[slot]
+        if img is None:
+            return dx, dy
+        h, w = img.shape[:2]
+        return float(np.clip(dx, 0, w)), float(np.clip(dy, 0, h))
+
+    def _snap_to_edge(self, slot, dx, dy):
+        """Koordinatı en yakın resim kenarına snap'le."""
+        img = self._imgs[slot]
+        if img is None:
+            return dx, dy
+        h, w = img.shape[:2]
+        # Her eksen icin: en yakin kenara snap
+        sx = 0.0 if dx < w / 2 else float(w)
+        sy = 0.0 if dy < h / 2 else float(h)
+        return sx, sy
+
+    def _detect_edge(self, slot, dx, dy):
+        """Mouse pozisyonu mevcut secimin kenarinda mi? Kenar adini dondur."""
+        if self._crop_rect is None:
+            return None
+        x0, y0, x1, y1 = self._crop_rect
+        img = self._imgs[slot]
+        if img is None:
+            return None
+        h, w = img.shape[:2]
+        # Kenar algilama esigi: resim boyutunun %2'si, min 5px
+        thr = max(5, min(w, h) * 0.02)
+        on_left   = abs(dx - x0) < thr and y0 - thr < dy < y1 + thr
+        on_right  = abs(dx - x1) < thr and y0 - thr < dy < y1 + thr
+        on_top    = abs(dy - y0) < thr and x0 - thr < dx < x1 + thr
+        on_bottom = abs(dy - y1) < thr and x0 - thr < dx < x1 + thr
+        if on_left:   return "left"
+        if on_right:  return "right"
+        if on_top:    return "top"
+        if on_bottom: return "bottom"
+        return None
+
+    def _edge_cursor(self, edge):
+        """Kenara gore cursor seklini dondur."""
+        if edge in ("left", "right"):
+            return Qt.CursorShape.SizeHorCursor
+        if edge in ("top", "bottom"):
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.ArrowCursor
+
     def _qt_press(self, ev, slot):
         """Qt sol/sağ tık."""
         from PyQt6.QtCore import Qt as _Qt
-        from PyQt6.QtGui import QCursor
 
         btn = ev.button()
-        if btn == _Qt.MouseButton.LeftButton and self._crop_mode:
+        if btn == _Qt.MouseButton.LeftButton:
             dx, dy = self._data_coords(slot, ev.pos().x(), ev.pos().y())
-            if dx is not None:
-                self._crop_start_xy = (dx, dy)
-                self._crop_rect     = None
+            if dx is not None and self._imgs[slot] is not None:
+                dx, dy = self._clamp_to_image(slot, dx, dy)
+                # Mevcut secimin kenarinda mi?
+                edge = self._detect_edge(slot, dx, dy)
+                if edge:
+                    self._crop_edge_drag = edge
+                    self._crop_start_xy  = None
+                else:
+                    # Yeni secim baslat
+                    self._crop_edge_drag = None
+                    self._crop_start_xy  = (dx, dy)
+                    self._crop_rect      = None
+                    if self._crop_patch:
+                        try: self._crop_patch.remove()
+                        except Exception: pass
+                        self._crop_patch = None
+                        self._figs_view[slot].canvas.draw_idle()
             ev.accept(); return
 
-        if btn == _Qt.MouseButton.RightButton and self._crop_mode:
-            self._show_crop_menu(slot)
+        if btn == _Qt.MouseButton.RightButton:
+            if self._crop_rect or self._crop_mode:
+                self._show_crop_menu(slot)
             ev.accept(); return
 
-        # Pass through to matplotlib for pan etc.
         FigureCanvas.mousePressEvent(self._canvases[slot], ev)
 
     def _qt_move(self, ev, slot):
-        """Qt mouse hareket — crop overlay çiz."""
+        """Qt mouse hareket — crop overlay veya kenar surukle."""
         from PyQt6.QtCore import Qt as _Qt
-        if (self._crop_mode
-                and self._crop_start_xy is not None
-                and ev.buttons() & _Qt.MouseButton.LeftButton):
-            dx, dy = self._data_coords(slot, ev.pos().x(), ev.pos().y())
-            if dx is not None:
-                x0, y0 = self._crop_start_xy
-                self._draw_crop_overlay(slot, x0, y0, dx, dy)
+        pressing = ev.buttons() & _Qt.MouseButton.LeftButton
+
+        dx, dy = self._data_coords(slot, ev.pos().x(), ev.pos().y())
+        if dx is None:
+            FigureCanvas.mouseMoveEvent(self._canvases[slot], ev)
+            return
+        dx, dy = self._clamp_to_image(slot, dx, dy)
+
+        # Kenar surukluyor
+        if pressing and self._crop_edge_drag and self._crop_rect:
+            x0, y0, x1, y1 = self._crop_rect
+            e = self._crop_edge_drag
+            if   e == "left":   x0 = dx
+            elif e == "right":  x1 = dx
+            elif e == "top":    y0 = dy
+            elif e == "bottom": y1 = dy
+            self._draw_crop_overlay(slot, x0, y0, x1, y1)
             ev.accept(); return
+
+        # Yeni secim surukluyor
+        if pressing and self._crop_start_xy is not None:
+            x0, y0 = self._crop_start_xy
+            self._draw_crop_overlay(slot, x0, y0, dx, dy)
+            ev.accept(); return
+
+        # Hover: kenara yaklasinca cursor degistir
+        if not pressing and self._crop_rect:
+            edge = self._detect_edge(slot, dx, dy)
+            canvas = self._canvases[slot]
+            if edge:
+                canvas.setCursor(self._edge_cursor(edge))
+            elif self._crop_mode:
+                canvas.setCursor(Qt.CursorShape.CrossCursor)
+            else:
+                canvas.setCursor(Qt.CursorShape.ArrowCursor)
+
         FigureCanvas.mouseMoveEvent(self._canvases[slot], ev)
 
     def _qt_release(self, ev, slot):
         """Qt sol tık bırakıldı — seçim koordinatlarını kaydet."""
         from PyQt6.QtCore import Qt as _Qt
-        if (ev.button() == _Qt.MouseButton.LeftButton
-                and self._crop_mode
-                and self._crop_start_xy is not None):
-            dx, dy = self._data_coords(slot, ev.pos().x(), ev.pos().y())
-            if dx is not None:
-                img = self._imgs[slot]
-                if img is not None:
-                    h, w = img.shape[:2]
-                    x0d, y0d = self._crop_start_xy
-                    x0 = int(np.clip(min(x0d, dx),   0, w-1))
-                    x1 = int(np.clip(max(x0d, dx)+1, 1, w))
-                    y0 = int(np.clip(min(y0d, dy),   0, h-1))
-                    y1 = int(np.clip(max(y0d, dy)+1, 1, h))
-                    if x1-x0 > 4 and y1-y0 > 4:
-                        self._crop_rect = (x0, y0, x1, y1)
-                        self.lbl_info.setText(
-                            f"Secim: {x1-x0}x{y1-y0} px  "
-                            f"[Sag tik = menu]")
-                    else:
-                        self._crop_rect = None
+        if ev.button() != _Qt.MouseButton.LeftButton:
+            FigureCanvas.mouseReleaseEvent(self._canvases[slot], ev)
+            return
+
+        dx, dy = self._data_coords(slot, ev.pos().x(), ev.pos().y())
+        if dx is None:
+            self._crop_start_xy = None
+            self._crop_edge_drag = None
             ev.accept(); return
+        dx, dy = self._clamp_to_image(slot, dx, dy)
+
+        img = self._imgs[slot]
+        if img is None:
+            self._crop_start_xy = None
+            self._crop_edge_drag = None
+            ev.accept(); return
+
+        h, w = img.shape[:2]
+
+        # Kenar suruklemesi bitti
+        if self._crop_edge_drag and self._crop_rect:
+            x0, y0, x1, y1 = self._crop_rect
+            e = self._crop_edge_drag
+            if   e == "left":   x0 = dx
+            elif e == "right":  x1 = dx
+            elif e == "top":    y0 = dy
+            elif e == "bottom": y1 = dy
+            # Normalize
+            nx0 = int(np.clip(min(x0, x1),   0, w-1))
+            nx1 = int(np.clip(max(x0, x1)+1, 1, w))
+            ny0 = int(np.clip(min(y0, y1),   0, h-1))
+            ny1 = int(np.clip(max(y0, y1)+1, 1, h))
+            if nx1-nx0 > 4 and ny1-ny0 > 4:
+                self._crop_rect = (nx0, ny0, nx1, ny1)
+                self._draw_crop_overlay(slot, nx0, ny0, nx1, ny1)
+                self.lbl_info.setText(
+                    f"Secim: {nx1-nx0}x{ny1-ny0} px  "
+                    f"[Kenarlardan ayarla | Sag tik = menu]")
+            self._crop_edge_drag = None
+            ev.accept(); return
+
+        # Yeni secim bitti
+        if self._crop_start_xy is not None:
+            x0d, y0d = self._crop_start_xy
+            x0 = int(np.clip(min(x0d, dx),   0, w-1))
+            x1 = int(np.clip(max(x0d, dx)+1, 1, w))
+            y0 = int(np.clip(min(y0d, dy),   0, h-1))
+            y1 = int(np.clip(max(y0d, dy)+1, 1, h))
+            if x1-x0 > 4 and y1-y0 > 4:
+                self._crop_rect = (x0, y0, x1, y1)
+                self.lbl_info.setText(
+                    f"Secim: {x1-x0}x{y1-y0} px  "
+                    f"[Kenarlardan ayarla | Sag tik = menu]")
+            else:
+                self._crop_rect = None
+            self._crop_start_xy = None
+            ev.accept(); return
+
         FigureCanvas.mouseReleaseEvent(self._canvases[slot], ev)
 
     def _draw_crop_overlay(self, slot, x0d, y0d, x1d, y1d):
@@ -3542,14 +4130,20 @@ class ImageViewer(QWidget):
             menu.addSeparator()
         a_all    = menu.addAction("⬜  Tamami sec")
         menu.addSeparator()
-        a_cancel = menu.addAction("✕  Crop modundan cik")
+        a_cancel = menu.addAction("✕  Secimi iptal et")
 
         chosen = menu.exec(QCursor.pos())
         if chosen is None: return
 
         txt = chosen.text()
         if txt.startswith("✂") and rect:
-            if self._crop_apply_cb: self._crop_apply_cb()
+            if self._crop_apply_cb:
+                self._crop_apply_cb()
+            else:
+                # Crop modu aktif olmadan dogrudan crop uygula
+                cropped = self.apply_inline_crop()
+                if cropped is not None and self._direct_crop_cb:
+                    self._direct_crop_cb(cropped)
         elif txt.startswith("⬜"):
             img = self._imgs[slot]
             if img is not None:
@@ -3558,8 +4152,7 @@ class ImageViewer(QWidget):
                 self._draw_crop_overlay(slot, 0, 0, w2, h2)
                 self.lbl_info.setText(f"Tamami: {w2}x{h2}  [Sag tik = menu]")
         elif txt.startswith("✕"):
-            if self._crop_cancel_cb: self._crop_cancel_cb()
-            else: self.exit_crop_mode()
+            self._clear_selection()
 
     def enter_crop_mode(self):
         self._crop_mode     = True
@@ -3592,6 +4185,21 @@ class ImageViewer(QWidget):
         for c in self._canvases:
             c.setCursor(Qt.CursorShape.ArrowCursor)
         self._redraw_all()
+
+    def _clear_selection(self):
+        """Secimi temizle (crop modunu kapatmadan)."""
+        self._crop_rect     = None
+        self._crop_start_xy = None
+        if self._crop_patch:
+            try: self._crop_patch.remove()
+            except Exception: pass
+            self._crop_patch = None
+        if self._crop_mode:
+            if self._crop_cancel_cb: self._crop_cancel_cb()
+            else: self.exit_crop_mode()
+        else:
+            self._redraw_all()
+            self.lbl_info.setText("")
 
     # _crop_overlay replaced by _draw_crop_overlay
 
@@ -3735,11 +4343,13 @@ class AstroApp(QMainWindow):
         self._orig        = None
         self._current        = None
         self._history        = []
+        self._redo_stack     = []     # redo (ileri al) yığını
         self._before_process = None   # son işlem öncesi snapshot
         self._workers     = []   # GC crash guard
         self._crop_src    = None
         self._starnet_fn  = None  # holds last StarNet++ result accessor
         self._settings    = {}    # loaded at startup
+        self._pre_stf_image = None  # toggle: STF oncesi orijinal (None = STF aktif degil)
         self._apply_theme(); self._build_ui()
         self._load_settings()
 
@@ -3826,6 +4436,7 @@ class AstroApp(QMainWindow):
         # ── Düzenle ────────────────────────────────────────────────────────
         em = mb.addMenu("✏️  Düzenle")
         self._act(em, "↺  Geri Al",          "Ctrl+Z",  self._undo)
+        self._act(em, "↻  İleri Al",         "Ctrl+Y",  self._redo)
         self._act(em, "🔄  Tümünü Sıfırla",  None,      self._reset_all)
         em.addSeparator()
         self._act(em, "✂  Kırp",             "Ctrl+X",  lambda: self._toggle_crop_mode())
@@ -4015,7 +4626,7 @@ class AstroApp(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Yıldızsız Görüntü Aç",
             self._settings.get("last_open_dir", ""),
-            "Görüntüler (*.fits *.fit *.tif *.tiff *.png *.jpg);;Tümü (*)")
+            _FILE_FILTER)
         if not path: return
         try:
             from core.loader import load_image
@@ -4035,7 +4646,7 @@ class AstroApp(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(
             self, "Yıldız Maskesi Aç",
             self._settings.get("last_open_dir", ""),
-            "Görüntüler (*.fits *.fit *.tif *.tiff *.png *.jpg);;Tümü (*)")
+            _FILE_FILTER)
         if not path: return
         try:
             from core.loader import load_image
@@ -4107,10 +4718,13 @@ class AstroApp(QMainWindow):
         lay.addWidget(self._vsep())
         lay.addWidget(self._grp_lbl("EDIT"))
         self._tb_undo  = make_icon_btn("↺","Undo")
+        self._tb_redo  = make_icon_btn("↻","Redo")
         self._tb_reset = make_icon_btn("🔄","Reset","#2a1010",RED)
-        lay.addWidget(self._tb_undo); lay.addWidget(self._tb_reset)
+        lay.addWidget(self._tb_undo); lay.addWidget(self._tb_redo); lay.addWidget(self._tb_reset)
         self._tb_undo.clicked.connect(self._undo)
+        self._tb_redo.clicked.connect(self._redo)
         self._tb_reset.clicked.connect(self._reset_all)
+        self._tb_redo.setToolTip("İleri Al (Ctrl+Y)")
 
         lay.addWidget(self._vsep())
         lay.addWidget(self._grp_lbl("STACK"))
@@ -4121,10 +4735,13 @@ class AstroApp(QMainWindow):
         lay.addWidget(self._vsep())
         lay.addWidget(self._grp_lbl("STARNET"))
         self._tb_starless = make_icon_btn("🌌","Starless","#1a0a2a",PURPLE)
+        self._tb_star_shrink = make_icon_btn("✦↓","Shrink","#1a0a2a","#ffaa44")
         self._tb_recomp   = make_icon_btn("✦+","Recompose","#0a1a2a",GOLD)
         lay.addWidget(self._tb_starless)
+        lay.addWidget(self._tb_star_shrink)
         lay.addWidget(self._tb_recomp)
         self._tb_starless.clicked.connect(self._run_starnet_and_save)
+        self._tb_star_shrink.clicked.connect(lambda: self._show_process_flyout("star_shrink", self._tb_star_shrink))
         self._tb_recomp.clicked.connect(self._open_recomposition)
         self._tb_starless.setToolTip(
             "Run StarNet++ on current image\n"
@@ -4139,9 +4756,17 @@ class AstroApp(QMainWindow):
         lay.addWidget(self._grp_lbl("VIEW"))
         self._tb_orig = make_icon_btn("🖼","Original")
         self._tb_zfit = make_icon_btn("⛶","Fit")
+        self._tb_autostr = make_icon_btn("💡","AutoSTF","#0a1a0a","#44ddff")
         lay.addWidget(self._tb_orig); lay.addWidget(self._tb_zfit)
+        lay.addWidget(self._tb_autostr)
         self._tb_orig.clicked.connect(self._show_original)
         self._tb_zfit.clicked.connect(lambda: self.viewer._zoom_fit())
+        self._tb_autostr.setCheckable(True)
+        self._tb_autostr.setToolTip(
+            "Auto Stretch (STF) — Toggle\n"
+            "Tikla: stretch uygula\n"
+            "Tekrar tikla: orijinale don")
+        self._tb_autostr.clicked.connect(self._auto_stretch_current)
 
         lay.addWidget(self._vsep())
         lay.addWidget(self._grp_lbl("TOOLS"))
@@ -4191,6 +4816,8 @@ class AstroApp(QMainWindow):
             ("color",   "🎨","Color"),
             ("morph",   "🔮","Morph"),
             ("galaxy",  "🌀","Galaxy"),
+            ("star_shrink","✦↓","StarShrink"),
+            ("graxpert",  "🔬","GraXpert"),
             ("stretch", "📊","Stretch"),
             ("crop",    "✂", "Crop"),
             ("script",  "⚡","Script"),
@@ -4307,6 +4934,8 @@ class AstroApp(QMainWindow):
         self.viewer=ImageViewer(); lay.addWidget(self.viewer,1)
         # Wire histogram Apply button → create new history step
         self.viewer._hist_apply_cb = lambda img: self._hist_apply(img)
+        # Crop modu olmadan dogrudan crop uygulama callback'i
+        self.viewer._direct_crop_cb = lambda cropped: self._direct_crop_apply(cropped)
         return w
 
     def _build_history_panel(self):
@@ -4322,9 +4951,7 @@ class AstroApp(QMainWindow):
                      if last_file and os.path.isfile(last_file)
                      else self._settings.get("last_open_dir", ""))
         path,_=QFileDialog.getOpenFileName(self,"Open Image", start_dir,
-            "All Supported (*.fits *.fit *.fts *.png *.tiff *.tif *.jpg *.jpeg *.bmp *.cr2 *.nef *.arw);;"
-            "FITS (*.fits *.fit *.fts);;PNG (*.png);;TIFF (*.tiff *.tif);;"
-            "JPEG (*.jpg *.jpeg);;RAW (*.cr2 *.nef *.arw);;All (*)")
+            _FILE_FILTER)
         if not path: return
         self._load_path(path)
 
@@ -4349,7 +4976,8 @@ class AstroApp(QMainWindow):
     def _save_file(self):
         if self._current is None: QMessageBox.information(self,"Info","No image loaded."); return
         path,_=QFileDialog.getSaveFileName(self,"Save","result.fits",
-            "FITS (*.fits);;PNG (*.png);;TIFF (*.tiff);;JPEG (*.jpg);;All (*)")
+            "FITS (*.fits);;PNG (*.png);;TIFF (*.tiff *.tif);;JPEG (*.jpg *.jpeg);;"
+            "BMP (*.bmp);;WebP (*.webp);;HDR (*.hdr);;EXR (*.exr);;All (*)")
         if not path: return
         try:
             from core.loader import save_image; save_image(path,self._current)
@@ -4455,6 +5083,7 @@ class AstroApp(QMainWindow):
         def _make(icon, title, key):
             p = ProcessPanel(icon, title, key=key)
             self._panels[key] = p
+            p.preview_requested.connect(lambda s, k=key: self._run_preview(k, s))
             return p
 
         # Background Extraction — GraXpert Siril tarzı
@@ -4549,10 +5178,11 @@ class AstroApp(QMainWindow):
         # Star Removal (Deconv panelinin altinda)
         p = _make("⭐","Star Removal","stars")
         p.add_combo("method","Method",
-                    ["starcomposer","starsmalerx","local_median","global_median","inpaint"],
+                    ["starcomposer","starsmalerx","star_shrink","local_median","global_median","inpaint"],
                     "starcomposer",
                     "starcomposer — Veralux StarComposer (yildiz yeniden birlestir)\n"
                     "starsmalerx  — Wavelet yildiz kaldir\n"
+                    "star_shrink  — Yildiz kucultme (cekirdek/halo)\n"
                     "local_median — Yerel medyan dolgu\n"
                     "global_median— Genel medyan dolgu\n"
                     "inpaint      — OpenCV inpainting")
@@ -4563,10 +5193,104 @@ class AstroApp(QMainWindow):
         p.add_slider("feather","Feather Radius",1,10,3,1,
                      "Kenar yumusatma piksel")
         p.add_sep()
+        p.add_slider("shrink_factor","Shrink Factor",0.1,3.0,1.0,2,
+                     "Cekirdek erozyon gucu (star_shrink)")
+        p.add_slider("halo_fill_ratio","Halo Fill Ratio",0,1,0.3,2,
+                     "Halo parlaklik orani (star_shrink)")
+        p.add_slider("star_noise_level","Noise Level",0,50,5.0,1,
+                     "Arka plan gurultu seviyesi (star_shrink)")
+        p.add_slider("star_density_threshold","Density Threshold",0.5,5.0,2.0,1,
+                     "Yildiz tespiti sigma esigi (star_shrink)")
+        p.add_sep()
         p.add_slider("max_sigma","Max Sigma (klasik)",1,25,6,0)
         p.add_slider("min_sigma","Min Sigma (klasik)",1,10,1,0)
         p.add_slider("threshold","Threshold (klasik)",0.001,0.3,0.03,3)
         p.run_requested.connect(lambda s,k="stars": self._run_key(k,s))
+
+        # Star Shrink (dedicated panel)
+        p = _make("✦↓","Star Shrink","star_shrink")
+        p.add_combo("mode","Mod",
+                    ["star_shrink","full_process"],
+                    "star_shrink",
+                    "star_shrink — Sadece yıldız küçültme\n"
+                    "full_process — Tam astro pipeline (Stretch+BG+Color+Shrink+Sharp+Denoise)")
+        p.add_sep()
+        # ── Yıldız küçültme parametreleri ─────────────────────
+        p.add_slider("shrink_factor","Küçültme Faktörü",0.1,3.0,1.0,2,
+                     "Çekirdek erozyon gücü — büyük değer = daha fazla küçültme")
+        p.add_slider("halo_fill_ratio","Halo Dolgu Oranı",0,1,0.3,2,
+                     "Halo parlaklık oranı — 0 = tamamen sil, 1 = koru")
+        p.add_slider("star_noise_level","Gürültü Seviyesi",0,50,5.0,1,
+                     "Arka plan gürültü dolgusu (0-255 ölçeğinde)")
+        p.add_slider("star_density_threshold","Yoğunluk Eşiği (σ)",0.5,5.0,2.0,1,
+                     "Yıldız tespiti sigma eşiği — düşük = daha fazla yıldız yakalar")
+        p.add_sep()
+        # ── Full Process parametreleri ────────────────────────
+        p.add_slider("stretch_strength","Stretch Gücü",0.05,0.50,0.25,2,
+                     "STF target background — düşük=güçlü stretch, yüksek=hafif")
+        p.add_check("bg_extract","Arka Plan Çıkarma",True)
+        p.add_slider("bg_grid","BG Grid Boyutu",4,16,8,0,
+                     "Arka plan örnekleme grid boyutu")
+        p.add_slider("saturation","Renk Doygunluğu",0.5,2.5,1.4,1,
+                     "Renk doygunluk çarpanı — 1.0=nötr")
+        p.add_slider("vibrance","Canlılık",0,1.0,0.3,1,
+                     "Düşük doygunluklu renkleri öne çıkar")
+        p.add_slider("local_contrast","Lokal Kontrast",0,4.0,1.5,1,
+                     "CLAHE clip limit — nebula detayları")
+        p.add_slider("sharpen_amount","Keskinlik",0,2.0,0.7,1,
+                     "Unsharp mask gücü")
+        p.add_slider("sharpen_radius","Keskinlik Yarıçapı",0.5,5.0,1.5,1,
+                     "Keskinlik gaussian sigma")
+        p.add_slider("denoise_strength","Gürültü Azaltma",0,20,5,0,
+                     "Bilateral filter gücü — 0=kapalı")
+        p.run_requested.connect(lambda s,k="star_shrink": self._run_key(k,s))
+
+        # GraXpert Gradient Extraction (dedicated panel)
+        p = _make("🔬","GraXpert Gradient Extraction","graxpert")
+        p.add_combo("gx_method","Interpolasyon",
+                    ["rbf","spline","kriging","polynomial"],
+                    "rbf",
+                    "rbf        — Radial Basis Function (en iyi genel kullanim)\n"
+                    "spline     — Bikubik spline (hizli, duzgun)\n"
+                    "kriging    — Ordinary Kriging (sferik variogram)\n"
+                    "polynomial — 2D polinom (hafif gradyanlar icin)")
+        p.add_combo("gx_correction","Duzeltme Tipi",
+                    ["subtraction","division"],"subtraction",
+                    "subtraction — Cikarma: sonuc = resim - arka plan + ortalama\n"
+                    "division    — Bolme: sonuc = resim / arka plan * ortalama")
+        p.add_sep()
+        p.add_slider("gx_smoothing","Yumusatma",0.0,1.0,0.5,2,
+                     "Interpolasyon yumusatma gucu — yuksek = daha duz arka plan")
+        p.add_slider("gx_grid_pts","Grid Noktasi",4,20,8,0,
+                     "Satir basina grid nokta sayisi — yuksek = daha hassas")
+        p.add_slider("gx_sample_size","Ornekleme Boyutu",10,50,25,0,
+                     "Ornekleme pencere yarisi (piksel)")
+        p.add_slider("gx_tolerance","Tolerans",0.1,3.0,1.0,1,
+                     "Nokta reddi toleransi — yuksek = daha gevsek filtre")
+        p.add_sep()
+        # RBF kernel
+        gx_rbf_hdr = QLabel("── RBF Ayarlari ──")
+        gx_rbf_hdr.setStyleSheet(f"color:#7af0a0;font-size:10px;font-weight:700;")
+        gx_rbf_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        p._bl.addWidget(gx_rbf_hdr)
+        p.add_combo("gx_rbf_kernel","Kernel",
+                    ["thin_plate","gaussian","multiquadric","cubic","linear","quintic","inverse"],
+                    "thin_plate",
+                    "thin_plate   — En iyi genel (onerilen)\n"
+                    "gaussian     — Gauss cekirdegi\n"
+                    "multiquadric — Multikuadrik\n"
+                    "cubic        — Kubik\n"
+                    "linear       — Lineer")
+        # Spline/Polynomial
+        gx_sp_hdr = QLabel("── Spline / Polynomial ──")
+        gx_sp_hdr.setStyleSheet(f"color:{SUBTEXT};font-size:9px;font-weight:600;margin-top:4px;")
+        gx_sp_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        p._bl.addWidget(gx_sp_hdr)
+        p.add_slider("gx_spline_order","Spline Derecesi",1,5,3,0)
+        p.add_slider("gx_poly_degree","Polinom Derecesi",1,6,4,0)
+        p.add_sep()
+        p.add_check("gx_keep_bg","Arka plani goster (cikartilmis degil)",False)
+        p.run_requested.connect(lambda s,k="graxpert": self._run_key(k,s))
 
         # Sharpening
         p = _make("🔪","Sharpening","sharp")
@@ -4841,14 +5565,14 @@ class AstroApp(QMainWindow):
             "First select the STARLESS file:")
         p1, _ = QFileDialog.getOpenFileName(
             self, "Select Starless Image", "",
-            "Images (*.fits *.tif *.tiff *.png *.jpg);;All (*)")
+            _FILE_FILTER)
         if not p1: return None, None
 
         QMessageBox.information(self, "Load Stars Only",
             "Now select the STARS ONLY file:")
         p2, _ = QFileDialog.getOpenFileName(
             self, "Select Stars-Only Image", "",
-            "Images (*.fits *.tif *.tiff *.png *.jpg);;All (*)")
+            _FILE_FILTER)
         if not p2: return None, None
 
         try:
@@ -4934,6 +5658,38 @@ class AstroApp(QMainWindow):
         if self._orig is None: return
         self.viewer.show_image(self._orig,"Original")
         self.status.showMessage("🖼  Showing original")
+
+    def _auto_stretch_current(self):
+        """Auto STF stretch toggle — ilk tikla: stretch, tekrar tikla: geri al."""
+        if self._current is None:
+            self.status.showMessage("Resim yok — once bir goruntu acin")
+            return
+
+        # ── Toggle OFF: STF aktifse orijinale don ──
+        if self._pre_stf_image is not None:
+            restored = self._pre_stf_image
+            self._pre_stf_image = None
+            self._set_image(restored, "STF Geri Alindi")
+            self._tb_autostr.setChecked(False)
+            self.status.showMessage("💡 Auto STF geri alindi — orijinal goruntu")
+            return
+
+        # ── Toggle ON: stretch uygula ──
+        try:
+            from processing.stretch import _auto_stf
+            self._pre_stf_image = self._current.copy()  # orijinali sakla
+            img = self._current.copy()
+            med = float(np.median(img))
+            target = 0.20 if med < 0.15 else 0.25
+            stretched = _auto_stf(img, target=target, shadow_clip=-2.8)
+            self._set_image(stretched, "Auto STF")
+            self._tb_autostr.setChecked(True)
+            self.status.showMessage(
+                f"💡 Auto STF uygulandi (median: {med:.3f} → {float(np.median(stretched)):.3f})"
+                f" — tekrar tikla geri al")
+        except Exception as e:
+            self._pre_stf_image = None
+            self.status.showMessage(f"Auto STF hatasi: {e}")
 
 
 
@@ -5128,14 +5884,35 @@ class AstroApp(QMainWindow):
 
 
     def _undo(self):
-        if len(self._history)>1:
-            self._history.pop(); lbl,img=self._history[-1]
-            self._current=img.copy()
-            idx=len(self._history)-1
-            self.viewer.show_image(img,lbl)
+        if len(self._history) > 1:
+            popped = self._history.pop()
+            self._redo_stack.append(popped)
+            lbl, img = self._history[-1]
+            self._current = img.copy()
+            idx = len(self._history) - 1
+            self.viewer.show_image(img, lbl)
             self.lbl_step.setText(f"Step: {lbl}")
             self.hist_panel.truncate_to(idx); self.hist_panel.select(idx)
             self.status.showMessage(f"↺  Geri alındı → {lbl}")
+            self._update_undo_redo_btns()
+
+    def _redo(self):
+        if self._redo_stack:
+            lbl, img = self._redo_stack.pop()
+            self._history.append((lbl, img))
+            self._current = img.copy()
+            idx = len(self._history) - 1
+            self.viewer.show_image(img, lbl)
+            self.lbl_step.setText(f"Step: {lbl}")
+            self.hist_panel.truncate_to(idx); self.hist_panel.select(idx)
+            self.status.showMessage(f"↻  İleri alındı → {lbl}")
+            self._update_undo_redo_btns()
+
+    def _update_undo_redo_btns(self):
+        if hasattr(self, "_tb_undo"):
+            self._tb_undo.setEnabled(len(self._history) > 1)
+        if hasattr(self, "_tb_redo"):
+            self._tb_redo.setEnabled(len(self._redo_stack) > 0)
 
     def _reset_all(self):
         """Reset: önce son işlemi geri al, tam sıfırlama için tekrar bas."""
@@ -5178,6 +5955,8 @@ class AstroApp(QMainWindow):
 
     def _set_image(self, img, label, reset=False):
         self._current=img
+        # Yeni işlem → redo stack temizle
+        self._redo_stack.clear()
         if reset:
             self._history=[(label,img.copy())]
             self.hist_panel.lst.clear(); self.hist_panel.push(label,0)
@@ -5187,6 +5966,7 @@ class AstroApp(QMainWindow):
             idx=len(self._history)-1
             self.hist_panel.push(label,idx)
             self.lbl_step.setText(f"Step: {label}  ({idx})")
+        self._update_undo_redo_btns()
         # Use selected slot
         slot = int(self._slot_combo.currentIndex()) if hasattr(self,"_slot_combo") else 0
         if reset: slot = 0
@@ -5208,8 +5988,9 @@ class AstroApp(QMainWindow):
 
     # ── Process runner (CRASH-SAFE) ─────────────────────────────────────
     # ── Process key→function dispatch ───────────────────────────────────
-    def _run_key(self, key, params):
+    def _run_key(self, key, params, preview_only=False):
         """Dispatch process key to the correct function (no forward-ref issue)."""
+        self._preview_only = preview_only
         _dispatch = {
             "bg":      ("processing.background",       "remove_gradient_dispatch"),
             "noise":   ("processing.noise_reduction",   "reduce_noise"),
@@ -5221,6 +6002,8 @@ class AstroApp(QMainWindow):
             "morph":   ("processing.morphology",        "morphological"),
             "galaxy":  ("ai.galaxy_detector",           "detect_galaxies"),
             "stretch": ("processing.stretch",           "stretch"),  # veralux overrides below
+            "star_shrink": ("processing.star_shrink",   "star_shrink"),
+            "graxpert":    ("processing.graxpert_engine", "graxpert_extract"),
         }
         entry = _dispatch.get(key)
         if entry is None:
@@ -5316,8 +6099,76 @@ class AstroApp(QMainWindow):
                     return _np.clip(r, 0, 1).astype("float32")
                 self._run_worker(key, _sxt_fn, params)
                 return
+            if method == "star_shrink":
+                def _shrink_fn(img, **kw):
+                    from processing.star_shrink import star_shrink
+                    import numpy as _np
+                    return star_shrink(
+                        img,
+                        shrink_factor=float(kw.get("shrink_factor", 1.0)),
+                        halo_fill_ratio=float(kw.get("halo_fill_ratio", 0.3)),
+                        noise_level=float(kw.get("star_noise_level", 5.0)),
+                        star_density_threshold=float(kw.get("star_density_threshold", 2.0)),
+                    )
+                self._run_worker(key, _shrink_fn, params)
+                return
             # fallback: eski remove_stars
             self._run_worker(key, fn, params)
+            return
+
+        if key == "star_shrink":
+            mode = params.get("mode", "star_shrink")
+            if mode == "full_process":
+                def _full_process_fn(img, **kw):
+                    from processing.star_shrink import full_astro_process
+                    return full_astro_process(
+                        img,
+                        stretch_strength=float(kw.get("stretch_strength", 0.25)),
+                        bg_extract=bool(kw.get("bg_extract", True)),
+                        bg_grid=int(kw.get("bg_grid", 8)),
+                        saturation=float(kw.get("saturation", 1.4)),
+                        vibrance=float(kw.get("vibrance", 0.3)),
+                        do_star_shrink=True,
+                        shrink_factor=float(kw.get("shrink_factor", 1.0)),
+                        halo_fill_ratio=float(kw.get("halo_fill_ratio", 0.3)),
+                        star_density_threshold=float(kw.get("star_density_threshold", 2.0)),
+                        sharpen_amount=float(kw.get("sharpen_amount", 0.7)),
+                        sharpen_radius=float(kw.get("sharpen_radius", 1.5)),
+                        local_contrast=float(kw.get("local_contrast", 1.5)),
+                        denoise_strength=float(kw.get("denoise_strength", 5)),
+                    )
+                self._run_worker(key, _full_process_fn, params)
+            else:
+                def _shrink_dedicated(img, **kw):
+                    from processing.star_shrink import star_shrink
+                    return star_shrink(
+                        img,
+                        shrink_factor=float(kw.get("shrink_factor", 1.0)),
+                        halo_fill_ratio=float(kw.get("halo_fill_ratio", 0.3)),
+                        noise_level=float(kw.get("star_noise_level", 5.0)),
+                        star_density_threshold=float(kw.get("star_density_threshold", 2.0)),
+                    )
+                self._run_worker(key, _shrink_dedicated, params)
+            return
+
+        if key == "graxpert":
+            def _graxpert_fn(img, **kw):
+                from processing.graxpert_engine import graxpert_extract
+                return graxpert_extract(
+                    img,
+                    method=str(kw.get("gx_method", "rbf")),
+                    correction=str(kw.get("gx_correction", "subtraction")),
+                    smoothing=float(kw.get("gx_smoothing", 0.5)),
+                    grid_pts_per_row=int(kw.get("gx_grid_pts", 8)),
+                    sample_size=int(kw.get("gx_sample_size", 25)),
+                    tolerance=float(kw.get("gx_tolerance", 1.0)),
+                    rbf_kernel=str(kw.get("gx_rbf_kernel", "thin_plate")),
+                    spline_order=int(kw.get("gx_spline_order", 3)),
+                    poly_degree=int(kw.get("gx_poly_degree", 4)),
+                    keep_background=bool(kw.get("gx_keep_bg", False)),
+                    _progress_cb=kw.get("_progress_cb"),
+                )
+            self._run_worker(key, _graxpert_fn, params)
             return
 
         if key == "stretch":
@@ -5705,18 +6556,29 @@ class AstroApp(QMainWindow):
         # Label oluştur
         method_names = {
             "bg":"BG Extract","noise":"Noise Reduce","deconv":"Deconvolve",
-            "stars":"Star Remove","sharp":"Sharpen","color":"Color Cal",
+            "stars":"Star Remove","star_shrink":"Star Shrink",
+            "sharp":"Sharpen","color":"Color Cal",
             "stretch":"Stretch","nebula":"Nebula","morph":"Morph",
             "galaxy":"Galaxy","crop":"Crop",
         }
         label = method_names.get(key, key)
-        self._set_image(result, label)
+
+        # Preview mode — sadece göster, history'ye kaydetme
+        is_preview = getattr(self, "_preview_only", False)
+        self._preview_only = False
+
+        if is_preview:
+            self.viewer.show_image(result, f"👁 {label}")
+            self.status.showMessage(f"👁  {label} önizleme")
+        else:
+            self._set_image(result, label)
+            h, w = result.shape[:2] if hasattr(result,"shape") else (0,0)
+            self.status.showMessage(f"✅  {label} tamamlandı  —  {w}×{h}px")
+
         if panel: panel.set_running(False)
         self.pbar.hide()
         self.pbar.setRange(0, 100)
         self.pbar.setTextVisible(False)
-        h, w = result.shape[:2] if hasattr(result,"shape") else (0,0)
-        self.status.showMessage(f"✅  {label} tamamlandı  —  {w}×{h}px")
 
     def _on_error(self, msg, panel):
         if panel: panel.set_running(False)
@@ -5738,6 +6600,21 @@ class AstroApp(QMainWindow):
         err_dlg.setDetailedText(msg)
         err_dlg.setStyleSheet(f"QLabel{{min-width:500px;}}")
         err_dlg.exec()
+
+    # ── Live Preview (parametre değişince anında göster) ────────────────
+    def _run_preview(self, key, params):
+        """Run process as preview — result shown but NOT saved to history."""
+        if self._current is None:
+            return
+        # Eğer zaten bir worker çalışıyorsa, sıraya koyma
+        active = [w for w in self._workers if w.isRunning()]
+        if active:
+            return
+
+        self.status.showMessage(f"👁  {key} önizleme…")
+
+        # _run_key ile aynı dispatch mantığı, ama sonucu history'ye koymuyoruz
+        self._run_key(key, params, preview_only=True)
 
     # ── Crop ────────────────────────────────────────────────────────────
     def _open_script_editor(self):
@@ -5769,6 +6646,14 @@ class AstroApp(QMainWindow):
         self._crop_active = False
         b = self._proc_btns.get("crop")
         if b: b.setChecked(False)
+        self._set_image(cropped, f"Crop {w}x{h}")
+        self.status.showMessage(f"Crop: {w}x{h} px")
+
+    def _direct_crop_apply(self, cropped):
+        """Crop modu olmadan dogrudan secim ile crop uygula."""
+        if cropped is None: return
+        h, w = cropped.shape[:2]
+        self.viewer._clear_selection()
         self._set_image(cropped, f"Crop {w}x{h}")
         self.status.showMessage(f"Crop: {w}x{h} px")
 

@@ -4,6 +4,7 @@ Toolbar, canvas, panel dock, geçmiş paneli, menüler
 """
 import os
 import numpy as np
+from core.loader import FILE_FILTER as _FILE_FILTER
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QToolBar, QDockWidget, QFileDialog, QMessageBox,
@@ -17,7 +18,7 @@ from gui.canvas import ImageCanvas
 from gui.history_panel import HistoryPanel
 from gui.histogram_widget import HistogramPanel
 from gui.panels import (BgPanel, StretchPanel, NoisePanel, SharpenPanel,
-                         ColorPanel, DeconvPanel, RecompPanel)
+                         ColorPanel, DeconvPanel, StarShrinkPanel, RecompPanel)
 from gui.settings_dialog import SettingsDialog
 from gui.theme import get_stylesheet
 from gui.worker import ProcessWorker
@@ -171,6 +172,7 @@ class MainWindow(QMainWindow):
             ("Sharpen",   "🔬", "sharpen", self._toggle_panel_sharpen),
             ("Color",     "🎨", "color",   self._toggle_panel_color),
             ("Deconv",    "🌀", "deconv",  self._toggle_panel_deconv),
+            ("StarShrink","✦↓", "star_shrink", self._toggle_panel_star_shrink),
             ("Recomp",    "✦+", "recomp",  self._toggle_panel_recomp),
         ]
         for label, icon, key, slot in panels_def:
@@ -249,7 +251,7 @@ class MainWindow(QMainWindow):
         last_dir = SM.get("last_open_dir", "")
         path, _ = QFileDialog.getOpenFileName(
             self, "Görüntü Aç", last_dir,
-            "Görüntüler (*.fits *.fit *.tif *.tiff *.png *.jpg *.bmp);;Tümü (*)"
+            _FILE_FILTER
         )
         if path:
             self.open_file(path)
@@ -292,7 +294,7 @@ class MainWindow(QMainWindow):
     def _open_starless(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Yıldızsız Görüntü Aç", SM.get("last_open_dir", ""),
-            "Görüntüler (*.fits *.fit *.tif *.tiff *.png *.jpg);;Tümü (*)"
+            _FILE_FILTER
         )
         if path:
             try:
@@ -305,7 +307,7 @@ class MainWindow(QMainWindow):
     def _open_starmask(self):
         path, _ = QFileDialog.getOpenFileName(
             self, "Yıldız Maskesi Aç", SM.get("last_open_dir", ""),
-            "Görüntüler (*.fits *.fit *.tif *.tiff *.png);;Tümü (*)"
+            _FILE_FILTER
         )
         if path:
             try:
@@ -390,6 +392,7 @@ class MainWindow(QMainWindow):
     def _toggle_panel_sharpen(self): self._toggle_panel("sharpen", SharpenPanel)
     def _toggle_panel_color(self):   self._toggle_panel("color",   ColorPanel)
     def _toggle_panel_deconv(self):  self._toggle_panel("deconv",  DeconvPanel)
+    def _toggle_panel_star_shrink(self): self._toggle_panel("star_shrink", StarShrinkPanel)
     def _toggle_panel_recomp(self):  self._toggle_panel("recomp",  RecompPanel)
 
     # ── İşlem Çalıştırma ─────────────────────────────────────────────────────
@@ -467,6 +470,10 @@ class MainWindow(QMainWindow):
             elif panel_key == "deconv":
                 from processing.deconvolution import deconvolve_dispatch
                 return deconvolve_dispatch
+
+            elif panel_key == "star_shrink":
+                from processing.star_shrink import star_shrink
+                return star_shrink
 
             elif panel_key == "recomp":
                 return self._recompose_fn

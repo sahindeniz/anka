@@ -426,31 +426,53 @@ class PlateSolveDialog(QDialog):
         sep.setStyleSheet(f"color:{BORDER};margin:3px 0;")
         lay.addWidget(sep)
 
-        # ── Focal length + Pixel size ─────────────────────────────────────
+        # ── Aperture + Reducer → Focal length hesaplama ─────────────────
         fp_row = QGridLayout(); fp_row.setSpacing(6)
 
-        fp_row.addWidget(self._lbl("Focal length (mm):"), 0, 0)
-        self._sp_focal = QDoubleSpinBox()
-        self._sp_focal.setRange(1, 50000); self._sp_focal.setDecimals(1)
-        self._sp_focal.setValue(float(self._settings.get("focal_length_mm", 1000.0)))
-        self._sp_focal.setFixedWidth(90); self._sp_focal.setStyleSheet(_SPIN)
-        self._sp_focal.valueChanged.connect(self._calc_fov)
-        fp_row.addWidget(self._sp_focal, 0, 1)
+        fp_row.addWidget(self._lbl("Aperture (mm):"), 0, 0)
+        self._sp_aperture = QDoubleSpinBox()
+        self._sp_aperture.setRange(1, 50000); self._sp_aperture.setDecimals(1)
+        self._sp_aperture.setValue(float(self._settings.get("aperture_mm", 200.0)))
+        self._sp_aperture.setFixedWidth(90); self._sp_aperture.setStyleSheet(_SPIN)
+        self._sp_aperture.valueChanged.connect(self._calc_focal_and_fov)
+        fp_row.addWidget(self._sp_aperture, 0, 1)
 
-        fp_row.addWidget(self._lbl("Pixel size (µm):"), 1, 0)
+        fp_row.addWidget(self._lbl("Focal ratio (f/):"), 0, 2)
+        self._sp_fratio = QDoubleSpinBox()
+        self._sp_fratio.setRange(0.5, 100); self._sp_fratio.setDecimals(1)
+        self._sp_fratio.setValue(float(self._settings.get("focal_ratio", 5.0)))
+        self._sp_fratio.setFixedWidth(90); self._sp_fratio.setStyleSheet(_SPIN)
+        self._sp_fratio.valueChanged.connect(self._calc_focal_and_fov)
+        fp_row.addWidget(self._sp_fratio, 0, 3)
+
+        fp_row.addWidget(self._lbl("Reducer/Barlow:"), 1, 0)
+        self._sp_reducer = QDoubleSpinBox()
+        self._sp_reducer.setRange(0.1, 10.0); self._sp_reducer.setDecimals(2)
+        self._sp_reducer.setValue(float(self._settings.get("reducer", 1.0)))
+        self._sp_reducer.setFixedWidth(90); self._sp_reducer.setStyleSheet(_SPIN)
+        self._sp_reducer.setToolTip("Reducer < 1 (orn: 0.73), Barlow > 1 (orn: 2.0), yok = 1.0")
+        self._sp_reducer.valueChanged.connect(self._calc_focal_and_fov)
+        fp_row.addWidget(self._sp_reducer, 1, 1)
+
+        fp_row.addWidget(self._lbl("Focal length (mm):"), 1, 2)
+        self._lbl_focal = QLabel("—")
+        self._lbl_focal.setStyleSheet(f"color:{GOLD};font-size:10px;font-weight:bold;")
+        fp_row.addWidget(self._lbl_focal, 1, 3)
+
+        fp_row.addWidget(self._lbl("Pixel size (µm):"), 2, 0)
         self._sp_pixel = QDoubleSpinBox()
         self._sp_pixel.setRange(0.1, 100); self._sp_pixel.setDecimals(2)
         self._sp_pixel.setValue(float(self._settings.get("pixel_size_um", 4.63)))
         self._sp_pixel.setFixedWidth(90); self._sp_pixel.setStyleSheet(_SPIN)
-        self._sp_pixel.valueChanged.connect(self._calc_fov)
-        fp_row.addWidget(self._sp_pixel, 1, 1)
+        self._sp_pixel.valueChanged.connect(self._calc_focal_and_fov)
+        fp_row.addWidget(self._sp_pixel, 2, 1)
 
         self._lbl_resolution = QLabel("Resolution: —")
         self._lbl_resolution.setStyleSheet(f"color:{ACCENT2};font-size:10px;")
-        fp_row.addWidget(self._lbl_resolution, 0, 2, 2, 1)
+        fp_row.addWidget(self._lbl_resolution, 2, 2, 1, 2)
 
         lay.addLayout(fp_row)
-        self._calc_fov()  # İlk hesaplama
+        self._calc_focal_and_fov()  # İlk hesaplama
         return grp
 
     def _sec_solver_options(self):
@@ -732,13 +754,20 @@ class PlateSolveDialog(QDialog):
     # ─────────────────────────────────────────────────────────────────────────
     #  FOV hesaplama
     # ─────────────────────────────────────────────────────────────────────────
-    def _calc_fov(self):
-        """Fokal + piksel boyutundan arcsec/px hesapla."""
+    def _get_focal_mm(self):
+        """Aperture x focal ratio x reducer → focal length (mm)."""
+        aperture = self._sp_aperture.value()
+        fratio   = self._sp_fratio.value()
+        reducer  = self._sp_reducer.value()
+        return aperture * fratio * reducer
+
+    def _calc_focal_and_fov(self):
+        """Aperture/ratio/reducer'dan focal length hesapla, sonra FOV."""
         try:
-            focal_mm  = self._sp_focal.value()
-            pixel_um  = self._sp_pixel.value()
+            focal_mm = self._get_focal_mm()
+            self._lbl_focal.setText(f"{focal_mm:.1f} mm")
+            pixel_um = self._sp_pixel.value()
             if focal_mm > 0 and pixel_um > 0:
-                # arcsec/px = (pixel_um / focal_mm) * 206.265
                 arcsec_per_px = (pixel_um / focal_mm) * 206.265
                 self._lbl_resolution.setText(
                     f"Resolution: {arcsec_per_px:.4f}\"")
@@ -751,7 +780,7 @@ class PlateSolveDialog(QDialog):
             if self._image is None:
                 return 0.0
             w = self._image.shape[1]
-            focal_mm  = self._sp_focal.value()
+            focal_mm  = self._get_focal_mm()
             pixel_um  = self._sp_pixel.value()
             if focal_mm > 0 and pixel_um > 0:
                 arcsec_per_px = (pixel_um / focal_mm) * 206.265
@@ -906,8 +935,14 @@ class PlateSolveDialog(QDialog):
 
             found = []
             if focal:
-                self._sp_focal.setValue(float(focal))
-                found.append(f"FL={float(focal):.1f}mm")
+                # Focal length'i aperture ve ratio'dan ters hesapla
+                focal_val = float(focal)
+                aperture  = self._sp_aperture.value()
+                reducer   = self._sp_reducer.value()
+                if aperture > 0 and reducer > 0:
+                    new_ratio = focal_val / (aperture * reducer)
+                    self._sp_fratio.setValue(round(new_ratio, 1))
+                found.append(f"FL={focal_val:.1f}mm")
             if pixel:
                 self._sp_pixel.setValue(float(pixel))
                 found.append(f"px={float(pixel):.2f}µm")
@@ -950,7 +985,10 @@ class PlateSolveDialog(QDialog):
         # Sonucu settings'e kaydet (bir sonraki açılış için)
         self._settings["last_platesolve_ra"]  = ra_deg
         self._settings["last_platesolve_dec"] = dec_deg
-        self._settings["focal_length_mm"]     = self._sp_focal.value()
+        self._settings["aperture_mm"]          = self._sp_aperture.value()
+        self._settings["focal_ratio"]          = self._sp_fratio.value()
+        self._settings["reducer"]              = self._sp_reducer.value()
+        self._settings["focal_length_mm"]      = self._get_focal_mm()
         self._settings["pixel_size_um"]        = self._sp_pixel.value()
         self._settings["astap_catalog"]        = self._combo_catalog.currentText()
         self._settings["astap_radius"]         = self._sp_radius.value()

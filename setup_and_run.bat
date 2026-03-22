@@ -28,9 +28,17 @@ if errorlevel 1 (
 )
 
 :: ── Başlat ───────────────────────────────────────────────────────────────
-python main.py
-if errorlevel 1 (
-    echo.
-    echo  Hata olustu. Ayrintilar icin terminali inceleyin.
-    pause
+echo  Uygulama baslatiliyor...
+echo.
+python main.py 2>&1
+set "EXIT_CODE=%errorlevel%"
+echo.
+if not "%EXIT_CODE%"=="0" (
+    echo  ============================================================
+    echo  HATA: Program beklenmedik sekilde kapandi. (kod: %EXIT_CODE%)
+    echo  Yukaridaki hata mesajlarini inceleyin.
+    echo  ============================================================
 )
+echo.
+echo  Kapatmak icin bir tusa basin...
+pause >nul

@@ -1106,6 +1106,17 @@ def process_veralux_v6(img_data, log_D, protect_b, convergence_power,
         g_ratio = img_anchored[1] / L_safe
         b_ratio = img_anchored[2] / L_safe
 
+    # log_D=None ise otomatik hesapla (adaptive mode)
+    if log_D is None:
+        _tb = target_bg if target_bg is not None else 0.20
+        _b  = protect_b if protect_b is not None else 0.0
+        log_D = VeraLuxCore.solve_log_d(L_anchored, _tb, max(_b, 0.1))
+        if progress_callback: progress_callback(f"Auto Log D = {log_D:.2f}")
+
+    # protect_b None kontrolu
+    if protect_b is None:
+        protect_b = 0.0
+
     if progress_callback: progress_callback(f"Stretching (Log D={log_D:.2f})...")
     L_str = VeraLuxCore.hyperbolic_stretch(L_anchored, 10.0 ** log_D, protect_b)
     L_str = np.clip(L_str, 0.0, 1.0)
