@@ -156,6 +156,37 @@ class BgPanel(BasePanel):
         }
 
 
+# ── Arka Plan Siyahlaştırma ──────────────────────────────────────────────────
+
+class BgNeutralizePanel(BasePanel):
+    def __init__(self, parent=None):
+        super().__init__("⬛ Arka Plan Siyahlaştırma", parent)
+        self._method = self._add_combo(
+            "Yöntem:", ["percentile", "sigma_clip", "grid"],
+            "method"
+        )
+        self._strength = self._add_slider("Güç", 0, 100, 100, "strength", 0.01)
+        self._pct = self._add_spinbox("BG Yüzdelik (%)", 1, 30, 5, 1.0, "bg_percentile", 1)
+        self._sigma = self._add_spinbox("Sigma", 1.0, 5.0, 2.5, 0.1, "sigma", 1)
+        self._grid = self._add_slider("Grid Boyutu", 4, 32, 8, "grid_size")
+        self._protect = self._add_spinbox("Sinyal Koruma", 0.0, 1.0, 0.3, 0.05, "protect_signal", 2)
+        self._per_ch = QCheckBox("Kanal Başına (renk dengesi)")
+        self._per_ch.setChecked(True)
+        self._layout.addWidget(self._per_ch)
+        self._layout.addStretch()
+
+    def get_params(self):
+        return {
+            "method": self._method.currentText(),
+            "strength": self._strength.value() * 0.01,
+            "bg_percentile": self._pct.value(),
+            "sigma": self._sigma.value(),
+            "grid_size": self._grid.value(),
+            "protect_signal": self._protect.value(),
+            "per_channel": self._per_ch.isChecked(),
+        }
+
+
 # ── Histogram Gerdirme ───────────────────────────────────────────────────────
 
 class StretchPanel(BasePanel):

@@ -19,8 +19,9 @@ from gui.canvas import ImageCanvas
 from gui.history_panel import HistoryPanel
 from gui.histogram_widget import HistogramPanel
 from gui.histogram_editor import HistogramEditorPanel
-from gui.panels import (BgPanel, StretchPanel, NoisePanel, SharpenPanel,
-                         ColorPanel, DeconvPanel, StarShrinkPanel, RecompPanel)
+from gui.panels import (BgPanel, BgNeutralizePanel, StretchPanel, NoisePanel,
+                         SharpenPanel, ColorPanel, DeconvPanel, StarShrinkPanel,
+                         RecompPanel)
 from gui.settings_dialog import SettingsDialog
 from gui.theme import get_stylesheet
 from gui.worker import ProcessWorker
@@ -195,6 +196,7 @@ class MainWindow(QMainWindow):
         self._panel_actions = {}
         panels_def = [
             ("BG Çıkar",  "🌌", "bg",     self._toggle_panel_bg),
+            ("BG Siyah",  "⬛", "bg_neutralize", self._toggle_panel_bg_neutralize),
             ("Stretch",   "📊", "stretch", self._toggle_panel_stretch),
             ("Noise",     "🔊", "noise",   self._toggle_panel_noise),
             ("Sharpen",   "🔬", "sharpen", self._toggle_panel_sharpen),
@@ -474,6 +476,7 @@ class MainWindow(QMainWindow):
             self._panel_container.setVisible(False)
 
     def _toggle_panel_bg(self):      self._toggle_panel("bg",     BgPanel)
+    def _toggle_panel_bg_neutralize(self): self._toggle_panel("bg_neutralize", BgNeutralizePanel)
     def _toggle_panel_stretch(self): self._toggle_panel("stretch", StretchPanel)
     def _toggle_panel_noise(self):   self._toggle_panel("noise",   NoisePanel)
     def _toggle_panel_sharpen(self): self._toggle_panel("sharpen", SharpenPanel)
@@ -529,6 +532,10 @@ class MainWindow(QMainWindow):
             if panel_key == "bg":
                 from processing.background import remove_gradient_dispatch
                 return remove_gradient_dispatch
+
+            elif panel_key == "bg_neutralize":
+                from processing.bg_neutralize import neutralize_background
+                return neutralize_background
 
             elif panel_key == "stretch":
                 from processing.stretch import stretch
@@ -606,7 +613,8 @@ class MainWindow(QMainWindow):
             return
 
         label_map = {
-            "bg": "BG Çıkarma", "stretch": "Stretch", "noise": "Gürültü Azaltma",
+            "bg": "BG Çıkarma", "bg_neutralize": "BG Siyahlaştırma",
+            "stretch": "Stretch", "noise": "Gürültü Azaltma",
             "sharpen": "Keskinleştirme", "color": "Renk Kalibrasyonu",
             "deconv": "Dekonvolüsyon", "recomp": "Yıldız Birleştirme",
         }
