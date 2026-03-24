@@ -565,6 +565,11 @@ def stack_aligned(
 
     cb(8, f"✅ Stacking tamamlandi — {n} kare birlestirildi")
 
+    # ── Otomatik arka plan nötralizasyonu ─────────────────────────────
+    # Stacking sonrası ışık kirliliği / sensör glow kaynaklı renk sapmasını düzelt
+    result = _neutralize_background(result)
+    cb(9, "Arka plan nötralize edildi")
+
     return {
         "result": result,
         "n_lights": n,
@@ -573,6 +578,50 @@ def stack_aligned(
         "frame_scores": [],
         "rejected_frames": [],
     }
+
+
+def _neutralize_background(img: np.ndarray) -> np.ndarray:
+    """
+    Arka plan renk sapmasını düzelt.
+    En karanlık piksellerin medyanını bulup her kanaldan çıkarır.
+    Sonuç: nötr (siyah) arka plan.
+    """
+    if img is None or img.size == 0:
+        return img
+
+    result = img.astype(np.float32).copy()
+
+    if result.ndim == 3:
+        # Renkli görüntü — kanal bazında nötralize et
+        gray = np.mean(result, axis=2)
+        # En karanlık %15 pikselleri arka plan olarak kabul et
+        threshold = np.percentile(gray, 15)
+        bg_mask = gray <= threshold
+
+        if bg_mask.sum() < 100:
+            # Çok az piksel — daha geniş eşik
+            threshold = np.percentile(gray, 25)
+            bg_mask = gray <= threshold
+
+        if bg_mask.sum() > 10:
+            for ch in range(result.shape[2]):
+                bg_median = np.median(result[:, :, ch][bg_mask])
+                result[:, :, ch] -= bg_median
+    else:
+        # Mono görüntü
+        threshold = np.percentile(result, 15)
+        bg_mask = result <= threshold
+        if bg_mask.sum() > 10:
+            bg_median = np.median(result[bg_mask])
+            result -= bg_median
+
+    # Negatif değerleri sıfırla ve normalize et
+    result = np.clip(result, 0, None)
+    mx = result.max()
+    if mx > 1e-9:
+        result /= mx
+
+    return result.astype(np.float32)
 
 
 def stack_lights(
