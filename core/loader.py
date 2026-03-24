@@ -62,7 +62,7 @@ def load_image(path: str) -> np.ndarray:
     if ext in (".fits", ".fit", ".fts"):
         from astropy.io import fits
         import cv2
-        with fits.open(path) as hdul:
+        with fits.open(path, ignore_missing_simple=True) as hdul:
             data = None
             header = None
             for hdu in hdul:

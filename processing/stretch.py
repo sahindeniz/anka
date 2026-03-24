@@ -31,29 +31,128 @@ def stretch(image, low=2.0, high=98.0, method="auto_stf", gamma=1.0,
 
 
 def _auto_stf(img, target=0.25, shadow_clip=-2.8):
-    """PixInsight Auto STF — fully vectorised, single-pass per channel."""
-    def _ch(c):
-        med = float(np.median(c))
-        # MAD via fast percentile approx
-        diff = np.abs(c - med)
-        mad = float(np.median(diff)) * 1.4826
-        c0 = max(0.0, med + shadow_clip * mad)
-        if abs(1.0 - c0) < 1e-9: return c.copy()
-        norm = np.subtract(c, c0, dtype=np.float32)
+    """PixInsight Auto STF — RENK KORUYUCU.
+
+    Linked yontem + gamut koruma + hot pixel temizleme:
+    1) Tek c0 ve m_n luminance'tan hesaplanir (tum kanallara ayni)
+    2) MTF her kanala ayni parametrelerle uygulanir
+    3) Gamut koruma: kanal > 1.0 ise orantili kucultme
+    4) Renkli izole outlier temizleme (hot pixel / artefakt)
+    """
+    def _mtf_1d(data, c0, m_n):
+        """Midtone Transfer Function — tek kanal."""
+        if abs(1.0 - c0) < 1e-9:
+            return data.copy()
+        norm = np.subtract(data, c0, dtype=np.float32)
         np.clip(norm, 0, None, out=norm)
         norm /= (1.0 - c0)
         np.clip(norm, 0, 1, out=norm)
-        m_n = max(1e-9, min(1 - 1e-9, (med - c0) / (1.0 - c0)))
         denom = (2 * m_n - 1) * norm - m_n
         mtf = np.where(np.abs(denom) > 1e-9,
                        (m_n - 1) * norm / denom, 0.0).astype(np.float32)
         np.clip(mtf, 0, 1, out=mtf)
         return mtf
 
+    def _clean_hot_pixels(data):
+        """Izole renkli hot/cold pixel temizleme.
+        Hedef: tek pikselde RENK ORANI komsularindan cok farkli ise duzelt.
+        Luminance farki hedeflenmez → yildiz ve nebula korunur."""
+        if data.ndim != 3 or data.shape[2] < 3:
+            return data
+        from scipy.ndimage import median_filter
+
+        cleaned = data.copy()
+        r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
+
+        # Lokal medyan (3x3 — minimal, sadece izole noktalar icin)
+        med_r = median_filter(r, size=3)
+        med_g = median_filter(g, size=3)
+        med_b = median_filter(b, size=3)
+
+        # Pikselin renk orani vs komsu renk orani farki
+        # Guvenli oran hesabi (sifira bolunme onleme)
+        eps = 1e-7
+        lum = r + g + b + eps
+        med_lum = med_r + med_g + med_b + eps
+
+        # Normalize renk (kroma): her kanal / toplam
+        cr_r, cr_g, cr_b = r / lum, g / lum, b / lum
+        mcr_r, mcr_g, mcr_b = med_r / med_lum, med_g / med_lum, med_b / med_lum
+
+        # Renk fark metrik — komsularindan renk olarak ne kadar farkli
+        color_diff = (np.abs(cr_r - mcr_r) + np.abs(cr_g - mcr_g)
+                      + np.abs(cr_b - mcr_b))
+
+        # Esik: renk farki > 0.15 → renkli artefakt
+        # (normal nebula/yildiz renk gecisleri bunun altinda kalir)
+        is_color_outlier = color_diff > 0.15
+
+        # Sadece karanlık/orta parlaklıktaki pikseller — parlak yıldız çekirdeği korunur
+        # (yildiz merkezinde zaten renk farki dusuk — beyaza yakın)
+        bright_threshold = np.percentile(lum, 99)
+        is_color_outlier = is_color_outlier & (lum < bright_threshold)
+
+        # Outlier pikselleri lokal medyan ile degistir
+        for c in range(3):
+            med_ch = [med_r, med_g, med_b][c]
+            cleaned[:, :, c] = np.where(is_color_outlier, med_ch,
+                                         data[:, :, c])
+        return cleaned
+
     if img.ndim == 2:
-        return _ch(img)
-    # Process channels simultaneously — no Python loop overhead
-    return np.stack([_ch(img[:, :, c]) for c in range(img.shape[2])], 2)
+        # Mono — klasik tek kanal STF
+        med = float(np.median(img))
+        diff = np.abs(img - med)
+        mad = float(np.median(diff)) * 1.4826
+        c0 = max(0.0, med + shadow_clip * mad)
+        m_n = max(1e-9, min(1 - 1e-9, (med - c0) / (1.0 - c0)))
+        return _mtf_1d(img, c0, m_n)
+
+    # ── 0) Hot pixel temizleme — STF ONCESI (lineer veride) ────────
+    img = _clean_hot_pixels(img)
+
+    n_ch = img.shape[2]
+
+    # ── 1) Per-channel STF (unlinked) — notral arka plan ──────────
+    unlinked = np.empty_like(img, dtype=np.float32)
+    for c in range(n_ch):
+        ch = img[:, :, c]
+        med_ch = float(np.median(ch))
+        diff_ch = np.abs(ch - med_ch)
+        mad_ch = float(np.median(diff_ch)) * 1.4826
+        c0_ch = max(0.0, med_ch + shadow_clip * mad_ch)
+        m_n_ch = max(1e-9, min(1 - 1e-9, (med_ch - c0_ch) / (1.0 - c0_ch)))
+        unlinked[:, :, c] = _mtf_1d(ch, c0_ch, m_n_ch)
+
+    # ── 2) Linked STF — renk koruyucu ─────────────────────────────
+    lum = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
+    med = float(np.median(lum))
+    diff = np.abs(lum - med)
+    mad = float(np.median(diff)) * 1.4826
+    c0 = max(0.0, med + shadow_clip * mad)
+    m_n = max(1e-9, min(1 - 1e-9, (med - c0) / (1.0 - c0)))
+
+    linked = np.empty_like(img, dtype=np.float32)
+    for c in range(n_ch):
+        linked[:, :, c] = _mtf_1d(img[:, :, c], c0, m_n)
+
+    # ── 3) Blend: %35 linked + %65 unlinked ───────────────────────
+    #    Linked: renk bilgisi verir (ama arka plan notral olmayabilir)
+    #    Unlinked: notral arka plan (ama renkler azalir)
+    #    Blend: dengeli — gorunur renkler + temiz arka plan
+    alpha = 0.35
+    result = alpha * linked + (1.0 - alpha) * unlinked
+
+    # ── 4) Gamut koruma ───────────────────────────────────────────
+    max_ch = np.max(result, axis=2)
+    overflow = max_ch > 1.0
+    if np.any(overflow):
+        safe_max = np.where(overflow, max_ch, 1.0)[:, :, np.newaxis]
+        result = np.where(overflow[:, :, np.newaxis],
+                          result / safe_max, result)
+
+    np.clip(result, 0, 1, out=result)
+    return result
 
 
 def _linear(img, low, high):

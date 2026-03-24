@@ -376,10 +376,18 @@ def _query_gaia_colors(ra_deg, dec_deg, fov_deg):
                 if bp_rp_col and gmag_col:
                     for row in t:
                         try:
-                            ra = float(row[ra_col])
-                            dec = float(row[dec_col])
-                            bp_rp = float(row[bp_rp_col])
-                            mag = float(row[gmag_col])
+                            # Masked/NaN değerleri güvenli kontrol
+                            _ra_val = row[ra_col]
+                            _dec_val = row[dec_col]
+                            _bp_rp_val = row[bp_rp_col]
+                            _mag_val = row[gmag_col]
+                            # astropy masked column kontrolü
+                            if hasattr(_bp_rp_val, 'mask') or hasattr(_mag_val, 'mask'):
+                                continue
+                            ra = float(_ra_val)
+                            dec = float(_dec_val)
+                            bp_rp = float(_bp_rp_val)
+                            mag = float(_mag_val)
                             if not np.isfinite(bp_rp) or not np.isfinite(mag):
                                 continue
                             if mag > 16:

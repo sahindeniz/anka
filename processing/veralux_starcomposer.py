@@ -1138,7 +1138,7 @@ class StarComposerGUI(QMainWindow):
         self.working_dir = os.path.dirname(f)
         
         try:
-            with fits.open(f) as hdul:
+            with fits.open(f, ignore_missing_simple=True) as hdul:
                 idx = 0
                 if hdul[0].data is None and len(hdul) > 1:
                     idx = 1

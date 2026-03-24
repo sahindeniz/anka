@@ -6,6 +6,13 @@ import re
 import traceback
 import numpy as np
 
+# ── PyTorch MUST be imported BEFORE PyQt6 to avoid DLL conflicts ──
+try:
+    import torch as _torch
+    _torch_available = True
+except ImportError:
+    _torch_available = False
+
 from core.loader import FILE_FILTER as _FILE_FILTER
 
 from PyQt6.QtWidgets import (
@@ -28,23 +35,110 @@ from matplotlib.figure import Figure
 from gui.histogram_editor import HistogramEditorPanel
 from gui.script_editor import ScriptEditorDialog
 
-# ═══════════════════════════════ THEME ══════════════════════════════════════
-BG      = "#050e1a"
-BG2     = "#081526"
-BG3     = "#0c1e35"
-BG4     = "#102644"
-BORDER  = "#1a3a5c"
-BORDER2 = "#2a5a8a"
-ACCENT  = "#3d9bd4"
-ACCENT2 = "#5bb8f0"
-GOLD    = "#d4a44f"
-GREEN   = "#3dbd6e"
-RED     = "#d45555"
-PURPLE  = "#9b6bd4"
-TEXT    = "#ddeeff"
-MUTED   = "#7aa0c0"
-HEAD    = "#a8d4f0"
-SUBTEXT = "#4a7a9a"
+# ═══════════════════════════════ THEME (SC2 — Light Accents + Red Details) ══
+BG      = "#0c1018"      # Koyu arka plan (biraz acik)
+BG2     = "#141e2c"      # Panel arka plan
+BG3     = "#1c2a3c"      # Aktif panel
+BG4     = "#253850"      # Hover / vurgu
+BORDER  = "#2a4060"      # Kenar — metalik
+BORDER2 = "#3a6090"      # Parlak kenar
+ACCENT  = "#e04040"      # Ana vurgu — KIRMIZI
+ACCENT2 = "#ff6060"      # Parlak vurgu — neon kirmizi
+GOLD    = "#f0b830"      # SC2 altin
+GREEN   = "#50dd66"      # Aktif / basarili
+RED     = "#ff3333"      # Hata
+PURPLE  = "#cc77ff"      # AI / ozel
+TEXT    = "#e8f0ff"      # Metin — parlak beyaz-mavi
+MUTED   = "#80a8c8"      # Soluk metin (daha acik)
+HEAD    = "#c0e0ff"      # Baslik (parlak)
+SUBTEXT = "#506880"      # Alt metin
+
+
+# ── FlowLayout — satirda sigmayan widget'lar alt satira kayar ──────────────
+from PyQt6.QtWidgets import QLayout
+from PyQt6.QtCore import QRect, QPoint
+
+class _FlowLayout(QLayout):
+    """Qt FlowLayout: satirda yer kalmazsa alt satira wrap eder."""
+    def __init__(self, parent=None, margin=4, h_spacing=4, v_spacing=3):
+        super().__init__(parent)
+        self._h_space = h_spacing
+        self._v_space = v_spacing
+        self._items = []
+        if margin >= 0:
+            self.setContentsMargins(margin, margin, margin, margin)
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def addSpacing(self, size):
+        """Spacing: invisible fixed-size widget."""
+        from PyQt6.QtWidgets import QWidget as _QW
+        spacer = _QW()
+        spacer.setFixedSize(size, 1)
+        self.addWidget(spacer)
+
+    def addStretch(self, stretch=0):
+        """Stretch — ignored in FlowLayout (no-op for wrap layout)."""
+        pass
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items[index]
+        return None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        s = QSize(0, 0)
+        for item in self._items:
+            s = s.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        s += QSize(m.left() + m.right(), m.top() + m.bottom())
+        return s
+
+    def _do_layout(self, rect, test_only):
+        m = self.contentsMargins()
+        effective = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
+        x = effective.x()
+        y = effective.y()
+        line_h = 0
+        for item in self._items:
+            w = item.sizeHint().width()
+            h = item.sizeHint().height()
+            next_x = x + w + self._h_space
+            if next_x - self._h_space > effective.right() + 1 and line_h > 0:
+                x = effective.x()
+                y = y + line_h + self._v_space
+                next_x = x + w + self._h_space
+                line_h = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+            x = next_x
+            line_h = max(line_h, h)
+        return y + line_h - rect.y() + m.bottom()
 
 SLIDER_CSS = (
     f"QSlider::groove:horizontal{{height:3px;background:{BORDER};border-radius:2px;}}"
@@ -73,8 +167,9 @@ CHECK_CSS = (
 )
 GROUP_CSS = (
     f"QGroupBox{{background:{BG3};border:1px solid {BORDER};"
-    f"border-radius:6px;margin-top:14px;padding:6px;}}"
-    f"QGroupBox::title{{color:{HEAD};font-size:11px;font-weight:600;"
+    f"border-top:1px solid {BORDER2};"
+    f"border-radius:2px;margin-top:14px;padding:6px;}}"
+    f"QGroupBox::title{{color:{HEAD};font-size:11px;font-weight:700;"
     f"subcontrol-origin:margin;subcontrol-position:top left;"
     f"left:8px;padding:0 4px;}}"
 )
@@ -84,21 +179,34 @@ LBL_CSS = f"color:{MUTED};font-size:10px;"
 
 def _btn(color=BG4, hover=None, h=28, bold=False):
     hc = hover or BORDER2
-    w  = "700" if bold else "500"
-    return (f"QPushButton{{background:{color};color:{TEXT};border:1px solid {BORDER};"
-            f"border-radius:4px;padding:3px 10px;font-size:11px;font-weight:{w};"
-            f"min-height:{h}px;}}"
-            f"QPushButton:hover{{background:{hc};border:1px solid {ACCENT};}}"
+    w  = "700" if bold else "600"
+    return (f"QPushButton{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {color}, stop:1 {BG});"
+            f"  color:{TEXT}; border:1px solid {BORDER};"
+            f"  border-top:1px solid {BORDER2};"
+            f"  border-radius:2px; padding:3px 10px;"
+            f"  font-size:11px; font-weight:{w}; min-height:{h}px;}}"
+            f"QPushButton:hover{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {hc}, stop:1 {BG3});"
+            f"  border:1px solid {ACCENT}; border-top:1px solid {ACCENT2};}}"
             f"QPushButton:pressed{{background:{BG};}}"
             f"QPushButton:disabled{{color:{SUBTEXT};background:{BG2};}}")
 
 
 def _run_btn(color=GREEN):
-    return (f"QPushButton{{background:{color};color:#fff;border:none;"
-            f"border-radius:4px;padding:4px 14px;font-size:11px;font-weight:700;"
-            f"min-height:26px;}}"
-            f"QPushButton:hover{{background:#5ad48a;}}"
-            f"QPushButton:pressed{{background:#2a9a50;}}"
+    return (f"QPushButton{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {color}, stop:0.6 #2a8844, stop:1 #1a5530);"
+            f"  color:#fff; border:1px solid {color};"
+            f"  border-radius:2px; padding:4px 14px;"
+            f"  font-size:11px; font-weight:700; min-height:26px;}}"
+            f"QPushButton:hover{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 #5ad48a, stop:1 #2a8844);"
+            f"  border:1px solid #5ad48a;}}"
+            f"QPushButton:pressed{{background:#1a5530;}}"
             f"QPushButton:disabled{{background:{BG3};color:{SUBTEXT};}}")
 
 
@@ -106,13 +214,31 @@ def make_icon_btn(emoji, label, color=BG4, hover=None):
     hc = hover or BORDER2
     b  = QPushButton(f"{emoji}\n{label}")
     b.setStyleSheet(
-        f"QPushButton{{background:{color};color:{TEXT};border:1px solid {BORDER};"
-        f"border-radius:6px;font-size:10px;font-weight:500;"
-        f"min-width:72px;min-height:52px;max-width:72px;max-height:52px;}}"
-        f"QPushButton:hover{{background:{hc};border:1px solid {ACCENT2};color:{ACCENT2};}}"
-        f"QPushButton:pressed{{background:{BG};}}"
-        f"QPushButton:disabled{{color:{SUBTEXT};background:{BG2};}}")
-    b.setFixedSize(72, 52)
+        f"QPushButton{{"
+        f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        f"    stop:0 {color}, stop:0.4 {BG3}, stop:1 {BG});"
+        f"  color:{TEXT};"
+        f"  border:1px solid {BORDER};"
+        f"  border-top:1px solid {BORDER2};"
+        f"  border-radius:2px;"
+        f"  font-size:11px; font-weight:700;"
+        f"  min-width:68px; min-height:56px; max-width:68px; max-height:56px;"
+        f"  padding:3px;"
+        f"}}"
+        f"QPushButton:hover{{"
+        f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+        f"    stop:0 {hc}, stop:0.5 {BG4}, stop:1 {BG3});"
+        f"  border:1px solid {ACCENT};"
+        f"  border-top:1px solid {ACCENT2};"
+        f"  color:{ACCENT2};"
+        f"}}"
+        f"QPushButton:pressed{{"
+        f"  background:{BG}; border:1px solid {ACCENT};"
+        f"}}"
+        f"QPushButton:disabled{{"
+        f"  color:{SUBTEXT}; background:{BG2}; border:1px solid {BORDER};"
+        f"}}")
+    b.setFixedSize(68, 56)
     return b
 
 
@@ -473,6 +599,36 @@ class ProcessPanel(QWidget):
         # truncate long messages
         short = msg if len(msg) <= 48 else "…" + msg[-46:]
         self._prog_lbl.setText(short)
+
+
+class _MastroStarlessWorker(QThread):
+    """Background thread for Mastro Starless NAFNet star removal."""
+    finished_sig = pyqtSignal(object)
+    progress_sig = pyqtSignal(int)
+
+    def __init__(self, img, sl_path, st_path):
+        super().__init__()
+        self.img = img
+        self.sl_path = sl_path
+        self.st_path = st_path
+        self.setObjectName("MastroStarlessWorker")
+
+    def run(self):
+        try:
+            from processing.mastro_starless import process_starless
+            starless, star_mask = process_starless(
+                self.img, tile=368, overlap=64, use_gpu=True,
+                progress_callback=lambda v: self.progress_sig.emit(v))
+            from core.loader import save_image
+            save_image(self.sl_path, starless)
+            stars_only = np.clip(self.img - starless, 0, 1).astype(np.float32)
+            save_image(self.st_path, stars_only)
+            self.finished_sig.emit({
+                "starless": starless, "stars_only": stars_only,
+                "star_mask": star_mask, "saved": [self.sl_path, self.st_path]})
+        except Exception:
+            import traceback
+            self.finished_sig.emit({"error": traceback.format_exc()})
 
 
 class _StarNetWorker(QThread):
@@ -1768,31 +1924,102 @@ class WorkflowPanel(QFrame):
     closed       = pyqtSignal()
 
     STEPS = [
-        # (key, icon, başlık, faz_rengi, faz_etiket, açıklama)
-        ("stack",   "🗂",  "Stacking",          "#2255aa", "HAM VERİ",
-         "Bias→Dark→Flat kalibrasyon, hizalama ve yığınlama. Tüm ham kareleri tek temiz görüntüye dönüştür."),
-        ("bg",      "🌌", "BG Extract",          "#22aa55", "LİNEER",
-         "Gradyan ve ışık kirliliğini çıkar. GraXpert AI veya Nox kullan. Stretch öncesi zorunlu!"),
-        ("noise",   "✨", "Noise Reduction",     "#22aa55", "LİNEER",
-         "Lineer gürültüyü bastır. Silentium burada en iyi çalışır — fiziksel gürültü modeli."),
-        ("deconv",  "🔭", "Deconvolution",       "#22aa55", "LİNEER",
-         "Yıldız PSF'ini düzelt, optik bulanıklığı gider. Blur Exterminator önerilen."),
-        ("color",   "🎨", "Color Calibration",   "#22aa55", "LİNEER",
-         "Renk dengesi — SPCC G2V (Güneş tipi) veya Avg Spiral Galaxy referansı. Stretch rengi bozar!"),
-        ("stretch", "📊", "Stretch",             "#aa5522", "GEÇİŞ ★",
-         "Lineer→Non-lineer. Veralux HMS önerilen. Bu noktadan sonra lineer işlem yapılmaz!"),
-        ("stars",   "⭐", "Star Removal",        "#884488", "NON-LİNEER",
-         "Yıldızları ayır (StarNet++). Yıldızsız katmanda kontrast işlemleri çok daha etkili."),
-        ("star_shrink","✦↓","Star Shrink",       "#884488", "NON-LİNEER",
-         "Yıldız küçültme — çekirdek/halo ayrımı ile yıldız boyutunu azalt."),
-        ("sharp",   "🔪", "Sharpen",             "#884488", "NON-LİNEER",
-         "Yapı ve doku detayları. Revela (Veralux) yıldızsız katmanda çok daha temiz çalışır."),
-        ("color",   "🎨", "Color Grading",       "#884488", "NON-LİNEER",
-         "Vectra ile LCH renk cerrahi. Ha/OIII/SHO vektörlerini ince ayarla."),
-        ("recomp",  "✦+","Star Recomposition",   "#884488", "NON-LİNEER",
-         "Keskinleştirilmiş starless + orijinal yıldız maskesini blend ile birleştir."),
-        ("hist",    "📈","Histogram / Curves",   "#555577", "FİNAL",
-         "Levels, Curves, Adjustments ile tonlama. Highlights/Shadows/Contrast ince ayarı."),
+        # (key, icon, baslik, faz_rengi, faz_etiket, aciklama)
+
+        # ── HAM VERI ──
+        ("stack",      "🗂", "Stacking",
+         "#2255aa", "HAM VERI",
+         "Bias, Dark, Flat kalibrasyon + hizalama + yiginlama. "
+         "Ham kareleri tek temiz goruntuye donustur. Sigma-clip outlier reject."),
+
+        # ── LINEER FAZ (stretch oncesi — piksel degerleri orantili) ──
+        ("crop",       "✂", "Crop / Cerceve",
+         "#22aa55", "LINEER",
+         "Kenar artifact'lari ve stacking sinirlarin kirp. "
+         "Daha kucuk dosya = sonraki islemler daha hizli."),
+
+        ("bg",         "🌌", "Arkaplan Cikarma",
+         "#22aa55", "LINEER",
+         "Gradyan ve isik kirliligini cikar. GraXpert AI (RBF/Kriging) veya Nox membran modeli. "
+         "Stretch oncesi ZORUNLU — yoksa gradient stretch ile amplify olur!"),
+
+        ("noise",      "✨", "Gurultu Azaltma (Lineer)",
+         "#22aa55", "LINEER",
+         "Lineer gurulutu bastirma. Silentium (fiziksel model) veya Mastro AI (NAFNet). "
+         "Lineer fazda gurultu karakter uniform — en etkili nokta burasi."),
+
+        ("deconv",     "🔭", "Deconvolution",
+         "#22aa55", "LINEER",
+         "Optik bulaniklik ve yildiz PSF duzeltme. Richardson-Lucy, Wiener veya Blur Exterminator. "
+         "Lineer veride PSF modeli en dogru calisirir."),
+
+        ("aberration", "🌀", "Aberasyon Duzeltme",
+         "#22aa55", "LINEER",
+         "Kromatik aberasyon, koma, yuvarlaklk ve spike duzeltme. "
+         "Optik hatalari stretch oncesi temizle — sonra dugumlesir."),
+
+        ("color",      "🎨", "Renk Kalibrasyon",
+         "#22aa55", "LINEER",
+         "SPCC G2V (Gunes tipi) veya Avg Spiral Galaxy referansi ile dogru renk dengesi. "
+         "Stretch renk oranlarini bozar — kalibrasyonu ONCE yap!"),
+
+        # ── GECIS NOKTASI ──
+        ("stretch",    "📊", "Histogram Stretch",
+         "#cc6622", "GECIS NOKTASI",
+         "Lineer → Non-lineer donusum. Veralux HMS (fizik-tabanli), Auto STF, GHS veya ASinH. "
+         "Bu noktadan sonra LINEER islem yapilamaz! En kritik adim."),
+
+        # ── NON-LINEER FAZ (stretch sonrasi — gorsel islemler) ──
+        ("stars",      "⭐", "Yildiz Ayirma",
+         "#884488", "NON-LINEER",
+         "StarNet++ veya Mastro Starless (NAFNet AI) ile yildizlari ayir. "
+         "Starless katmanda nebula kontrastini bagmsiz olarak isle."),
+
+        ("nebula",     "🌠", "Nebula Gelistirme",
+         "#884488", "NON-LINEER",
+         "Multiscale LCE, HDR GC veya Structure Amp ile nebula detaylari. "
+         "CLAHE Astro lokal kontrast. Yildizsiz katmanda cok daha temiz sonuc."),
+
+        ("sharp",      "🔪", "Keskinlestirme",
+         "#884488", "NON-LINEER",
+         "Revela (wavelet yapi), Multiscale VLC veya Unsharp Mask. "
+         "Yildizsiz katmanda en temiz sonuc — yildiz halolari amplify olmaz."),
+
+        ("noise",      "✨", "Gurultu Azaltma (Final)",
+         "#884488", "NON-LINEER",
+         "Keskinlestirme sonrasi ortaya cikan ince gurulutuyu temizle. "
+         "Hafif dokunusla (strength 0.3-0.5). NLM veya bilateral filtre."),
+
+        ("star_shrink","✦↓", "Yildiz Kucultme",
+         "#884488", "NON-LINEER",
+         "Yildiz boyutunu kucult — cekirdek/halo ayirimi ile orantili shrink. "
+         "Halo fill ile dogal gorunum. Recomposition oncesi son yildiz duzeltmesi."),
+
+        ("color",      "🎨", "Renk Grading",
+         "#884488", "NON-LINEER",
+         "Vectra LCH renk cerrahi: ton, doygunluk, parlaklik bagimsiz kontrol. "
+         "Ha/OIII/SHO vektor ayari. Vibrance + Color Temp ince ayar."),
+
+        ("recomp",     "✦+", "Yildiz Birlestirme",
+         "#884488", "NON-LINEER",
+         "Islenmis starless + orijinal yildiz maskesini blend et. "
+         "Screen/Lighten modlari, yildiz renk ve boyut kontrolu."),
+
+        # ── FINAL ──
+        ("hist",       "📈", "Histogram / Curves",
+         "#557799", "FINAL",
+         "Levels (B/M/W), Curves (noktali egri), per-kanal ayar. "
+         "Exposure, Contrast, Highlights, Shadows, Dehaze, Clarity ince ayari."),
+
+        ("morph",      "🔮", "Morfoloji (Opsiyonel)",
+         "#557799", "FINAL",
+         "Erosion/Dilation/Opening/Closing ile son duzeltmeler. "
+         "Kucuk kozmik iz ve hot pixel temizligi."),
+
+        ("script",     "⚡", "Script (Opsiyonel)",
+         "#557799", "FINAL",
+         "Python script ile ozel islem. Galaxy Enhance, CLAHE, custom pipeline. "
+         "Tekrarlanabilir islemler icin kaydet ve tekrar calistir."),
     ]
 
     def __init__(self, anchor_btn, parent=None):
@@ -2404,7 +2631,7 @@ class FrameTableWidget(QWidget):
             if ext in (".fits", ".fit", ".fts"):
                 try:
                     from astropy.io import fits as _fits
-                    with _fits.open(path, memmap=False) as hdul:
+                    with _fits.open(path, memmap=False, ignore_missing_simple=True) as hdul:
                         hdr = hdul[0].header
                         exp = hdr.get("EXPTIME") or hdr.get("EXPOSURE") or hdr.get("EXP_TIME")
                         iso = hdr.get("ISO") or hdr.get("GAIN") or ""
@@ -2624,7 +2851,14 @@ class StackingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🗂  Image Stacking — DeepSkyStacker Style")
-        self.setMinimumSize(1100, 820)
+        # Ekran boyutuna uyumlu minimum boyut
+        from PyQt6.QtWidgets import QApplication
+        _scr = QApplication.primaryScreen()
+        if _scr:
+            _av = _scr.availableGeometry()
+            self.setMinimumSize(min(1000, _av.width() - 40), min(700, _av.height() - 60))
+        else:
+            self.setMinimumSize(1100, 820)
         self.setStyleSheet(f"background:{BG};color:{TEXT};font-size:11px;")
         self._lists   = {}
         self._worker  = None
@@ -2647,7 +2881,12 @@ class StackingDialog(QDialog):
 
         # Ana splitter
         main_split = QSplitter(Qt.Orientation.Horizontal)
-        main_split.setStyleSheet(f"QSplitter::handle{{background:{BORDER};width:3px;}}")
+        main_split.setStyleSheet(
+            f"QSplitter::handle{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"    stop:0 {BORDER}, stop:0.5 {BORDER2}, stop:1 {BORDER});"
+            f"  width:3px;}}"
+            f"QSplitter::handle:hover{{background:{ACCENT};}}")
 
         # ── Sol: Light tablo + kalibrasyon kareleri ──────────────────────
         left = QWidget()
@@ -3292,10 +3531,18 @@ class StackingDialog(QDialog):
             th, tw = int(h * scale), int(w * scale)
             thumb = cv2.resize(img, (tw, th), interpolation=cv2.INTER_AREA)
 
-            # Auto-stretch for preview (lineer veri görünür olsun)
-            p_lo, p_hi = _np.percentile(thumb, [1, 99.5])
-            if p_hi - p_lo > 1e-6:
-                thumb = _np.clip((thumb - p_lo) / (p_hi - p_lo), 0, 1)
+            # Auto-stretch for preview — LINKED (renk koruyucu)
+            # Parametreler luminance'tan → tüm kanallara aynı → renk oranları korunur
+            if thumb.ndim == 3:
+                lum = (0.2126 * thumb[:,:,0] + 0.7152 * thumb[:,:,1]
+                       + 0.0722 * thumb[:,:,2])
+                p_lo, p_hi = _np.percentile(lum, [0.5, 99.8])
+                if p_hi - p_lo > 1e-6:
+                    thumb = _np.clip((thumb - p_lo) / (p_hi - p_lo), 0, 1)
+            else:
+                p_lo, p_hi = _np.percentile(thumb, [0.5, 99.8])
+                if p_hi - p_lo > 1e-6:
+                    thumb = _np.clip((thumb - p_lo) / (p_hi - p_lo), 0, 1)
 
             disp = (_np.clip(thumb, 0, 1) * 255).astype(_np.uint8)
             if disp.ndim == 3:
@@ -3573,6 +3820,184 @@ class _DragBar(QWidget):
             self._lay.addWidget(grp)
 
 
+# ═══════════════════════ Fullscreen Image Viewer Dialog ═══════════════════════
+class _FullscreenImageDialog(QDialog):
+    """Resmi tam ekran veya ozellestirilmis boyutta gosteren dialog.
+    Ctrl+F = fullscreen toggle, Esc = kapat, mouse wheel = zoom,
+    sag tik = context menu (bg rengi, interpolation, kaydet)."""
+
+    def __init__(self, img_array, title="", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Image Viewer — {title}" if title else "Image Viewer")
+        self.setMinimumSize(600, 400)
+        self.resize(1200, 800)
+        self._img = img_array  # float32 [0,1]
+        self._bg_color = BG
+        self._interp = "nearest"
+        self._zoom = 1.0
+
+        self.setStyleSheet(f"background:{BG};")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Top bar
+        bar = QWidget()
+        bar.setFixedHeight(36)
+        bar.setStyleSheet(
+            f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"  stop:0 {BG4}, stop:1 {BG2});"
+            f"border-bottom:1px solid {ACCENT};")
+        bl = QHBoxLayout(bar)
+        bl.setContentsMargins(8, 2, 8, 2)
+        bl.setSpacing(8)
+
+        lbl = QLabel(f"  {title}" if title else "  Image")
+        lbl.setStyleSheet(f"color:{HEAD};font-size:12px;font-weight:700;")
+        bl.addWidget(lbl)
+        bl.addStretch()
+
+        # Zoom bilgisi
+        self._lbl_zoom = QLabel("100%")
+        self._lbl_zoom.setStyleSheet(f"color:{MUTED};font-size:11px;font-weight:600;")
+        bl.addWidget(self._lbl_zoom)
+
+        # BG renk secici
+        bg_combo = QComboBox()
+        bg_combo.addItems(["Black", "Dark Gray", "Gray", "White", "Checker"])
+        bg_combo.setStyleSheet(COMBO_CSS)
+        bg_combo.setFixedWidth(90)
+        bg_combo.currentTextChanged.connect(self._set_bg)
+        bl.addWidget(QLabel("BG:"))
+        bl.lastWidget = bg_combo
+        bl.addWidget(bg_combo)
+
+        # Interpolation secici
+        int_combo = QComboBox()
+        int_combo.addItems(["nearest", "bilinear", "bicubic", "lanczos"])
+        int_combo.setStyleSheet(COMBO_CSS)
+        int_combo.setFixedWidth(80)
+        int_combo.currentTextChanged.connect(self._set_interp)
+        bl.addWidget(QLabel("Interp:"))
+        bl.addWidget(int_combo)
+
+        # Fullscreen toggle
+        btn_fs = QPushButton("⛶ Fullscreen")
+        btn_fs.setFixedHeight(28)
+        btn_fs.setStyleSheet(
+            f"QPushButton{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {ACCENT}44, stop:1 {BG3});"
+            f"  color:{ACCENT2}; border:1px solid {ACCENT};"
+            f"  border-radius:2px; padding:0 12px;"
+            f"  font-size:11px; font-weight:700;}}"
+            f"QPushButton:hover{{background:{ACCENT}66;}}")
+        btn_fs.clicked.connect(self._toggle_fullscreen)
+        bl.addWidget(btn_fs)
+
+        # Close
+        btn_close = QPushButton("✕")
+        btn_close.setFixedSize(28, 28)
+        btn_close.setStyleSheet(
+            f"QPushButton{{background:{RED}44;color:{TEXT};"
+            f"border:1px solid {RED};border-radius:2px;font-size:14px;font-weight:800;}}"
+            f"QPushButton:hover{{background:{RED};}}")
+        btn_close.clicked.connect(self.close)
+        bl.addWidget(btn_close)
+        lay.addWidget(bar)
+
+        # Image canvas (matplotlib)
+        self._fig = Figure(facecolor=BG)
+        self._ax = self._fig.add_subplot(111)
+        self._ax.set_facecolor(BG)
+        self._ax.set_axis_off()
+        self._canvas = FigureCanvas(self._fig)
+        self._canvas.setStyleSheet(f"background:{BG};")
+        self._canvas.wheelEvent = self._on_wheel
+        self._canvas.mouseDoubleClickEvent = lambda e: self._toggle_fullscreen()
+        lay.addWidget(self._canvas, 1)
+
+        # Info bar
+        info = QWidget()
+        info.setFixedHeight(24)
+        info.setStyleSheet(f"background:{BG2};border-top:1px solid {BORDER};")
+        il = QHBoxLayout(info)
+        il.setContentsMargins(8, 0, 8, 0)
+        h, w = img_array.shape[:2]
+        ch = "RGB" if img_array.ndim == 3 else "Gray"
+        self._lbl_info = QLabel(
+            f"{w} x {h}  |  {ch}  |  min={img_array.min():.3f}  max={img_array.max():.3f}")
+        self._lbl_info.setStyleSheet(f"color:{MUTED};font-size:10px;")
+        il.addWidget(self._lbl_info)
+        il.addStretch()
+        lay.addWidget(info)
+
+        self._draw()
+
+    def _draw(self):
+        self._ax.clear()
+        self._ax.set_facecolor(self._bg_color)
+        self._ax.set_axis_off()
+        interp_map = {"nearest": "nearest", "bilinear": "bilinear",
+                      "bicubic": "bicubic", "lanczos": "lanczos"}
+        img = np.clip(self._img, 0, 1)
+        if img.ndim == 2:
+            self._ax.imshow(img, cmap="gray", origin="upper",
+                            aspect="equal", interpolation=interp_map.get(self._interp, "nearest"))
+        else:
+            self._ax.imshow(img, origin="upper", aspect="equal",
+                            interpolation=interp_map.get(self._interp, "nearest"))
+        self._fig.tight_layout(pad=0)
+        self._canvas.draw_idle()
+
+    def _set_bg(self, text):
+        colors = {"Black": "#000000", "Dark Gray": "#1a1a1a",
+                  "Gray": "#555555", "White": "#ffffff", "Checker": "#2a2a2a"}
+        self._bg_color = colors.get(text, BG)
+        self._draw()
+
+    def _set_interp(self, text):
+        self._interp = text.lower()
+        self._draw()
+
+    def _on_wheel(self, event):
+        delta = event.angleDelta().y()
+        factor = 1.15 if delta > 0 else 0.87
+        self._zoom *= factor
+        self._zoom = max(0.1, min(50.0, self._zoom))
+        self._lbl_zoom.setText(f"{int(self._zoom * 100)}%")
+        # Zoom via matplotlib axis limits
+        ax = self._ax
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        cx = (xlim[0] + xlim[1]) / 2
+        cy = (ylim[0] + ylim[1]) / 2
+        hw = (xlim[1] - xlim[0]) / 2 / factor
+        hh = (ylim[1] - ylim[0]) / 2 / factor
+        ax.set_xlim(cx - hw, cx + hw)
+        ax.set_ylim(cy - hh, cy + hh)
+        self._canvas.draw_idle()
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape:
+            if self.isFullScreen():
+                self.showNormal()
+            else:
+                self.close()
+        elif event.key() == Qt.Key.Key_F and event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self._toggle_fullscreen()
+        elif event.key() == Qt.Key.Key_F11:
+            self._toggle_fullscreen()
+        else:
+            super().keyPressEvent(event)
+
+
 class ImageViewer(QWidget):
     """\n    Multi-panel image viewer with:\n      • 1/2/4 panel layout (side by side comparison)\n      • Scroll wheel zoom + pan on each panel\n      • Draggable histogram black/white point lines → live image update\n      • Crop, Stats tabs\n    """
     stretch_changed = pyqtSignal(float, float)   # black_pt, white_pt
@@ -3621,29 +4046,32 @@ class ImageViewer(QWidget):
         lay = QVBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(0)
 
         # ── Top bar (draggable groups) ────────────────────────────────────
-        tb = QWidget(); tb.setFixedHeight(30)
+        tb = QWidget(); tb.setFixedHeight(42)
         tb.setStyleSheet(f"background:{BG2};border-bottom:1px solid {BORDER};")
-        tbl = QHBoxLayout(tb); tbl.setContentsMargins(6,2,6,2); tbl.setSpacing(0)
+        tbl = QHBoxLayout(tb); tbl.setContentsMargins(8,3,8,3); tbl.setSpacing(0)
 
         self.lbl_info = QLabel("—")
-        self.lbl_info.setStyleSheet(f"color:{MUTED};font-size:10px;")
+        self.lbl_info.setStyleSheet(f"color:{MUTED};font-size:11px;font-weight:500;")
         tbl.addWidget(self.lbl_info, 1)
 
         # ── Draggable toolbar container ──────────────────────────
         self._drag_bar = _DragBar(self)
         tbl.addWidget(self._drag_bar)
 
+        _TB_H = 32  # tum butonlarin yuksekligi
+        _TB_CSS = (
+            f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
+            f"border-radius:4px;font-size:13px;font-weight:600;}}"
+            f"QPushButton:checked{{background:{BG4};color:{ACCENT2};"
+            f"border:1px solid {ACCENT};}}"
+            f"QPushButton:hover{{color:{TEXT};background:{BG4};}}")
+
         # -- GROUP: Layout --
         grp_layout = _DragGroup("layout")
         for n, icon in [(1,"▣"),(2,"▣▣"),(4,"⊞")]:
-            b = QPushButton(icon); b.setFixedSize(30, 22)
+            b = QPushButton(icon); b.setFixedSize(42, _TB_H)
             b.setCheckable(True)
-            b.setStyleSheet(
-                f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
-                f"border-radius:3px;font-size:11px;}}"
-                f"QPushButton:checked{{background:{BG4};color:{ACCENT2};"
-                f"border:1px solid {ACCENT};}}"
-                f"QPushButton:hover{{color:{TEXT};}}")
+            b.setStyleSheet(_TB_CSS)
             b.setToolTip(f"{n} panel")
             b.clicked.connect(lambda _, nn=n: self._set_layout(nn))
             grp_layout.add(b)
@@ -3653,11 +4081,14 @@ class ImageViewer(QWidget):
 
         # -- GROUP: Zoom --
         grp_zoom = _DragGroup("zoom")
-        b_zi = QPushButton("🔍+"); b_zi.setFixedSize(32,22)
-        b_zo = QPushButton("🔍−"); b_zo.setFixedSize(32,22)
-        b_fit= QPushButton("⛶");   b_fit.setFixedSize(28,22)
+        b_zi = QPushButton("+"); b_zi.setFixedSize(38, _TB_H)
+        b_zo = QPushButton("-"); b_zo.setFixedSize(38, _TB_H)
+        b_fit= QPushButton("Fit"); b_fit.setFixedSize(44, _TB_H)
         for b in (b_zi, b_zo, b_fit):
-            b.setStyleSheet(_btn(color=BG3, h=22))
+            b.setStyleSheet(_TB_CSS)
+        b_zi.setToolTip("Zoom In")
+        b_zo.setToolTip("Zoom Out")
+        b_fit.setToolTip("Fit to Window")
         b_zi.clicked.connect(lambda: self._zoom_step(1.25))
         b_zo.clicked.connect(lambda: self._zoom_step(0.80))
         b_fit.clicked.connect(self._zoom_fit)
@@ -3666,14 +4097,14 @@ class ImageViewer(QWidget):
 
         # -- GROUP: STF --
         grp_stf = _DragGroup("stf")
-        b_stf = QPushButton("💡STF"); b_stf.setFixedSize(50,22)
+        b_stf = QPushButton("STF"); b_stf.setFixedSize(52, _TB_H)
         b_stf.setCheckable(True)
         b_stf.setStyleSheet(
             f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
-            f"border-radius:3px;font-size:10px;}}"
+            f"border-radius:4px;font-size:13px;font-weight:700;}}"
             f"QPushButton:checked{{background:#1a3a1a;color:#44ddff;"
             f"border:1px solid #44ddff;}}"
-            f"QPushButton:hover{{color:{TEXT};}}")
+            f"QPushButton:hover{{color:{TEXT};background:{BG4};}}")
         b_stf.setToolTip("Auto Stretch (STF) — Toggle\nTikla: stretch / Tekrar tikla: geri al")
         b_stf.clicked.connect(self._auto_stf_preview)
         self._b_stf = b_stf
@@ -3682,26 +4113,32 @@ class ImageViewer(QWidget):
 
         # -- GROUP: Colormap --
         grp_cmap = _DragGroup("colormap")
-        cmap_lbl = QLabel("Colormap:"); cmap_lbl.setStyleSheet(LBL_CSS)
+        cmap_lbl = QLabel("Cmap:")
+        cmap_lbl.setStyleSheet(f"color:{MUTED};font-size:11px;font-weight:600;")
         self.cmap_cb = QComboBox()
         self.cmap_cb.addItems(["gray","inferno","plasma","viridis","hot","coolwarm","nipy_spectral"])
-        self.cmap_cb.setStyleSheet(COMBO_CSS); self.cmap_cb.setFixedWidth(100)
+        self.cmap_cb.setStyleSheet(COMBO_CSS)
+        self.cmap_cb.setFixedWidth(110)
+        self.cmap_cb.setFixedHeight(_TB_H)
         grp_cmap.add(cmap_lbl); grp_cmap.add(self.cmap_cb)
         self._drag_bar.add_group(grp_cmap)
 
         # -- GROUP: Channels --
         grp_ch = _DragGroup("channels")
-        CH_BTN_CSS = (
-            f"QPushButton{{background:{BG3};color:{{clr}};border:1px solid {BORDER};"
-            f"border-radius:3px;font-size:10px;font-weight:bold;padding:2px 5px;min-width:22px;}}"
-            f"QPushButton:checked{{background:{{clr}};color:#000;border:1px solid {{clr}};}}"
-            f"QPushButton:hover{{border:1px solid {{clr}};}}")
         self._ch_view_btns = {}
         for ch, clr in [("RGB","#aaaaaa"),("R","#ff4444"),("G","#44cc44"),("B","#4488ff"),("L","#cccccc")]:
             btn = QPushButton(ch)
             btn.setCheckable(True)
-            btn.setFixedHeight(22)
-            btn.setStyleSheet(CH_BTN_CSS.replace("{clr}", clr))
+            btn.setFixedSize(44, _TB_H)
+            btn.setStyleSheet(
+                f"QPushButton{{"
+                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                f"    stop:0 {BG3}, stop:1 {BG});"
+                f"  color:{clr}; border:1px solid {BORDER};"
+                f"  border-top:1px solid {BORDER2};"
+                f"  border-radius:2px; font-size:13px; font-weight:800; padding:2px 6px;}}"
+                f"QPushButton:checked{{background:{clr};color:#000;border:1px solid {clr};}}"
+                f"QPushButton:hover{{border:1px solid {clr};background:{BG4};}}")
             btn.clicked.connect(lambda _, c=ch: self._switch_channel(c))
             grp_ch.add(btn)
             self._ch_view_btns[ch] = btn
@@ -3714,10 +4151,16 @@ class ImageViewer(QWidget):
         self.tabs = QTabWidget()
         self.tabs.setStyleSheet(
             f"QTabWidget::pane{{border:none;background:{BG};}}"
-            f"QTabBar::tab{{background:{BG2};color:{MUTED};padding:5px 14px;"
-            f"border-bottom:2px solid transparent;font-size:10px;}}"
-            f"QTabBar::tab:selected{{color:{ACCENT2};border-bottom:2px solid {ACCENT2};}}"
-            f"QTabBar::tab:hover{{color:{TEXT};}}")
+            f"QTabBar::tab{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {BG3}, stop:1 {BG2});"
+            f"  color:{MUTED}; padding:5px 14px;"
+            f"  border:1px solid {BORDER}; border-bottom:2px solid transparent;"
+            f"  border-top:1px solid {BORDER2};"
+            f"  border-radius:2px 2px 0 0; font-size:10px; font-weight:700;}}"
+            f"QTabBar::tab:selected{{color:{ACCENT2};border-bottom:2px solid {ACCENT};"
+            f"  border-top:1px solid {ACCENT};}}"
+            f"QTabBar::tab:hover{{color:{TEXT};background:{BG4};}}")
         lay.addWidget(self.tabs, 1)
 
         # ── Image tab (main) ─────────────────────────────────────────────
@@ -3731,7 +4174,10 @@ class ImageViewer(QWidget):
         # QSplitter: sol=canvas grid, sağ=histogram panel
         self._main_splitter = QSplitter(Qt.Orientation.Horizontal)
         self._main_splitter.setStyleSheet(
-            f"QSplitter::handle{{background:{BORDER};width:4px;}}"
+            f"QSplitter::handle{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"    stop:0 {BORDER}, stop:0.5 {BORDER2}, stop:1 {BORDER});"
+            f"  width:3px;}}"
             f"QSplitter::handle:hover{{background:{ACCENT};}}")
         _img_tab_lay.addWidget(self._main_splitter)
 
@@ -3759,6 +4205,7 @@ class ImageViewer(QWidget):
             canvas.mouseMoveEvent    = lambda ev, c=canvas: self._qt_move(ev, c._slot)
             canvas.mouseReleaseEvent = lambda ev, c=canvas: self._qt_release(ev, c._slot)
             canvas.contextMenuEvent  = lambda ev, c=canvas: None  # block default
+            canvas.mouseDoubleClickEvent = lambda ev, slot=i: self._open_fullscreen(slot)
             # Mouse wheel zoom — hem Qt hem matplotlib event
             canvas.wheelEvent = lambda ev, slot=i: self._qt_wheel(ev, slot)
             fig.canvas.mpl_connect("scroll_event",
@@ -3903,13 +4350,32 @@ class ImageViewer(QWidget):
         self.tabs.setCurrentIndex(0)
         self._redraw_all()
 
+    def clear_all(self):
+        """Tum slotlari temizle — bos ekrana don."""
+        for i in range(4):
+            self._imgs[i] = None
+            self._titles[i] = ""
+            ax = self._axes_view[i]
+            ax.clear(); ax.set_axis_off()
+            try: self._figs_view[i].canvas.draw_idle()
+            except Exception: pass
+        self._hist_editor.set_image(None)
+        self.lbl_info.setText("—")
+        # Welcome ekranini goster (varsa)
+        if hasattr(self, '_show_welcome_bg'):
+            try: self._show_welcome_bg()
+            except Exception: pass
+
     # ── Show image ────────────────────────────────────────────────────────
     def show_image(self, img: np.ndarray, title: str = "", slot: int = -1):
         """\n        Display image. slot=-1 → auto-select next free or slot 0.\n        Always updates slot 0 (current) for backward compat.\n        """
+        if img is None:
+            return
         if slot < 0:
             slot = 0
         slot = max(0, min(3, slot))
-        self._imgs[slot]   = img.copy()
+        safe = img.copy()
+        self._imgs[slot]   = safe
         self._titles[slot] = title
         self._active = slot
         self._hist_black = 0.0
@@ -3918,10 +4384,10 @@ class ImageViewer(QWidget):
         if hasattr(self, '_welcome_visible') and self._welcome_visible:
             self._hide_welcome_bg()
         self._draw_slot(slot)
-        self._hist_editor.set_image(img)
-        self._draw_stats(img)
-        h, w = img.shape[:2]; ch = "RGB" if img.ndim==3 else "Gray"
-        self.lbl_info.setText(f"Slot {slot+1}  {w}×{h}  {ch}  min={img.min():.3f}  max={img.max():.3f}")
+        self._hist_editor.set_image(safe.copy())
+        self._draw_stats(safe)
+        h, w = safe.shape[:2]; ch = "RGB" if safe.ndim==3 else "Gray"
+        self.lbl_info.setText(f"Slot {slot+1}  {w}x{h}  {ch}  min={safe.min():.3f}  max={safe.max():.3f}")
         self.tabs.setCurrentIndex(0)
 
     def show_comparison(self, imgs: list, titles: list = None):
@@ -3951,21 +4417,28 @@ class ImageViewer(QWidget):
         ax.clear(); self._sax_style(ax)
         display = self._apply_hist_points(img)
 
-        # ── Kanal filtresi ────────────────────────────────────────
+        # ── Kanal filtresi + Colormap ─────────────────────────────
         ch_mode = getattr(self, '_channel_mode', 'RGB')
+        selected_cmap = self.cmap_cb.currentText()
         cmap = None
+
         if display.ndim == 3 and ch_mode != "RGB":
+            # Tek kanal çıkarma — seçilen colormap uygulanır
             if ch_mode == "R":
-                display = display[:, :, 0]; cmap = "gray"
+                display = display[:, :, 0]
             elif ch_mode == "G":
-                display = display[:, :, 1]; cmap = "gray"
+                display = display[:, :, 1]
             elif ch_mode == "B":
-                display = display[:, :, 2]; cmap = "gray"
+                display = display[:, :, 2]
             elif ch_mode == "L":
                 display = 0.2126*display[:,:,0] + 0.7152*display[:,:,1] + 0.0722*display[:,:,2]
-                cmap = "gray"
+            cmap = selected_cmap
+        elif display.ndim == 3 and selected_cmap != "gray":
+            # RGB görüntü + colormap seçilmiş → luminance'a çevirip colormap uygula
+            display = 0.2126*display[:,:,0] + 0.7152*display[:,:,1] + 0.0722*display[:,:,2]
+            cmap = selected_cmap
         elif display.ndim == 2:
-            cmap = self.cmap_cb.currentText()
+            cmap = selected_cmap
 
         ax.imshow(display, cmap=cmap, origin="upper",
                   aspect="equal", interpolation="nearest")
@@ -3990,6 +4463,16 @@ class ImageViewer(QWidget):
         for i in range(self._layout_n):
             if self._imgs[i] is not None:
                 self._draw_slot(i)
+
+    def _open_fullscreen(self, slot=0):
+        """Cift tikla — resmi tam ekran dialog'da ac."""
+        img = self._imgs[slot]
+        if img is None:
+            return
+        title = self._titles[slot] or f"Slot {slot+1}"
+        dlg = _FullscreenImageDialog(img.copy(), title, parent=self)
+        dlg.showMaximized()
+        dlg.exec()
 
     # ── Zoom & Pan ────────────────────────────────────────────────────────
     def _qt_wheel(self, event, slot: int):
@@ -4181,14 +4664,14 @@ class ImageViewer(QWidget):
         """User clicked Apply — bake to history and reset editor to new baseline."""
         result = np.clip(result, 0, 1).astype(np.float32)
         slot = self._active
-        self._imgs[slot] = result
+        self._imgs[slot] = result.copy()
         # Reset ImageViewer's own histogram state to defaults
         self._hist_pts = {"L":[0.0,0.5,1.0],"R":[0.0,0.5,1.0],"G":[0.0,0.5,1.0],"B":[0.0,0.5,1.0]}
         self._hist_black = 0.0
         self._hist_white = 1.0
-        # Editor already reset itself inside _apply(); just redraw
+        # Callback: ana uygulama history'ye kaydetsin
         if self._hist_apply_cb is not None:
-            self._hist_apply_cb(result)
+            self._hist_apply_cb(result.copy())
         self._draw_slot(slot)
 
     # ── Inline Crop (resim üzerinde sürükle + sağ tık menüsü) ───────────────────
@@ -4642,7 +5125,18 @@ class AstroApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🔭  Astro Maestro Pro")
-        self.resize(1540,900)
+        # Ekran boyutuna uyumlu pencere — overflow uyarısını önle
+        from PyQt6.QtWidgets import QApplication
+        _screen = QApplication.primaryScreen()
+        if _screen:
+            _avail = _screen.availableGeometry()
+            _w = min(1540, _avail.width() - 40)
+            _h = min(900, _avail.height() - 60)
+            self.resize(_w, _h)
+            self.setMinimumSize(min(900, _avail.width() - 40), min(600, _avail.height() - 60))
+        else:
+            self.resize(1400, 850)
+            self.setMinimumSize(900, 600)
         self._orig        = None
         self._current        = None
         self._history        = []
@@ -4678,9 +5172,14 @@ class AstroApp(QMainWindow):
         root.addWidget(self._make_toolbar())
         content=QWidget(); content.setStyleSheet(f"background:{BG};")
         cl=QVBoxLayout(content); cl.setContentsMargins(0,0,0,0)
-        self._bg=StarfieldBg(content); self._bg.setGeometry(0,0,1540,900); self._bg.lower()
+        self._bg=StarfieldBg(content); self._bg.setGeometry(0,0,self.width(),self.height()); self._bg.lower()
         splitter=QSplitter(Qt.Orientation.Horizontal)
-        splitter.setStyleSheet(f"QSplitter::handle{{background:{BORDER};width:2px;}}")
+        splitter.setStyleSheet(
+            f"QSplitter::handle{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"    stop:0 {BORDER}, stop:0.5 {BORDER2}, stop:1 {BORDER});"
+            f"  width:2px;}}"
+            f"QSplitter::handle:hover{{background:{ACCENT};}}")
         splitter.addWidget(self._build_viewer())
         splitter.addWidget(self._build_history_panel())
         splitter.setSizes([1200,170]); splitter.setCollapsible(1,True)
@@ -4930,61 +5429,188 @@ class AstroApp(QMainWindow):
             pass
 
     def _open_starless_file(self):
-        """Yıldızsız görüntü aç (recomposition için)."""
+        """Yıldızsız görüntü aç — sekme olarak göster."""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Yıldızsız Görüntü Aç",
+            self, "Yıldızsız Goruntu Ac",
             self._settings.get("last_open_dir", ""),
             _FILE_FILTER)
-        if not path: return
+        if not path:
+            return
         try:
             from core.loader import load_image
             img = load_image(path)
-            # StarNet sonucu olarak sakla
-            if not hasattr(self, "_starless_img"):
-                self._starless_img = None
             self._starless_img = img
+            fname = os.path.basename(path)
+            tab_title = f"Yildizsiz - {fname}"
+            self._add_image_tab("starless", img, tab_title)
+            self._settings["last_open_dir"] = os.path.dirname(path)
             self.status.showMessage(
-                f"✅  Yıldızsız yüklendi: {os.path.basename(path)} "
-                f"({img.shape[1]}×{img.shape[0]})")
+                f"Yildizsiz yuklendi: {fname} "
+                f"({img.shape[1]}x{img.shape[0]})")
         except Exception as e:
-            QMessageBox.critical(self, "Yükleme Hatası", str(e))
+            import traceback; traceback.print_exc()
+            QMessageBox.critical(self, "Yukleme Hatasi", str(e))
 
     def _open_stars_file(self):
-        """Yıldız maskesi / stars-only aç (recomposition için)."""
+        """Yıldız maskesi / stars-only aç — sekme olarak göster."""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Yıldız Maskesi Aç",
+            self, "Yildiz Maskesi Ac",
             self._settings.get("last_open_dir", ""),
             _FILE_FILTER)
-        if not path: return
+        if not path:
+            return
         try:
             from core.loader import load_image
             img = load_image(path)
-            if not hasattr(self, "_stars_img"):
-                self._stars_img = None
             self._stars_img = img
+            fname = os.path.basename(path)
+            tab_title = f"Yildiz Maskesi - {fname}"
+            self._add_image_tab("starmask", img, tab_title)
+            self._settings["last_open_dir"] = os.path.dirname(path)
             self.status.showMessage(
-                f"✅  Yıldız maskesi yüklendi: {os.path.basename(path)} "
-                f"({img.shape[1]}×{img.shape[0]})")
+                f"Yildiz maskesi yuklendi: {fname} "
+                f"({img.shape[1]}x{img.shape[0]})")
         except Exception as e:
-            QMessageBox.critical(self, "Yükleme Hatası", str(e))
+            import traceback; traceback.print_exc()
+            QMessageBox.critical(self, "Yukleme Hatasi", str(e))
+
+    # ── Resim Sekme Yönetimi ─────────────────────────────────────────────
+
+    def _add_image_tab(self, key: str, img: np.ndarray, title: str):
+        """Yeni resim sekmesi ekle veya mevcutu guncelle, o sekmeye gec."""
+        from PyQt6.QtWidgets import QTabBar as _QTabBar
+        # Ayni key ile mevcut sekme var mi?
+        for idx, data in enumerate(self._img_tab_data):
+            if data.get("key") == key:
+                # Guncelle
+                self._img_tab_data[idx] = {"key": key, "image": img.copy(), "title": title}
+                self._img_tabs.setTabText(idx, title)
+                self._img_tabs.setCurrentIndex(idx)
+                self.viewer.show_image(img, title, slot=0)
+                return
+        # Yeni sekme — veriyi ONCE listeye ekle (currentChanged'dan once hazir olsun)
+        entry = {"key": key, "image": img.copy(), "title": title}
+        self._img_tab_data.append(entry)
+        added_idx = self._img_tabs.addTab(title)
+        self._img_tabs.setTabToolTip(added_idx, title)
+        self._img_tabs.setCurrentIndex(added_idx)
+        self.viewer.show_image(img, title, slot=0)
+
+    def _on_img_tab_changed(self, index: int):
+        """Sekme degistiginde ilgili resmi viewer'da goster."""
+        if index < 0 or index >= len(self._img_tab_data):
+            return
+        data = self._img_tab_data[index]
+        key = data.get("key", "")
+        if key == "main":
+            # Ana goruntu — _current veya history'den al
+            img = self._current
+            if img is None and hasattr(self, "_history") and self._history:
+                _, img = self._history[-1]
+            if img is not None:
+                self.viewer.show_image(img.copy(), "Ana Goruntu", slot=0)
+        else:
+            img = data.get("image")
+            if img is not None:
+                self.viewer.show_image(img.copy(), data.get("title", key), slot=0)
+
+    def _on_img_tab_close(self, index: int):
+        """Sekme kapatma. main = resmi temizle (tab kalir), diger = tab'i sil."""
+        if index < 0 or index >= len(self._img_tab_data):
+            return
+        if self._img_tab_data[index].get("key") == "main":
+            # Ana goruntu: tab kalir, resim temizlenir
+            self._current = None
+            self._history = []
+            self._redo_stack = []
+            if hasattr(self, "hist_panel"):
+                self.hist_panel.lst.clear()
+            self._img_tab_data[index]["image"] = None
+            self.viewer.clear_all()
+            self._img_tabs.setTabText(index, "Ana Goruntu")
+            self.status.showMessage("Resim kapatildi")
+            return
+        # Diger sekmeler: tab'i kaldir
+        self._img_tabs.currentChanged.disconnect(self._on_img_tab_changed)
+        self._img_tab_data.pop(index)
+        self._img_tabs.removeTab(index)
+        self._img_tabs.currentChanged.connect(self._on_img_tab_changed)
+        # Ana goruntu sekmesine don
+        main_idx = self._find_main_tab_index()
+        self._img_tabs.setCurrentIndex(main_idx)
+        if self._current is not None:
+            self.viewer.show_image(self._current, "Ana Goruntu", slot=0)
+
+    def _on_img_tab_moved(self, from_idx: int, to_idx: int):
+        """Kullanici tab'i surukleyerek yer degistirdi — veri listesini senkronize et."""
+        if from_idx == to_idx:
+            return
+        if 0 <= from_idx < len(self._img_tab_data) and 0 <= to_idx < len(self._img_tab_data):
+            item = self._img_tab_data.pop(from_idx)
+            self._img_tab_data.insert(to_idx, item)
+
+    def _find_main_tab_index(self):
+        """'main' key'li sekmenin guncel index'ini bul."""
+        for i, d in enumerate(self._img_tab_data):
+            if d.get("key") == "main":
+                return i
+        return 0
 
     # ── Toolbar ─────────────────────────────────────────────────────────
     def _make_toolbar(self):
-        """\n        Two-row toolbar:\n          Row 1: Logo image + App name + File/Edit/Stack/StarNet/View/Tools buttons\n          Row 2: Process shortcuts (click → expand that panel in left sidebar)\n        """
+        """SC2-style toolbar: grouped buttons in metallic panels, FlowLayout wrap."""
         container = QWidget()
         container.setStyleSheet(
-            f"background:qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-            f"stop:0 {BG4},stop:0.7 {BG3},stop:1 {BG2});"
-            f"border-bottom:2px solid {BORDER};")
+            f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"  stop:0 #1a2a40, stop:0.05 {BG3}, stop:0.95 {BG2}, stop:1 #0a1828);"
+            f"border-bottom:2px solid qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"  stop:0 {BORDER}, stop:0.5 {ACCENT}, stop:1 {BORDER});")
         vlay = QVBoxLayout(container)
         vlay.setContentsMargins(0,0,0,0); vlay.setSpacing(0)
 
-        # ── Row 1: main toolbar ───────────────────────────────────────────
-        row1 = QWidget(); row1.setFixedHeight(68)
-        row1.setStyleSheet("background:transparent;border:none;")
-        lay = QHBoxLayout(row1); lay.setContentsMargins(8,4,8,4); lay.setSpacing(4)
+        # ── Helper: SC2 grup paneli olustur ─────────────────────────────
+        _GRP_CSS = (
+            f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"  stop:0 {BG4}, stop:0.3 {BG3}, stop:1 {BG2});"
+            f"border:1px solid {BORDER};"
+            f"border-top:1px solid {BORDER2};"
+            f"border-radius:3px;")
 
-        # Logo image
+        def _make_group(title, btns_list):
+            """Bir grup paneli: baslik + butonlar — tek birim olarak FlowLayout'a eklenir."""
+            grp = QWidget()
+            grp.setStyleSheet(f"QWidget#{grp_id} {{ {_GRP_CSS} }}"
+                              if False else _GRP_CSS)
+            gl = QVBoxLayout(grp)
+            gl.setContentsMargins(4,2,4,4); gl.setSpacing(1)
+            # Baslik
+            lbl = QLabel(title)
+            lbl.setStyleSheet(
+                f"background:transparent; border:none; color:{ACCENT};"
+                f"font-size:8px; font-weight:800; letter-spacing:2px;"
+                f"padding:0 2px;")
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            gl.addWidget(lbl)
+            # Buton satiri
+            brow = QWidget()
+            brow.setStyleSheet("background:transparent; border:none;")
+            bl = QHBoxLayout(brow)
+            bl.setContentsMargins(0,0,0,0); bl.setSpacing(2)
+            for b in btns_list:
+                bl.addWidget(b)
+            gl.addWidget(brow)
+            return grp
+
+        # ── Row 1: main toolbar (FlowLayout — wrap to next line) ─────────
+        row1 = QWidget()
+        row1.setStyleSheet("background:transparent; border:none;")
+        lay = _FlowLayout(row1, margin=4, h_spacing=4, v_spacing=4)
+
+        # Logo + Name panel
+        logo_panel = QWidget()
+        logo_panel.setStyleSheet(f"background:transparent; border:none;")
+        lp_lay = QHBoxLayout(logo_panel)
+        lp_lay.setContentsMargins(2,2,8,2); lp_lay.setSpacing(6)
         logo_lbl = QLabel()
         logo_path = os.path.join(os.path.dirname(__file__), "logo_thumb.jpg")
         if os.path.exists(logo_path):
@@ -4993,64 +5619,59 @@ class AstroApp(QMainWindow):
                 Qt.TransformationMode.SmoothTransformation)
             logo_lbl.setPixmap(pix)
             logo_lbl.setFixedSize(54, 54)
-            logo_lbl.setStyleSheet("border:1px solid "+BORDER+";border-radius:4px;")
+            logo_lbl.setStyleSheet(
+                f"border:1px solid {BORDER2}; border-radius:2px;"
+                f"background:{BG};")
         else:
-            logo_lbl.setText("🔭")
-            logo_lbl.setStyleSheet("font-size:28px;")
-        lay.addWidget(logo_lbl)
+            logo_lbl.setText("🔭"); logo_lbl.setStyleSheet("font-size:26px;")
+        lp_lay.addWidget(logo_lbl)
+        name_w = QWidget(); name_w.setStyleSheet("background:transparent;border:none;")
+        nv = QVBoxLayout(name_w); nv.setContentsMargins(0,4,0,4); nv.setSpacing(0)
+        n1 = QLabel("ASTRO MAESTRO PRO")
+        n1.setStyleSheet(f"color:{ACCENT2};font-size:12px;font-weight:800;"
+                         f"letter-spacing:3px;background:transparent;border:none;")
+        n2 = QLabel("by Deniz")
+        n2.setStyleSheet(f"color:{GOLD};font-size:9px;font-weight:600;"
+                         f"letter-spacing:1px;background:transparent;border:none;")
+        nv.addWidget(n1); nv.addWidget(n2)
+        lp_lay.addWidget(name_w)
+        lay.addWidget(logo_panel)
 
-        # App name + author
-        name_widget = QWidget()
-        name_widget.setStyleSheet("background:transparent;border:none;")
-        name_vlay = QVBoxLayout(name_widget)
-        name_vlay.setContentsMargins(4,0,0,0); name_vlay.setSpacing(0)
-        name_lbl = QLabel("ASTRO MAESTRO PRO")
-        name_lbl.setStyleSheet(
-            f"color:{ACCENT2};font-size:12px;font-weight:700;letter-spacing:2px;")
-        by_lbl = QLabel("by Deniz")
-        by_lbl.setStyleSheet(
-            f"color:{GOLD};font-size:9px;font-weight:500;letter-spacing:1px;")
-        name_vlay.addWidget(name_lbl)
-        name_vlay.addWidget(by_lbl)
-        lay.addWidget(name_widget)
-        lay.addSpacing(4); lay.addWidget(self._vsep()); lay.addSpacing(4)
-
-        # FILE
-        lay.addWidget(self._grp_lbl("FILE"))
+        # FILE group
         self._tb_open  = make_icon_btn("📂","Open")
         self._tb_save  = make_icon_btn("💾","Save")
-        lay.addWidget(self._tb_open); lay.addWidget(self._tb_save)
         self._tb_open.clicked.connect(self._open_file)
         self._tb_save.clicked.connect(self._save_file)
+        lay.addWidget(_make_group("FILE", [self._tb_open, self._tb_save]))
 
-        lay.addWidget(self._vsep())
-        lay.addWidget(self._grp_lbl("EDIT"))
+        # EDIT group
         self._tb_undo  = make_icon_btn("↺","Undo")
         self._tb_redo  = make_icon_btn("↻","Redo")
         self._tb_reset = make_icon_btn("🔄","Reset","#2a1010",RED)
-        lay.addWidget(self._tb_undo); lay.addWidget(self._tb_redo); lay.addWidget(self._tb_reset)
         self._tb_undo.clicked.connect(self._undo)
         self._tb_redo.clicked.connect(self._redo)
         self._tb_reset.clicked.connect(self._reset_all)
         self._tb_redo.setToolTip("İleri Al (Ctrl+Y)")
+        lay.addWidget(_make_group("EDIT", [self._tb_undo, self._tb_redo, self._tb_reset]))
 
-        lay.addWidget(self._vsep())
-        lay.addWidget(self._grp_lbl("STACK"))
+        # STACK group
         self._tb_stack = make_icon_btn("🗂","Stack","#0a1a2a",ACCENT)
-        lay.addWidget(self._tb_stack)
         self._tb_stack.clicked.connect(self._open_stacking)
+        lay.addWidget(_make_group("STACK", [self._tb_stack]))
 
-        lay.addWidget(self._vsep())
-        lay.addWidget(self._grp_lbl("STARNET"))
-        self._tb_starless = make_icon_btn("🌌","Starless","#1a0a2a",PURPLE)
+        # STARLESS group
+        self._tb_mastro_starless = make_icon_btn("🧠","Mastro\nStarless","#1a0a2a","#ff66cc")
+        self._tb_starless = make_icon_btn("🌌","StarNet","#1a0a2a",PURPLE)
         self._tb_star_shrink = make_icon_btn("✦↓","Shrink","#1a0a2a","#ffaa44")
         self._tb_recomp   = make_icon_btn("✦+","Recompose","#0a1a2a",GOLD)
-        lay.addWidget(self._tb_starless)
-        lay.addWidget(self._tb_star_shrink)
-        lay.addWidget(self._tb_recomp)
+        self._tb_mastro_starless.clicked.connect(self._run_mastro_starless)
         self._tb_starless.clicked.connect(self._run_starnet_and_save)
         self._tb_star_shrink.clicked.connect(lambda: self._show_process_flyout("star_shrink", self._tb_star_shrink))
         self._tb_recomp.clicked.connect(self._open_recomposition)
+        self._tb_mastro_starless.setToolTip(
+            "Mastro Starless — NAFNet AI yıldız silme\n"
+            "zenith.pt modeli kullanır (Siril syqon)\n"
+            "GPU destekli, tile-based inference")
         self._tb_starless.setToolTip(
             "Run StarNet++ on current image\n"
             "Saves starless + stars-only files\n"
@@ -5059,14 +5680,14 @@ class AstroApp(QMainWindow):
             "Star Recomposition\n"
             "Blend starless + stars-only back together\n"
             "with layer controls, colour and star size options")
+        lay.addWidget(_make_group("STARLESS", [
+            self._tb_mastro_starless, self._tb_starless,
+            self._tb_star_shrink, self._tb_recomp]))
 
-        lay.addWidget(self._vsep())
-        lay.addWidget(self._grp_lbl("VIEW"))
+        # VIEW group
         self._tb_orig = make_icon_btn("🖼","Original")
         self._tb_zfit = make_icon_btn("⛶","Fit")
         self._tb_autostr = make_icon_btn("💡","AutoSTF","#0a1a0a","#44ddff")
-        lay.addWidget(self._tb_orig); lay.addWidget(self._tb_zfit)
-        lay.addWidget(self._tb_autostr)
         self._tb_orig.clicked.connect(self._show_original)
         self._tb_zfit.clicked.connect(lambda: self.viewer._zoom_fit())
         self._tb_autostr.setCheckable(True)
@@ -5075,44 +5696,44 @@ class AstroApp(QMainWindow):
             "Tikla: stretch uygula\n"
             "Tekrar tikla: orijinale don")
         self._tb_autostr.clicked.connect(self._auto_stretch_current)
+        lay.addWidget(_make_group("VIEW", [self._tb_orig, self._tb_zfit, self._tb_autostr]))
 
-        lay.addWidget(self._vsep())
-        lay.addWidget(self._grp_lbl("TOOLS"))
+        # TOOLS group
         self._tb_settings   = make_icon_btn("⚙","Settings","#0a0a1a",ACCENT2)
         self._tb_customize  = make_icon_btn("🔧","Panels","#0a1a0a",GREEN)
         self._tb_platesolve = make_icon_btn("🔭","PlateSolve","#0a1a2a","#88ddff")
-        lay.addWidget(self._tb_settings); lay.addWidget(self._tb_customize)
-        lay.addWidget(self._tb_platesolve)
+        self._tb_update     = make_icon_btn("🔄","Update","#0a1a0a","#44dd88")
         self._tb_settings.clicked.connect(self._open_settings)
         self._tb_customize.clicked.connect(self._open_panel_customize)
         self._tb_platesolve.clicked.connect(self._open_plate_solve)
+        self._tb_update.clicked.connect(self._open_update_dialog)
         self._tb_platesolve.setToolTip(
             "Plate Solve — ASTAP\n"
             "Görüntünün gökyüzündeki konumunu bul\n"
             "Settings → ASTAP sekmesinden yolu ayarlayın")
+        self._tb_update.setToolTip("Güncelleme Kontrolü\nYeni sürüm var mı kontrol et")
+        lay.addWidget(_make_group("TOOLS", [
+            self._tb_settings, self._tb_customize,
+            self._tb_platesolve, self._tb_update]))
 
-        # Update butonu (sağ köşe)
-        self._tb_update = make_icon_btn("🔄","Update","#0a1a0a","#44dd88")
-        lay.addWidget(self._tb_update)
-        self._tb_update.clicked.connect(self._open_update_dialog)
-        self._tb_update.setToolTip(
-            "Güncelleme Kontrolü\n"
-            "Yeni sürüm var mı kontrol et")
-
-        lay.addStretch()
+        # File info label
         self.lbl_file = QLabel("No file")
-        self.lbl_file.setStyleSheet(f"color:{SUBTEXT};font-size:9px;")
+        self.lbl_file.setStyleSheet(
+            f"color:{MUTED};font-size:9px;font-weight:600;"
+            f"background:transparent;border:none;padding:0 6px;")
         self.lbl_file.setAlignment(
             Qt.AlignmentFlag.AlignRight|Qt.AlignmentFlag.AlignVCenter)
+        self.lbl_file.setFixedHeight(20)
         lay.addWidget(self.lbl_file)
         vlay.addWidget(row1)
 
-        # ── Row 2: process shortcut bar ───────────────────────────────────
-        row2 = QWidget(); row2.setFixedHeight(32)
+        # ── Row 2: process shortcut bar (FlowLayout — wrap) ────────────────
+        row2 = QWidget()
         row2.setStyleSheet(
-            f"background:{BG2};border-top:1px solid {BORDER};border-bottom:none;")
-        r2lay = QHBoxLayout(row2)
-        r2lay.setContentsMargins(8,2,8,2); r2lay.setSpacing(2)
+            f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"  stop:0 {BG3}, stop:0.5 {BG2}, stop:1 {BG});"
+            f"border:none; border-top:1px solid {BORDER2};")
+        r2lay = _FlowLayout(row2, margin=4, h_spacing=3, v_spacing=3)
 
         self._proc_btns = {}
         proc_shortcuts = [
@@ -5131,44 +5752,59 @@ class AstroApp(QMainWindow):
             ("script",  "⚡","Script"),
         ]
         for key, icon, label in proc_shortcuts:
-            b = QPushButton(f"{icon}  {label}")
+            b = QPushButton(f"{icon} {label}")
             b.setFixedHeight(26)
             b.setStyleSheet(
-                f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
-                f"border-radius:4px;padding:0 10px;font-size:10px;font-weight:500;}}"
-                f"QPushButton:hover{{background:{BG4};color:{ACCENT2};"
-                f"border:1px solid {ACCENT};}}"
-                f"QPushButton:checked{{background:{BG4};color:{GOLD};"
-                f"border:1px solid {GOLD};}}")
+                f"QPushButton{{"
+                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                f"    stop:0 {BG4}, stop:0.5 {BG3}, stop:1 {BG2});"
+                f"  color:{MUTED}; border:1px solid {BORDER};"
+                f"  border-top:1px solid {BORDER2};"
+                f"  border-radius:2px; padding:0 10px;"
+                f"  font-size:10px; font-weight:700;}}"
+                f"QPushButton:hover{{"
+                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                f"    stop:0 {ACCENT}33, stop:1 {BG3});"
+                f"  color:{ACCENT2}; border:1px solid {ACCENT};"
+                f"  border-top:1px solid {ACCENT2};}}"
+                f"QPushButton:checked{{"
+                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                f"    stop:0 {GOLD}33, stop:1 {BG3});"
+                f"  color:{GOLD}; border:1px solid {GOLD};}}")
             b.setCheckable(True)
             b.setToolTip(f"Click to open {label} settings")
             b.clicked.connect(lambda checked, k=key, btn=b: self._show_process_flyout(k, btn))
             self._proc_btns[key] = b
             r2lay.addWidget(b)
 
-        r2lay.addStretch()
-
         # Workflow rehber butonu
-        self._btn_workflow = QPushButton("🌌  Workflow")
+        self._btn_workflow = QPushButton("🌌 Workflow")
         self._btn_workflow.setFixedHeight(26)
         self._btn_workflow.setCheckable(True)
         self._btn_workflow.setStyleSheet(
-            f"QPushButton{{background:#0a1a2a;color:{ACCENT2};"
-            f"border:1px solid {ACCENT2};border-radius:4px;"
-            f"padding:0 10px;font-size:10px;font-weight:600;}}"
-            f"QPushButton:hover{{background:#0a2a3a;border-color:{ACCENT2};}}"
-            f"QPushButton:checked{{background:#0a2a3a;color:{GOLD};"
-            f"border-color:{GOLD};}}")
+            f"QPushButton{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {ACCENT}44, stop:1 {BG3});"
+            f"  color:{ACCENT2}; border:1px solid {ACCENT};"
+            f"  border-radius:2px; padding:0 10px;"
+            f"  font-size:10px; font-weight:800;}}"
+            f"QPushButton:hover{{"
+            f"  background:{ACCENT}55; border-color:{ACCENT2};}}"
+            f"QPushButton:checked{{"
+            f"  background:{GOLD}33; color:{GOLD}; border-color:{GOLD};}}")
         self._btn_workflow.setToolTip("Astro Fotoğrafçılık Workflow Rehberi\nHer adıma tıklayınca ilgili panel açılır")
         self._btn_workflow.clicked.connect(self._show_workflow)
         r2lay.addWidget(self._btn_workflow)
 
         # Customize panels button
         btn_cust = QPushButton("🔧")
-        btn_cust.setFixedSize(28, 26)
+        btn_cust.setFixedSize(26, 26)
         btn_cust.setStyleSheet(
-            f"QPushButton{{background:{BG};color:{SUBTEXT};border:1px solid {BORDER};"
-            f"border-radius:3px;font-size:13px;}}"
+            f"QPushButton{{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {BG3}, stop:1 {BG});"
+            f"  color:{SUBTEXT}; border:1px solid {BORDER};"
+            f"  border-radius:2px; font-size:12px;}}"
             f"QPushButton:hover{{color:{TEXT};border-color:{ACCENT};}}")
         btn_cust.setToolTip("Customize panel order/visibility")
         btn_cust.clicked.connect(self._open_panel_customize)
@@ -5220,16 +5856,57 @@ class AstroApp(QMainWindow):
         w=QWidget(); w.setStyleSheet(f"background:{BG};")
         lay=QVBoxLayout(w); lay.setContentsMargins(0,0,0,0)
 
-        hbar=QWidget(); hbar.setFixedHeight(30)
+        hbar=QWidget(); hbar.setFixedHeight(34)
         hbar.setStyleSheet(f"background:{BG2};border-bottom:1px solid {BORDER};")
-        hl=QHBoxLayout(hbar); hl.setContentsMargins(8,0,8,0); hl.setSpacing(4)
-        self.lbl_step=QLabel("Step: —")
-        self.lbl_step.setStyleSheet(f"color:{MUTED};font-size:10px;")
-        hl.addWidget(self.lbl_step); hl.addStretch()
+        hl=QHBoxLayout(hbar); hl.setContentsMargins(0,0,8,0); hl.setSpacing(4)
 
-        # Slot selector for multi-view
-        slot_lbl = QLabel("Load into slot:")
-        slot_lbl.setStyleSheet(LBL_CSS)
+        # ── Resim sekmeleri — en basta, suruklenebilir ──
+        from PyQt6.QtWidgets import QTabBar as _QTabBar
+        self._img_tabs = _QTabBar()
+        self._img_tabs.setExpanding(False)
+        self._img_tabs.setDrawBase(False)
+        self._img_tabs.setTabsClosable(True)
+        self._img_tabs.setMovable(True)
+        self._img_tabs.setUsesScrollButtons(True)
+        self._img_tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self._img_tabs.setStyleSheet(
+            f"QTabBar {{ background: transparent; }}"
+            f"QTabBar::tab {{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {BG4}, stop:1 {BG3});"
+            f"  color:{MUTED}; padding:6px 18px;"
+            f"  border:1px solid {BORDER}; border-bottom:none;"
+            f"  border-top:1px solid {BORDER2};"
+            f"  border-radius:2px 2px 0 0;"
+            f"  font-size:12px; font-weight:700;"
+            f"  min-width:100px; max-width:260px; margin-right:2px; }}"
+            f"QTabBar::tab:selected {{"
+            f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"    stop:0 {BG3}, stop:1 {BG});"
+            f"  color:{ACCENT2};"
+            f"  border-bottom:2px solid {ACCENT};"
+            f"  border-top:1px solid {ACCENT}; }}"
+            f"QTabBar::tab:hover {{ color:{TEXT}; background:{BG4}; }}"
+            f"QTabBar::close-button {{ subcontrol-position: right;"
+            f"  image: url(none); width:16px; height:16px;"
+            f"  margin-left:6px; border-radius:2px;"
+            f"  background: {BG4}; }}"
+            f"QTabBar::close-button:hover {{ background: {RED}; }}")
+        from PyQt6.QtCore import QSize as _QSize
+        self._img_tabs.setIconSize(_QSize(22, 22))
+        # Ana sekme — X tiklaninca resim temizlenir, tab kalir
+        self._img_tabs.addTab("Ana Goruntu")
+        self._img_tabs.setTabToolTip(0, "X = resmi kapat / temizle")
+        self._img_tabs.currentChanged.connect(self._on_img_tab_changed)
+        self._img_tabs.tabCloseRequested.connect(self._on_img_tab_close)
+        self._img_tabs.tabMoved.connect(self._on_img_tab_moved)
+        hl.addWidget(self._img_tabs)
+
+        hl.addStretch()
+
+        # Slot selector (sag taraf)
+        slot_lbl = QLabel("Slot:")
+        slot_lbl.setStyleSheet(f"color:{MUTED};font-size:11px;")
         hl.addWidget(slot_lbl)
         self._slot_combo = QComboBox()
         self._slot_combo.addItems(["1","2","3","4"])
@@ -5239,6 +5916,15 @@ class AstroApp(QMainWindow):
         hl.addWidget(self._slot_combo)
 
         lay.addWidget(hbar)
+
+        # lbl_step — dummy (history panelinde zaten gorunuyor, buradan kaldirdik)
+        self.lbl_step = QLabel("")
+        self.lbl_step.hide()
+
+        # Sekme verileri: liste — her eleman {"key":str, "image":ndarray, "title":str}
+        # index 0 = "main" (ana goruntu), geri kalani dinamik
+        # Liste sırası her zaman tab bar sırasıyla eşleşir
+        self._img_tab_data = [{"key": "main", "image": None, "title": "Ana Goruntu"}]
         self.viewer=ImageViewer(); self.viewer._parent_app = self; lay.addWidget(self.viewer,1)
         # Wire histogram Apply button → create new history step
         self.viewer._hist_apply_cb = lambda img: self._hist_apply(img)
@@ -5635,9 +6321,10 @@ class AstroApp(QMainWindow):
         # Noise Reduction
         p = _make("✨","Noise Reduction","noise")
         p.add_combo("method","Method",
-                    ["silentium","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
-                    "silentium",
-                    "silentium        — Veralux Silentium (linear-phase, en iyi)\n"
+                    ["mastro_noise","silentium","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
+                    "mastro_noise",
+                    "mastro_noise     — Mastro Noise (NAFNet AI, en iyi)\n"
+                    "silentium        — Veralux Silentium (linear-phase)\n"
                     "bilateral        — Kenar-koruyucu bilateral\n"
                     "gaussian         — Gaussian bulaniklik\n"
                     "median           — Medyan filtre\n"
@@ -5647,6 +6334,8 @@ class AstroApp(QMainWindow):
         p.add_slider("strength","Strength",0,1,0.7,2)
         p.add_slider("detail","Detail Preserve",0,1,0.5,2,
                      "Yuksek = detay koru (noisexterminator)")
+        p.add_slider("modulation","Modulation",0,1,1.0,2,
+                     "Mastro Noise blend (0=orijinal, 1=tam denoise)")
         p.add_slider("iterations","Iterations",1,5,1,0)
         p.run_requested.connect(lambda s,k="noise": self._run_key(k,s))
 
@@ -5919,8 +6608,25 @@ class AstroApp(QMainWindow):
 
     def _hist_apply(self, img):
         """Called when histogram Apply is pressed — bakes into history."""
-        self._set_image(img, "Histogram Adjust")
-        self.status.showMessage("✅  Histogram adjustment applied")
+        active_tab = self._img_tabs.currentIndex() if hasattr(self, "_img_tabs") else 0
+        # Hangi tab aktif?
+        data = None
+        if 0 <= active_tab < len(self._img_tab_data):
+            data = self._img_tab_data[active_tab]
+        key = data.get("key", "main") if data else "main"
+        if key == "main":
+            # Ana goruntu — history'ye ekle
+            self._set_image(img, "Histogram Adjust")
+        else:
+            # Yan sekme — tab datasini guncelle
+            if data:
+                data["image"] = img.copy()
+                if key == "starless":
+                    self._starless_img = img.copy()
+                elif key == "starmask":
+                    self._stars_img = img.copy()
+            self.viewer.show_image(img, data["title"] if data else "Adjusted", slot=0)
+        self.status.showMessage("Histogram adjustment applied")
 
 
     # ── Stretch auto-analysis ─────────────────────────────────────────────
@@ -6130,23 +6836,26 @@ class AstroApp(QMainWindow):
         wf._position()
 
     def _workflow_step(self, key: str):
-        """Workflow adımına tıklanınca ilgili paneli/diyaloğu aç."""
+        """Workflow adimina tiklaninca ilgili paneli/diyalogu ac."""
         self._btn_workflow.setChecked(False)
         if key == "stack":
             self._open_stacking()
         elif key == "recomp":
             self._open_recomposition()
+        elif key == "stars":
+            # Yildiz ayirma — StarNet veya Mastro Starless
+            self._run_starnet_and_save()
         elif key == "hist":
-            # Histogram editörünü görünür yap
-            if hasattr(self, "_hist_panel_wrap"):
-                self._hist_panel_wrap.show()
-                self._hist_panel_wrap.setMinimumWidth(280)
-            self.status.showMessage("📈  Histogram editörü açıldı — sağdaki paneli kullanın")
+            # Histogram editorunu gorunur yap
+            if hasattr(self.viewer, "_toggle_hist_panel"):
+                self.viewer._toggle_hist_panel()
+            self.status.showMessage("Histogram editoru acildi")
+        elif key == "script":
+            self._open_script_editor()
         else:
-            # İşlem paneli flyout olarak aç
+            # Islem paneli flyout olarak ac
             btn = self._proc_btns.get(key)
             if btn:
-                # Önce tüm butonları sıfırla
                 for b in self._proc_btns.values(): b.setChecked(False)
                 btn.setChecked(True)
                 self._show_process_flyout(key, btn)
@@ -6177,8 +6886,14 @@ class AstroApp(QMainWindow):
             self._pre_stf_image = self._current.copy()  # orijinali sakla
             img = self._current.copy()
             med = float(np.median(img))
-            target = 0.20 if med < 0.15 else 0.25
-            stretched = _auto_stf(img, target=target, shadow_clip=-2.8)
+            # Panelden parametreleri oku (varsa)
+            try:
+                target = float(self._stf_target.v())
+                shadow_clip = float(self._stf_clip.v())
+            except Exception:
+                target = 0.20 if med < 0.15 else 0.25
+                shadow_clip = -2.8
+            stretched = _auto_stf(img, target=target, shadow_clip=shadow_clip)
             self._set_image(stretched, "Auto STF")
             self._tb_autostr.setChecked(True)
             self.status.showMessage(
@@ -6296,6 +7011,15 @@ class AstroApp(QMainWindow):
             # Show starless in viewer and add to history
             starless = result["starless"]
             self._set_image(starless, "Starless (StarNet++)")
+            # Sekmelere ekle
+            self._starless_img = starless
+            self._add_image_tab("starless", starless, "⭐ Yıldızsız (StarNet)")
+            stars_only = result.get("stars_only")
+            if stars_only is not None:
+                self._stars_img = stars_only
+                self._add_image_tab("starmask", stars_only, "✦ Yıldız Maskesi (StarNet)")
+            # Ana sekmeye geri dön
+            self._img_tabs.setCurrentIndex(0)
             # Status with file paths
             saved = result.get("saved", [])
             self.status.showMessage(
@@ -6312,6 +7036,105 @@ class AstroApp(QMainWindow):
         worker.progress.connect(_on_prog)
         worker.finished.connect(_on_done)
         worker.finished.connect(lambda _: self._cleanup_worker(worker))
+        worker.start()
+
+    # ── Mastro Starless one-click run & save ───────────────────────────
+    def _run_mastro_starless(self):
+        """One-click Mastro Starless — NAFNet AI star removal."""
+        if self._current is None:
+            QMessageBox.information(self, "Info", "Please open an image first.")
+            return
+
+        # Check model file
+        import pathlib
+        model_dir = pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "siril" / "syqon_starless"
+        model_file = model_dir / "zenith.pt"
+        if not model_file.exists():
+            QMessageBox.critical(self, "Model Bulunamadı",
+                f"Mastro Starless modeli bulunamadı:\n{model_file}\n\n"
+                f"zenith.pt dosyasını aşağıdaki klasöre koyun:\n{model_dir}")
+            return
+
+        # Ask for output folder
+        default_dir = (self._settings.get("last_save_dir","") or
+                       self._settings.get("last_open_dir","") or
+                       os.path.expanduser("~"))
+        out_dir = QFileDialog.getExistingDirectory(
+            self, "Mastro Starless — Çıktı Klasörü Seç", default_dir)
+        if not out_dir:
+            return
+
+        lbl = self.lbl_file.text().strip()
+        base = os.path.splitext(lbl)[0] if lbl and lbl != "No file" else "image"
+        starless_path   = os.path.join(out_dir, f"{base}_mastro_starless.tif")
+        stars_only_path = os.path.join(out_dir, f"{base}_mastro_stars.tif")
+
+        reply = QMessageBox.question(
+            self, "Mastro Starless",
+            f"Engine:  NAFNet (Zenith)\n"
+            f"Model:   zenith.pt\n"
+            f"Output:  {out_dir}\n\n"
+            f"Kaydedilecek:\n"
+            f"  • {os.path.basename(starless_path)}\n"
+            f"  • {os.path.basename(stars_only_path)}\n\n"
+            "Devam?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        self._tb_mastro_starless.setEnabled(False)
+        self._tb_mastro_starless.setText("⏳\nRunning…")
+        self.pbar.show(); self.pbar.setRange(0, 100)
+        self.status.showMessage("🧠  Mastro Starless çalışıyor…")
+
+        _sl_path = starless_path
+        _st_path = stars_only_path
+        _img = self._current.copy()
+        _before = self._current.copy()
+        self._before_process = _before
+
+        worker = _MastroStarlessWorker(_img, _sl_path, _st_path)
+        self._workers.append(worker)
+
+        def _on_prog(v):
+            self.pbar.setValue(v)
+
+        def _on_done(result):
+            self._cleanup_worker(worker)
+            self._tb_mastro_starless.setEnabled(True)
+            self._tb_mastro_starless.setText("🧠\nMastro\nStarless")
+            self.pbar.hide()
+            if result.get("error"):
+                err = result["error"]
+                print(f"[Mastro Starless ERROR]\n{err}")
+                self.status.showMessage("❌  Mastro Starless hata")
+                dlg = QMessageBox(self)
+                dlg.setWindowTitle("Mastro Starless Error")
+                dlg.setIcon(QMessageBox.Icon.Critical)
+                dlg.setText("Mastro Starless başarısız oldu.")
+                dlg.setDetailedText(err)
+                dlg.exec()
+                return
+            self._set_image(result["starless"], "Starless (Mastro)")
+            # Sekmelere ekle
+            self._starless_img = result["starless"]
+            self._add_image_tab("starless", result["starless"], "⭐ Yıldızsız (Mastro)")
+            stars_only = result.get("stars_only")
+            if stars_only is not None:
+                self._stars_img = stars_only
+                self._add_image_tab("starmask", stars_only, "✦ Yıldız Maskesi (Mastro)")
+            self._img_tabs.setCurrentIndex(0)
+            saved = result.get("saved", [])
+            self.status.showMessage(
+                f"✅  Mastro Starless — {', '.join(os.path.basename(p) for p in saved)}")
+            QMessageBox.information(self, "Mastro Starless",
+                f"✅  Yıldız silme tamamlandı!\n\n"
+                f"Kaydedilen:\n  {_sl_path}\n  {_st_path}\n\n"
+                f"Starless görüntü aktif.")
+
+        worker.progress_sig.connect(_on_prog)
+        worker.finished_sig.connect(_on_done)
+        worker.finished_sig.connect(lambda _: self._cleanup_worker(worker))
         worker.start()
 
     # ── Panel navigation & customization ────────────────────────────────
@@ -6462,7 +7285,7 @@ class AstroApp(QMainWindow):
             self.status.showMessage(f"⏮  #{index} → {lbl}")
 
     def _set_image(self, img, label, reset=False):
-        self._current=img
+        self._current=img.copy() if img is not None else None
         # Yeni işlem → redo stack temizle
         self._redo_stack.clear()
         if reset:
@@ -6822,6 +7645,20 @@ class AstroApp(QMainWindow):
 
         if key == "noise":
             method = params.get("method","bilateral")
+            if method == "mastro_noise":
+                def _mastro_noise_fn(img, **kw):
+                    import numpy as _np
+                    from processing.mastro_noise import process_denoise
+                    modulation = float(kw.get("modulation", 1.0))
+                    pcb = kw.get("_progress_cb")
+                    def _cb(v):
+                        if pcb: pcb(f"[{v}/100] Mastro Noise…", step=v, total=100)
+                    r = process_denoise(img, tile=512, overlap=64,
+                                        modulation=modulation, use_gpu=True,
+                                        progress_callback=_cb)
+                    return _np.clip(r, 0, 1).astype("float32")
+                self._run_worker(key, _mastro_noise_fn, params)
+                return
             if method == "silentium":
                 def _sil_fn(img, **kw):
                     import numpy as _np

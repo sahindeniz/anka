@@ -853,22 +853,43 @@ class PlateSolveDialog(QDialog):
                     dec_col = cols_upper.get("DEC")
 
                     if ra_col and dec_col:
-                        ra_str  = str(result[ra_col][0]).strip()
-                        dec_str = str(result[dec_col][0]).strip()
-                        # "12 33 45.67"  "+08 50 06.2" formatı
+                        ra_raw = result[ra_col][0]
+                        dec_raw = result[dec_col][0]
+                        ra_str  = str(ra_raw).strip()
+                        dec_str = str(dec_raw).strip()
+
                         try:
-                            coord   = SkyCoord(ra_str, dec_str,
-                                               unit=(u.hourangle, u.deg),
-                                               frame="icrs")
-                            ra_deg  = float(coord.ra.deg)
-                            dec_deg = float(coord.dec.deg)
-                        except Exception:
-                            # Bazen direkt derece olarak gelir
-                            try:
+                            # ── Yeni astroquery (≥0.4.8): RA/Dec zaten derece (float) ──
+                            # Eski astroquery: sexagesimal string ("05 35 17.3")
+                            # Ayırt etme: string'de boşluk/':' varsa sexagesimal
+                            is_sexagesimal = (' ' in ra_str or ':' in ra_str)
+
+                            if is_sexagesimal:
+                                # Sexagesimal saat açısı → derece
+                                coord = SkyCoord(ra_str, dec_str,
+                                                 unit=(u.hourangle, u.deg),
+                                                 frame="icrs")
+                                ra_deg  = float(coord.ra.deg)
+                                dec_deg = float(coord.dec.deg)
+                            else:
+                                # Zaten derece — direkt float dönüşüm
                                 ra_deg  = float(ra_str)
                                 dec_deg = float(dec_str)
+                                # Sanity check: RA [0,360], Dec [-90,90]
+                                if not (0 <= ra_deg <= 360 and -90 <= dec_deg <= 90):
+                                    raise ValueError(
+                                        f"Geçersiz aralık: RA={ra_deg}, Dec={dec_deg}")
+                        except Exception as e1:
+                            # Son çare: SkyCoord otomatik tespit
+                            try:
+                                coord = SkyCoord(ra=float(ra_str), dec=float(dec_str),
+                                                 unit=(u.deg, u.deg), frame="icrs")
+                                ra_deg  = float(coord.ra.deg)
+                                dec_deg = float(coord.dec.deg)
                             except Exception as e2:
-                                self._log_line(f"❌  Koordinat parse hatası: {e2}  (RA='{ra_str}' Dec='{dec_str}')")
+                                self._log_line(
+                                    f"❌  Koordinat parse hatası: {e2}  "
+                                    f"(RA='{ra_str}' Dec='{dec_str}')")
                     else:
                         self._log_line(f"⚠  Beklenen kolonlar yok. Mevcut: {result.colnames}")
             except ImportError:
@@ -958,7 +979,7 @@ class PlateSolveDialog(QDialog):
 
         try:
             from astropy.io import fits as _fits
-            with _fits.open(last_file, memmap=False) as hdul:
+            with _fits.open(last_file, memmap=False, ignore_missing_simple=True) as hdul:
                 hdr = hdul[0].header
                 focal = (hdr.get("FOCALLEN") or hdr.get("FOCAL") or
                          hdr.get("FLENGTH") or hdr.get("TELESCOP_FOCALLEN"))

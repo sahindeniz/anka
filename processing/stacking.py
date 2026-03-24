@@ -212,10 +212,9 @@ def _stack_mean(frames: List[np.ndarray], masks: List[np.ndarray]) -> np.ndarray
 
 
 def _stack_median(frames: List[np.ndarray], masks: List[np.ndarray]) -> np.ndarray:
-    """Median stacking — bellek verimli, satir satir isler."""
+    """Maskeli median stacking — siyah kenar piksellerini dislar."""
     n = len(frames)
     h, w = frames[0].shape[:2]
-    channels = frames[0].shape[2] if frames[0].ndim == 3 else 1
     is_color = frames[0].ndim == 3
     result = np.zeros_like(frames[0], dtype=np.float32)
 
@@ -224,7 +223,24 @@ def _stack_median(frames: List[np.ndarray], masks: List[np.ndarray]) -> np.ndarr
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
-        result[y0:y1] = np.median(block, axis=0)
+        mask_block = np.stack([m[y0:y1] for m in masks], axis=0)  # (n, bh, w)
+
+        if is_color:
+            # Her piksel icin gecerli karelerin median'ini al
+            for c in range(block.shape[-1]):
+                ch_block = block[..., c]  # (n, bh, w)
+                # NaN maskeleme — gecersiz pikselleri NaN yap, nanmedian ile hesapla
+                masked = np.where(mask_block > 0.5, ch_block, np.nan)
+                with np.errstate(all='ignore'):
+                    med = np.nanmedian(masked, axis=0)
+                # Tum kareler gecersiz → 0
+                med = np.nan_to_num(med, nan=0.0)
+                result[y0:y1, :, c] = med
+        else:
+            masked = np.where(mask_block > 0.5, block, np.nan)
+            with np.errstate(all='ignore'):
+                med = np.nanmedian(masked, axis=0)
+            result[y0:y1] = np.nan_to_num(med, nan=0.0)
 
     return result
 
@@ -235,32 +251,65 @@ def _stack_kappa_sigma(
     kappa: float = 2.5,
     iterations: int = 3,
 ) -> np.ndarray:
-    """Kappa-sigma clipping — bellek verimli, satir bloklari halinde isler."""
+    """Maskeli kappa-sigma clipping — RENK KORUYUCU.
+    Renkli goruntuler icin: luminance bazli red/kabul karari.
+    Ayni kare-piksel icin TUM kanallar birlikte kabul/red edilir
+    → renk oranları korunur, renk kayması olmaz."""
     n = len(frames)
     h, w = frames[0].shape[:2]
+    is_color = frames[0].ndim == 3
     result = np.zeros_like(frames[0], dtype=np.float32)
 
     block_size = max(1, min(32, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
-        valid = np.ones(block.shape, dtype=bool)
+        mask_block = np.stack([m[y0:y1] for m in masks], axis=0)  # (n, bh, w)
 
-        for _ in range(iterations):
-            # Gecerli piksellerin ortalamasi
+        if is_color:
+            # ── RENK KORUYUCU: Luminance bazli sigma clipping ──
+            # Karar luminance uzerinden verilir, tum kanallara AYNI uygulanir
+            # Boylece R/G/B icin farkli kareler reddedilmez → renk orani bozulmaz
+            lum_weights = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+            lum_block = np.sum(block * lum_weights[np.newaxis, np.newaxis, np.newaxis, :],
+                               axis=-1)  # (n, bh, w)
+
+            # valid maske: piksel bazli (kanal bazli DEGiL!)
+            valid_px = mask_block > 0.5  # (n, bh, w)
+
+            for _ in range(iterations):
+                vcount_px = np.sum(valid_px, axis=0, keepdims=True).astype(np.float32)
+                vcount_px[vcount_px == 0] = 1
+                lum_mean = np.sum(lum_block * valid_px, axis=0, keepdims=True) / vcount_px
+                lum_diff = lum_block - lum_mean
+                lum_var = np.sum(lum_diff * lum_diff * valid_px, axis=0, keepdims=True) / vcount_px
+                lum_std = np.sqrt(lum_var)
+                lum_std[lum_std < 1e-8] = 1e-8
+                valid_px = valid_px & (np.abs(lum_diff) <= kappa * lum_std)
+
+            # Ayni valid maskesini tum kanallara genislet
+            valid_3ch = valid_px[:, :, :, np.newaxis]  # (n, bh, w, 1) — broadcast
+            vcount_3ch = np.sum(valid_3ch, axis=0, keepdims=True).astype(np.float32)
+            vcount_3ch[vcount_3ch == 0] = 1
+            result[y0:y1] = (np.sum(block * valid_3ch, axis=0, keepdims=True) / vcount_3ch).squeeze(0)
+
+        else:
+            # Mono goruntu — klasik per-pixel clipping
+            valid = mask_block > 0.5
+
+            for _ in range(iterations):
+                vcount = np.sum(valid, axis=0, keepdims=True).astype(np.float32)
+                vcount[vcount == 0] = 1
+                mean = np.sum(block * valid, axis=0, keepdims=True) / vcount
+                diff = block - mean
+                var = np.sum(diff * diff * valid, axis=0, keepdims=True) / vcount
+                std = np.sqrt(var)
+                std[std < 1e-8] = 1e-8
+                valid = valid & (np.abs(diff) <= kappa * std)
+
             vcount = np.sum(valid, axis=0, keepdims=True).astype(np.float32)
             vcount[vcount == 0] = 1
-            mean = np.sum(block * valid, axis=0, keepdims=True) / vcount
-            # Standart sapma
-            diff = block - mean
-            var = np.sum(diff * diff * valid, axis=0, keepdims=True) / vcount
-            std = np.sqrt(var)
-            std[std < 1e-8] = 1e-8
-            valid = valid & (np.abs(diff) <= kappa * std)
-
-        vcount = np.sum(valid, axis=0, keepdims=True).astype(np.float32)
-        vcount[vcount == 0] = 1
-        result[y0:y1] = (np.sum(block * valid, axis=0, keepdims=True) / vcount).squeeze(0)
+            result[y0:y1] = (np.sum(block * valid, axis=0, keepdims=True) / vcount).squeeze(0)
 
     return result
 
@@ -487,13 +536,21 @@ def stack_aligned(
             progress_cb(step, msg)
 
     n = len(aligned_frames)
-    cb(8, f"{n} kare stackleniyor — metot: {method}")
+    is_color = aligned_frames[0].ndim == 3
+    ch_count = aligned_frames[0].shape[2] if is_color else 1
+    cb(8, f"{n} kare stackleniyor — metot: {method} — "
+         f"{'RGB renkli' if is_color else 'mono'} ({ch_count} kanal)")
 
     # Maskeleri olustur (siyah kenarlar icin)
+    # Renkli goruntulerde: herhangi bir kanal > 0 ise piksel gecerli
     masks = []
     for fr in aligned_frames:
-        gray = _to_gray_float(fr)
-        mask = (gray > 1e-6).astype(np.float32)
+        if is_color:
+            # Tum kanallar sifir olan pikselleri maskele
+            # Herhangi bir kanalda sinyal varsa gecerli say
+            mask = (np.max(fr, axis=2) > 1e-6).astype(np.float32)
+        else:
+            mask = (fr > 1e-6).astype(np.float32)
         masks.append(mask)
 
     # Stack

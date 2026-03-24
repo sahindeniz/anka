@@ -22,23 +22,23 @@ from PyQt6.QtGui import (
     QFont, QPainterPath, QPixmap, QPolygonF
 )
 
-# ── Colours (match app.py) ────────────────────────────────────────────────────
-BG      = "#050e1a"
-BG2     = "#081526"
-BG3     = "#0c1e35"
-BG4     = "#102644"
-BORDER  = "#1a3a5c"
-BORDER2 = "#2a5a8a"
-ACCENT  = "#3d9bd4"
-ACCENT2 = "#5bb8f0"
-GOLD    = "#d4a44f"
-GREEN   = "#3dbd6e"
-RED     = "#d45555"
-PURPLE  = "#9b6bd4"
-TEXT    = "#ddeeff"
-MUTED   = "#7aa0c0"
-HEAD    = "#a8d4f0"
-SUBTEXT = "#4a7a9a"
+# ── Colours (match app.py — SC2 Light + Red) ─────────────────────────────────
+BG      = "#0c1018"
+BG2     = "#141e2c"
+BG3     = "#1c2a3c"
+BG4     = "#253850"
+BORDER  = "#2a4060"
+BORDER2 = "#3a6090"
+ACCENT  = "#e04040"
+ACCENT2 = "#ff6060"
+GOLD    = "#f0b830"
+GREEN   = "#50dd66"
+RED     = "#ff3333"
+PURPLE  = "#cc77ff"
+TEXT    = "#e8f0ff"
+MUTED   = "#80a8c8"
+HEAD    = "#c0e0ff"
+SUBTEXT = "#506880"
 
 CH_COLORS = {"L": ACCENT2, "R": RED, "G": GREEN, "B": "#6699ff", "ALL": ACCENT}
 
@@ -48,15 +48,25 @@ SPIN_CSS = (
     f"QDoubleSpinBox:focus,QSpinBox:focus{{border:1px solid {ACCENT};}}"
 )
 SLIDER_CSS = (
-    f"QSlider::groove:horizontal{{height:4px;background:{BORDER};border-radius:2px;}}"
-    f"QSlider::handle:horizontal{{width:14px;height:14px;margin:-5px 0;"
-    f"background:{ACCENT};border-radius:7px;border:2px solid {ACCENT2};}}"
-    f"QSlider::sub-page:horizontal{{background:{ACCENT};border-radius:2px;}}"
+    f"QSlider::groove:horizontal{{height:3px;background:{BORDER};border-radius:1px;}}"
+    f"QSlider::handle:horizontal{{width:12px;height:12px;margin:-5px 0;"
+    f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"  stop:0 {ACCENT2}, stop:1 {ACCENT});"
+    f"border-radius:6px;border:1px solid {ACCENT2};}}"
+    f"QSlider::sub-page:horizontal{{background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+    f"  stop:0 {BORDER2}, stop:1 {ACCENT});border-radius:1px;}}"
 )
 BTN_CSS = (
-    f"QPushButton{{background:{BG3};color:{TEXT};border:1px solid {BORDER};"
-    f"border-radius:4px;padding:3px 10px;font-size:10px;}}"
-    f"QPushButton:hover{{background:{BG4};border:1px solid {ACCENT};}}"
+    f"QPushButton{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 {BG3}, stop:1 {BG});"
+    f"  color:{TEXT}; border:1px solid {BORDER};"
+    f"  border-top:1px solid {BORDER2};"
+    f"  border-radius:2px; padding:3px 10px; font-size:10px; font-weight:600;}}"
+    f"QPushButton:hover{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 {BG4}, stop:1 {BG3});"
+    f"  border:1px solid {ACCENT}; border-top:1px solid {ACCENT2};}}"
     f"QPushButton:pressed{{background:{BG};}}"
 )
 CHECK_CSS = (
@@ -67,12 +77,20 @@ CHECK_CSS = (
 )
 TAB_CSS = (
     f"QTabWidget::pane{{background:{BG2};border:1px solid {BORDER};"
-    f"border-radius:5px;margin-top:-1px;}}"
-    f"QTabBar::tab{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
-    f"border-bottom:none;padding:5px 14px;font-size:10px;font-weight:600;"
-    f"min-width:65px;border-radius:4px 4px 0 0;}}"
-    f"QTabBar::tab:selected{{background:{BG2};color:{ACCENT2};"
-    f"border-bottom:2px solid {ACCENT};border-top:1px solid {ACCENT}44;}}"
+    f"border-top:1px solid {BORDER2};"
+    f"border-radius:2px;margin-top:-1px;}}"
+    f"QTabBar::tab{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 {BG4}, stop:1 {BG3});"
+    f"  color:{MUTED}; border:1px solid {BORDER};"
+    f"  border-bottom:none; border-top:1px solid {BORDER2};"
+    f"  padding:5px 14px; font-size:10px; font-weight:700;"
+    f"  min-width:65px; border-radius:2px 2px 0 0;}}"
+    f"QTabBar::tab:selected{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 {BG3}, stop:1 {BG2});"
+    f"  color:{ACCENT2}; border-bottom:2px solid {ACCENT};"
+    f"  border-top:1px solid {ACCENT};}}"
     f"QTabBar::tab:hover{{color:{TEXT};background:{BG4};}}"
 )
 

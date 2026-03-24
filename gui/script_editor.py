@@ -25,27 +25,29 @@ from PyQt6.QtGui import (
     QTextDocument, QKeySequence, QShortcut
 )
 
-BG      = "#050e1a"
-BG2     = "#081526"
-BG3     = "#0c1e35"
-BG4     = "#102644"
-BORDER  = "#1a3a5c"
-ACCENT  = "#3d9bd4"
-ACCENT2 = "#5bb8f0"
-GOLD    = "#d4a44f"
-GREEN   = "#3dbd6e"
-RED     = "#d45555"
-TEXT    = "#ddeeff"
-MUTED   = "#7aa0c0"
-HEAD    = "#a8d4f0"
-SUBTEXT = "#4a7a9a"
+BG      = "#0c1018"
+BG2     = "#141e2c"
+BG3     = "#1c2a3c"
+BG4     = "#253850"
+BORDER  = "#2a4060"
+BORDER2 = "#3a6090"
+ACCENT  = "#e04040"
+ACCENT2 = "#ff6060"
+GOLD    = "#f0b830"
+GREEN   = "#50dd66"
+RED     = "#ff3333"
+TEXT    = "#e8f0ff"
+MUTED   = "#80a8c8"
+HEAD    = "#c0e0ff"
+SUBTEXT = "#506880"
 
 EDITOR_CSS = f"""
     QTextEdit {{
-        background: #0a0f1a;
+        background: {BG};
         color: #d4e8ff;
         border: 1px solid {BORDER};
-        border-radius: 4px;
+        border-top: 1px solid {BORDER2};
+        border-radius: 2px;
         font-family: 'Consolas', 'Courier New', monospace;
         font-size: 12px;
         selection-background-color: {BG4};
@@ -54,16 +56,30 @@ EDITOR_CSS = f"""
 """
 
 BTN_CSS = (
-    f"QPushButton{{background:{BG3};color:{TEXT};border:1px solid {BORDER};"
-    f"border-radius:4px;padding:4px 12px;font-size:10px;}}"
-    f"QPushButton:hover{{background:{BG4};border:1px solid {ACCENT};}}"
+    f"QPushButton{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 {BG3}, stop:1 {BG});"
+    f"  color:{TEXT}; border:1px solid {BORDER};"
+    f"  border-top:1px solid {BORDER2};"
+    f"  border-radius:2px; padding:4px 12px; font-size:10px; font-weight:600;}}"
+    f"QPushButton:hover{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 {BG4}, stop:1 {BG3});"
+    f"  border:1px solid {ACCENT}; border-top:1px solid {ACCENT2};}}"
     f"QPushButton:pressed{{background:{BG};}}"
     f"QPushButton:disabled{{color:{SUBTEXT};}}"
 )
 RUN_CSS = (
-    f"QPushButton{{background:#0a3a0a;color:{GREEN};border:1px solid {GREEN};"
-    f"border-radius:4px;padding:4px 16px;font-size:11px;font-weight:700;}}"
-    f"QPushButton:hover{{background:#0f4f0f;}}"
+    f"QPushButton{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 #0a4a0a, stop:1 #0a2a0a);"
+    f"  color:{GREEN}; border:1px solid {GREEN};"
+    f"  border-radius:2px; padding:4px 16px;"
+    f"  font-size:11px; font-weight:700;}}"
+    f"QPushButton:hover{{"
+    f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+    f"    stop:0 #0f5f0f, stop:1 #0a3a0a);"
+    f"  border:1px solid #5ad48a;}}"
     f"QPushButton:pressed{{background:{BG};}}"
 )
 
@@ -207,14 +223,29 @@ class ScriptRunner(QThread):
             cv2 = None
 
         log_buf = io.StringIO()
+        # Ekstra kutuphaneler (varsa yukle)
+        extra = {}
+        try:
+            from skimage import exposure as _exposure
+            extra["exposure"] = _exposure
+        except ImportError:
+            pass
+        try:
+            from scipy import ndimage as _ndimage
+            extra["ndimage"] = _ndimage
+        except ImportError:
+            pass
         ns = {
             "image":  self.image.copy(),
             "result": None,
             "np":     np,
             "numpy":  np,
             "cv2":    cv2,
+            "os":     __import__("os"),
+            "math":   __import__("math"),
             "print":  lambda *a, **kw: (log_buf.write(" ".join(str(x) for x in a) + "\n"),
                                         self.log.emit(" ".join(str(x) for x in a))),
+            **extra,
         }
         try:
             exec(compile(self.code, "<script>", "exec"), ns)
@@ -257,12 +288,13 @@ class ScriptEditorDialog(QDialog):
         self.setWindowTitle("Astro Mastro Pro — Python Script Editor")
         self.resize(1000, 680)
         self.setStyleSheet(f"background:{BG};color:{TEXT};")
-        self._image    = image
+        self._image    = image.copy() if image is not None else None
         self._apply_cb = apply_cb
         self._result   = None
         self._runner   = None
         self._scripts  = {}   # name → code
         self._current  = None
+        self._apply_count = 0
 
         self._load_scripts()
         self._build_ui()
@@ -302,10 +334,35 @@ class ScriptEditorDialog(QDialog):
         for b in (b_new, b_save, b_del, b_imp, b_exp): tbl.addWidget(b)
         tbl.addStretch()
 
-        self._btn_run   = QPushButton("▶  Calistir");    self._btn_run.setStyleSheet(RUN_CSS);   self._btn_run.setFixedHeight(28)
-        self._btn_apply = QPushButton("✅  Uygula");      self._btn_apply.setStyleSheet(BTN_CSS); self._btn_apply.setFixedHeight(28)
+        self._btn_run   = QPushButton("▶  Calistir")
+        self._btn_run.setStyleSheet(RUN_CSS)
+        self._btn_run.setFixedHeight(28)
+
+        APPLY_CSS = (
+            f"QPushButton{{background:#0a2a0a;color:{GREEN};border:1px solid {GREEN};"
+            f"border-radius:4px;padding:4px 16px;font-size:11px;font-weight:700;}}"
+            f"QPushButton:hover{{background:#0f4f0f;border:1px solid #5dd88a;}}"
+            f"QPushButton:pressed{{background:{BG};}}"
+            f"QPushButton:disabled{{color:{SUBTEXT};border-color:{BORDER};}}"
+        )
+        self._btn_apply = QPushButton("Resme Uygula")
+        self._btn_apply.setStyleSheet(APPLY_CSS)
+        self._btn_apply.setFixedHeight(28)
         self._btn_apply.setEnabled(False)
-        tbl.addWidget(self._btn_run); tbl.addWidget(self._btn_apply)
+        self._btn_apply.setToolTip("Sonucu ana penceredeki resme uygula (dialog acik kalir)")
+
+        CLOSE_CSS = (
+            f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
+            f"border-radius:4px;padding:4px 12px;font-size:10px;}}"
+            f"QPushButton:hover{{background:{RED};color:#fff;border:1px solid {RED};}}"
+        )
+        self._btn_close = QPushButton("Kapat")
+        self._btn_close.setStyleSheet(CLOSE_CSS)
+        self._btn_close.setFixedHeight(28)
+
+        tbl.addWidget(self._btn_run)
+        tbl.addWidget(self._btn_apply)
+        tbl.addWidget(self._btn_close)
         root.addWidget(tb)
 
         b_new.clicked.connect(self._new_script)
@@ -315,6 +372,7 @@ class ScriptEditorDialog(QDialog):
         b_exp.clicked.connect(self._export_script)
         self._btn_run.clicked.connect(self._run)
         self._btn_apply.clicked.connect(self._apply)
+        self._btn_close.clicked.connect(self.accept)
 
         # ── Body: sol list + sağ editör+log ───────────────────────────────────
         splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -502,11 +560,11 @@ class ScriptEditorDialog(QDialog):
         h, w = result.shape[:2]
         ch = "RGB" if result.ndim == 3 else "Gray"
         self._log.append(
-            f"OK  →  {w}x{h} {ch}  "
+            f"OK  {w}x{h} {ch}  "
             f"min={result.min():.4f}  max={result.max():.4f}")
         self._btn_run.setEnabled(True)
         self._btn_apply.setEnabled(True)
-        self._status.setText("Tamamlandi — Uygula butonuna basin")
+        self._status.setText("Tamamlandi — 'Resme Uygula' butonuna basin")
 
     def _on_error(self, msg):
         self._log.append(f"\n--- HATA ---\n{msg}\n")
@@ -514,8 +572,24 @@ class ScriptEditorDialog(QDialog):
         self._status.setText("Hata!")
 
     def _apply(self):
-        if self._result is None: return
+        """Sonucu ana penceredeki resme uygula — dialog acik kalir."""
+        if self._result is None:
+            self._log.append("Henuz sonuc yok — once Calistir'a basin.")
+            return
+        import numpy as np
+        result = np.clip(self._result, 0, 1).astype(np.float32)
+        # Ana pencereye uygula
         if self._apply_cb:
-            self._apply_cb(self._result)
-        self._status.setText("Uygulandı!")
-        self.accept()
+            self._apply_cb(result)
+        self._apply_count += 1
+        # Uygulanan sonucu yeni baseline olarak ayarla
+        # Boylece tekrar calistirinca SON hali uzerinden calisir
+        self._image = result.copy()
+        self._result = None
+        self._btn_apply.setEnabled(False)
+        self._log.append(
+            f"--- Resme uygulandi (#{self._apply_count}) ---\n"
+            f"    Simdi tekrar calistirabilir veya baska script deneyebilirsiniz.\n"
+            f"    Sonraki calistirma SON uygulanan resim uzerinden yapilir.")
+        self._status.setText(
+            f"Uygulandi (#{self._apply_count}) — tekrar calistirilabilir")
