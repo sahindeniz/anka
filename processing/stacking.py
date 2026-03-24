@@ -582,41 +582,50 @@ def stack_aligned(
 
 def _neutralize_background(img: np.ndarray) -> np.ndarray:
     """
-    Arka plan renk sapmasını düzelt — sadece renk dengesini nötralize et.
-    Parlaklığı korur, sadece kanal dengesizliğini giderir.
+    Arka plan renk sapmasını düzelt.
+    Her kanaldan arka plan seviyesini çıkarır → arka plan siyah,
+    sinyal renkleri (nebula/yıldız) aynen korunur.
     """
     if img is None or img.size == 0:
         return img
     if img.ndim != 3 or img.shape[2] < 3:
-        return img  # Mono görüntüde renk sapması yok
+        return img
 
     result = img.astype(np.float32).copy()
 
-    # En karanlık %10 pikselleri arka plan olarak kabul et
+    # En karanlık %5 pikselleri saf arka plan olarak al (çok tutucu)
     gray = np.mean(result, axis=2)
-    threshold = np.percentile(gray, 10)
+    threshold = np.percentile(gray, 5)
     bg_mask = gray <= threshold
 
-    if bg_mask.sum() < 100:
-        threshold = np.percentile(gray, 20)
-        bg_mask = gray <= threshold
-
-    if bg_mask.sum() < 10:
+    if bg_mask.sum() < 50:
         return result
 
-    # Her kanalın arka plan medyanını bul
-    bg_medians = []
-    for ch in range(3):
-        bg_medians.append(np.median(result[:, :, ch][bg_mask]))
+    # Her kanalın arka plan seviyesi
+    bg_levels = np.array([
+        float(np.median(result[:, :, ch][bg_mask]))
+        for ch in range(3)
+    ])
 
-    # En düşük medyanı referans al — sadece fazlalığı çıkar
-    ref = min(bg_medians)
-    for ch in range(3):
-        excess = bg_medians[ch] - ref
-        if excess > 0.001:
-            result[:, :, ch] -= excess
+    # Çok düşükse müdahale etme
+    if bg_levels.max() < 0.003:
+        return result
 
-    result = np.clip(result, 0, 1)
+    # Her kanaldan kendi arka plan seviyesini çıkar
+    # Bu yöntem sinyal renklerini KORUR:
+    #   nebula(R=0.5) - bg(R=0.3) = 0.2  (sinyal)
+    #   nebula(G=0.2) - bg(G=0.1) = 0.1  (sinyal)
+    #   → R > G korunur
+    for ch in range(3):
+        result[:, :, ch] -= bg_levels[ch]
+
+    result = np.clip(result, 0, None)
+
+    # Normalize: [0, max] → [0, 1]
+    mx = result.max()
+    if mx > 1e-9:
+        result /= mx
+
     return result.astype(np.float32)
 
 
