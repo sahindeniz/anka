@@ -582,45 +582,41 @@ def stack_aligned(
 
 def _neutralize_background(img: np.ndarray) -> np.ndarray:
     """
-    Arka plan renk sapmasını düzelt.
-    En karanlık piksellerin medyanını bulup her kanaldan çıkarır.
-    Sonuç: nötr (siyah) arka plan.
+    Arka plan renk sapmasını düzelt — sadece renk dengesini nötralize et.
+    Parlaklığı korur, sadece kanal dengesizliğini giderir.
     """
     if img is None or img.size == 0:
         return img
+    if img.ndim != 3 or img.shape[2] < 3:
+        return img  # Mono görüntüde renk sapması yok
 
     result = img.astype(np.float32).copy()
 
-    if result.ndim == 3:
-        # Renkli görüntü — kanal bazında nötralize et
-        gray = np.mean(result, axis=2)
-        # En karanlık %15 pikselleri arka plan olarak kabul et
-        threshold = np.percentile(gray, 15)
+    # En karanlık %10 pikselleri arka plan olarak kabul et
+    gray = np.mean(result, axis=2)
+    threshold = np.percentile(gray, 10)
+    bg_mask = gray <= threshold
+
+    if bg_mask.sum() < 100:
+        threshold = np.percentile(gray, 20)
         bg_mask = gray <= threshold
 
-        if bg_mask.sum() < 100:
-            # Çok az piksel — daha geniş eşik
-            threshold = np.percentile(gray, 25)
-            bg_mask = gray <= threshold
+    if bg_mask.sum() < 10:
+        return result
 
-        if bg_mask.sum() > 10:
-            for ch in range(result.shape[2]):
-                bg_median = np.median(result[:, :, ch][bg_mask])
-                result[:, :, ch] -= bg_median
-    else:
-        # Mono görüntü
-        threshold = np.percentile(result, 15)
-        bg_mask = result <= threshold
-        if bg_mask.sum() > 10:
-            bg_median = np.median(result[bg_mask])
-            result -= bg_median
+    # Her kanalın arka plan medyanını bul
+    bg_medians = []
+    for ch in range(3):
+        bg_medians.append(np.median(result[:, :, ch][bg_mask]))
 
-    # Negatif değerleri sıfırla ve normalize et
-    result = np.clip(result, 0, None)
-    mx = result.max()
-    if mx > 1e-9:
-        result /= mx
+    # En düşük medyanı referans al — sadece fazlalığı çıkar
+    ref = min(bg_medians)
+    for ch in range(3):
+        excess = bg_medians[ch] - ref
+        if excess > 0.001:
+            result[:, :, ch] -= excess
 
+    result = np.clip(result, 0, 1)
     return result.astype(np.float32)
 
 

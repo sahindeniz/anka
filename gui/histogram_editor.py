@@ -1100,35 +1100,47 @@ class HistogramEditorPanel(QWidget):
         img = base.astype(np.float64)
 
         # ① Levels per channel
-        for i, ch in enumerate(("R","G","B") if img.ndim==3 else ("L",)):
-            st = self._hist_wgt.get_state(ch)
+        def _apply_levels_1ch(c, st):
             b, m, w, ol, oh = st
-            if img.ndim == 2:
-                c = img
-            else:
-                c = img[:,:,i]
             rng = max(w - b, 1e-9)
-            c   = np.clip((c - b) / rng, 0, 1)
-            # Midtone gamma
+            c = np.clip((c - b) / rng, 0, 1)
             if abs(m - 0.5) > 0.005:
                 eps = 1e-9
                 c = np.where(c<=0, 0, np.where(c>=1, 1,
                     (m-1)*c / ((2*m-1)*c - m + eps)))
                 c = np.clip(c, 0, 1)
-            # Output remap
             c = ol + c * (oh - ol)
-            if img.ndim == 2:
-                img = c
-            else:
-                img[:,:,i] = c
+            return c
+
+        if img.ndim == 2:
+            img = _apply_levels_1ch(img, self._hist_wgt.get_state("L"))
+        else:
+            # Önce L kanalı — tüm RGB'ye eşit uygula
+            st_L = self._hist_wgt.get_state("L")
+            if st_L != [0.0, 0.5, 1.0, 0.0, 1.0]:
+                for i in range(3):
+                    img[:,:,i] = _apply_levels_1ch(img[:,:,i], st_L)
+            # Sonra ayrı R, G, B kanalları
+            for i, ch in enumerate(("R","G","B")):
+                st = self._hist_wgt.get_state(ch)
+                if st != [0.0, 0.5, 1.0, 0.0, 1.0]:
+                    img[:,:,i] = _apply_levels_1ch(img[:,:,i], st)
 
         # ② Curves per channel (apply LUT)
         pts_L = self._curves_wgt._pts.get("L", [(0,0),(1,1)])
         is_flat_L = (len(pts_L)==2 and pts_L[0]==(0,0) and pts_L[1]==(1,1))
-        if img.ndim == 2 and not is_flat_L:
-            lut = self._curves_wgt.get_lut("L")
-            img = np.clip(np.interp(img, np.linspace(0,1,256), lut), 0, 1)
-        elif img.ndim == 3:
+        if img.ndim == 2:
+            if not is_flat_L:
+                lut = self._curves_wgt.get_lut("L")
+                img = np.clip(np.interp(img, np.linspace(0,1,256), lut), 0, 1)
+        else:
+            # Önce L curve — tüm RGB'ye uygula
+            if not is_flat_L:
+                lut_L = self._curves_wgt.get_lut("L")
+                xs = np.linspace(0,1,256)
+                for i in range(3):
+                    img[:,:,i] = np.interp(img[:,:,i], xs, lut_L)
+            # Sonra ayrı R, G, B curves
             for i, ch in enumerate(("R","G","B")):
                 pts = self._curves_wgt._pts.get(ch, [(0,0),(1,1)])
                 is_flat = (len(pts)==2 and pts[0]==(0,0) and pts[1]==(1,1))
