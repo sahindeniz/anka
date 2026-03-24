@@ -412,6 +412,9 @@ def align_frames_only(
     for i, p in enumerate(light_paths):
         cb(4, f"Kare {i+1}/{n}: {os.path.basename(p)}")
         img = load_image(p)
+        _sh = img.shape
+        _info = f"{'RGB' if img.ndim==3 else 'MONO'} {_sh}"
+        cb(4, f"Kare {i+1}/{n}: {os.path.basename(p)} — {_info}")
         img = _calibrate_frame(img, master_dark, master_flat, master_bias)
         frames.append(img)
 
@@ -567,8 +570,10 @@ def stack_aligned(
 
     # ── Otomatik arka plan nötralizasyonu ─────────────────────────────
     # Stacking sonrası ışık kirliliği / sensör glow kaynaklı renk sapmasını düzelt
-    result = _neutralize_background(result)
-    cb(9, "Arka plan nötralize edildi")
+    # Sadece RGB görüntülerde uygula
+    if result.ndim == 3 and result.shape[2] >= 3:
+        result = _neutralize_background(result)
+        cb(9, "Arka plan nötralize edildi")
 
     return {
         "result": result,
@@ -612,21 +617,15 @@ def _neutralize_background(img: np.ndarray) -> np.ndarray:
         return result
 
     # Her kanaldan kendi arka plan seviyesini çıkar
-    # Bu yöntem sinyal renklerini KORUR:
-    #   nebula(R=0.5) - bg(R=0.3) = 0.2  (sinyal)
-    #   nebula(G=0.2) - bg(G=0.1) = 0.1  (sinyal)
-    #   → R > G korunur
+    # Sinyal renklerini KORUR:
+    #   nebula(R=0.5) - bg(R=0.3) = 0.2
+    #   nebula(G=0.2) - bg(G=0.1) = 0.1
+    #   → R > G oranı korunur
     for ch in range(3):
         result[:, :, ch] -= bg_levels[ch]
 
-    result = np.clip(result, 0, None)
-
-    # Normalize: [0, max] → [0, 1]
-    mx = result.max()
-    if mx > 1e-9:
-        result /= mx
-
-    return result.astype(np.float32)
+    # Negatif değerleri sıfırla — normalize YAPMA (renk oranları bozulur)
+    return np.clip(result, 0, 1).astype(np.float32)
 
 
 def stack_lights(

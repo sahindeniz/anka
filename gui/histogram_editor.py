@@ -1016,11 +1016,14 @@ class HistogramEditorPanel(QWidget):
         self._schedule_preview()
 
     def _linked_channels(self, ch):
+        """Link açık: R/G/B birbirine bağlı (birini değiştir → hepsi değişir).
+        L her zaman bağımsız (apply'da tüm RGB'ye uygulanır).
+        Link kapalı: her kanal tamamen bağımsız."""
         if not self._chk_link.isChecked():
             return [ch]
-        if ch == "L":
-            return ["L","R","G","B"]
-        return ["R","G","B","L"]
+        if ch in ("R", "G", "B"):
+            return ["R", "G", "B"]
+        return ["L"]
 
     def _schedule_preview(self):
         if self._chk_live.isChecked():
