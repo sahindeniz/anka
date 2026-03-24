@@ -212,7 +212,9 @@ def _run_btn(color=GREEN):
 
 def make_icon_btn(emoji, label, color=BG4, hover=None):
     hc = hover or BORDER2
-    b  = QPushButton(f"{emoji}\n{label}")
+    # Single-line compact label
+    _lbl = label.replace("\n", " ")
+    b  = QPushButton(f"{emoji} {_lbl}")
     b.setStyleSheet(
         f"QPushButton{{"
         f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
@@ -221,9 +223,9 @@ def make_icon_btn(emoji, label, color=BG4, hover=None):
         f"  border:1px solid {BORDER};"
         f"  border-top:1px solid {BORDER2};"
         f"  border-radius:2px;"
-        f"  font-size:11px; font-weight:700;"
-        f"  min-width:68px; min-height:56px; max-width:68px; max-height:56px;"
-        f"  padding:3px;"
+        f"  font-size:9px; font-weight:700;"
+        f"  min-width:50px; min-height:28px; max-height:28px;"
+        f"  padding:2px 4px;"
         f"}}"
         f"QPushButton:hover{{"
         f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
@@ -238,7 +240,7 @@ def make_icon_btn(emoji, label, color=BG4, hover=None):
         f"QPushButton:disabled{{"
         f"  color:{SUBTEXT}; background:{BG2}; border:1px solid {BORDER};"
         f"}}")
-    b.setFixedSize(68, 56)
+    b.setFixedHeight(28)
     return b
 
 
@@ -1794,8 +1796,9 @@ class RecompositionDialog(QDialog):
 
     def _load_starless_file(self):
         from core.loader import load_image
+        _wd = self.parent()._working_dir if hasattr(self.parent(), '_working_dir') else ""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Starless Image", "",
+            self, "Select Starless Image", _wd,
             _FILE_FILTER)
         if not path: return
         try:
@@ -1810,8 +1813,9 @@ class RecompositionDialog(QDialog):
 
     def _load_stars_file(self):
         from core.loader import load_image
+        _wd = self.parent()._working_dir if hasattr(self.parent(), '_working_dir') else ""
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select Stars-Only Image", "",
+            self, "Select Stars-Only Image", _wd,
             _FILE_FILTER)
         if not path: return
         try:
@@ -2612,8 +2616,11 @@ class FrameTableWidget(QWidget):
         self.btn_clr.clicked.connect(self._clear)
 
     def _add_files(self):
+        _wd = ""
+        if self.parent() and hasattr(self.parent(), '_working_dir'):
+            _wd = self.parent()._working_dir
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Light karelerini seç", "",
+            self, "Light karelerini seç", _wd,
             _FILE_FILTER)
         for p in paths:
             if not any(f["path"] == p for f in self._frames):
@@ -3025,8 +3032,11 @@ class StackingDialog(QDialog):
         return g
 
     def _add_calib(self, key):
+        _wd = ""
+        if self.parent() and hasattr(self.parent(), '_working_dir'):
+            _wd = self.parent()._working_dir
         paths, _ = QFileDialog.getOpenFileNames(
-            self, f"{key} kareleri seç", "",
+            self, f"{key} kareleri seç", _wd,
             _FILE_FILTER)
         lst = self._lists[key]
         for p in paths:
@@ -3230,7 +3240,10 @@ class StackingDialog(QDialog):
             f"border-radius:3px;padding:3px 6px;font-size:10px;}}")
         b_browse = QPushButton("📂"); b_browse.setFixedSize(28,24); b_browse.setStyleSheet(_btn(h=24))
         b_browse.clicked.connect(lambda: self.edit_save_dir.setText(
-            QFileDialog.getExistingDirectory(self,"Master kayıt klasörü seç") or self.edit_save_dir.text()))
+            QFileDialog.getExistingDirectory(
+                self, "Master kayıt klasörü seç",
+                (self.parent()._working_dir if self.parent() and hasattr(self.parent(),'_working_dir') else "")
+            ) or self.edit_save_dir.text()))
         save_row.addWidget(self.edit_save_dir); save_row.addWidget(b_browse)
         lay.addLayout(save_row)
 
@@ -4384,7 +4397,7 @@ class ImageViewer(QWidget):
         if hasattr(self, '_welcome_visible') and self._welcome_visible:
             self._hide_welcome_bg()
         self._draw_slot(slot)
-        self._hist_editor.set_image(safe.copy())
+        self._hist_editor.set_image(safe)  # safe zaten copy, tekrar kopyalamaya gerek yok
         self._draw_stats(safe)
         h, w = safe.shape[:2]; ch = "RGB" if safe.ndim==3 else "Gray"
         self.lbl_info.setText(f"Slot {slot+1}  {w}x{h}  {ch}  min={safe.min():.3f}  max={safe.max():.3f}")
@@ -4576,11 +4589,24 @@ class ImageViewer(QWidget):
             self._btn_hist_toggle.setToolTip("Hide histogram panel")
 
     def _on_hist_preview(self, result):
-        """Live preview — update display only, do NOT touch hist_editor._orig_img."""
-        slot = self._active
-        # Store preview separately — draw without overwriting stored img for editor
-        self._preview_img = np.clip(result, 0, 1).astype(np.float32)
-        self._draw_slot_direct(slot, self._preview_img)
+        """Live preview — throttled to avoid excessive redraws."""
+        self._pending_preview = np.clip(result, 0, 1).astype(np.float32)
+        if not hasattr(self, '_hist_preview_timer'):
+            from PyQt6.QtCore import QTimer
+            self._hist_preview_timer = QTimer()
+            self._hist_preview_timer.setSingleShot(True)
+            self._hist_preview_timer.setInterval(50)  # 50ms throttle
+            self._hist_preview_timer.timeout.connect(self._flush_hist_preview)
+        if not self._hist_preview_timer.isActive():
+            self._hist_preview_timer.start()
+
+    def _flush_hist_preview(self):
+        """Throttled histogram preview flush."""
+        if hasattr(self, '_pending_preview') and self._pending_preview is not None:
+            slot = self._active
+            self._preview_img = self._pending_preview
+            self._draw_slot_direct(slot, self._preview_img)
+            self._pending_preview = None
 
     def _preview_slot(self, img: "np.ndarray", title: str = "⏳ işleniyor…"):
         """İşlem sırasında ara sonucu viewer'da göster (history'e gitmez)."""
@@ -5149,6 +5175,7 @@ class AstroApp(QMainWindow):
         self._pre_stf_image = None  # toggle: STF oncesi orijinal (None = STF aktif degil)
         self._last_solve_result = None  # plate solve sonucu (color calibration icin)
         self._channel_mode = "RGB"     # kanal görünümü: RGB/R/G/B/L
+        self._working_dir  = ""        # dosya acilinca tum dialog'lar bu klasoru kullanir
         self._apply_theme(); self._build_ui()
         self._load_settings()
 
@@ -5368,6 +5395,14 @@ class AstroApp(QMainWindow):
         """Histogram panelini göster/gizle."""
         if hasattr(self.viewer, "_toggle_hist_panel"):
             self.viewer._toggle_hist_panel()
+        # Bar butonunu senkronize et
+        if hasattr(self, "_btn_hist_bar"):
+            sizes = self.viewer._main_splitter.sizes()
+            self._btn_hist_bar.setChecked(sizes[1] > 10)
+
+    def _toggle_hist_from_bar(self):
+        """Tab bar'daki histogram butonundan toggle."""
+        self._toggle_hist_panel()
 
     def _toggle_history_panel(self):
         """Geçmiş panelini göster/gizle."""
@@ -5432,7 +5467,7 @@ class AstroApp(QMainWindow):
         """Yıldızsız görüntü aç — sekme olarak göster."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Yıldızsız Goruntu Ac",
-            self._settings.get("last_open_dir", ""),
+            self._working_dir or self._settings.get("last_open_dir", ""),
             _FILE_FILTER)
         if not path:
             return
@@ -5455,7 +5490,7 @@ class AstroApp(QMainWindow):
         """Yıldız maskesi / stars-only aç — sekme olarak göster."""
         path, _ = QFileDialog.getOpenFileName(
             self, "Yildiz Maskesi Ac",
-            self._settings.get("last_open_dir", ""),
+            self._working_dir or self._settings.get("last_open_dir", ""),
             _FILE_FILTER)
         if not path:
             return
@@ -5501,45 +5536,34 @@ class AstroApp(QMainWindow):
         if index < 0 or index >= len(self._img_tab_data):
             return
         data = self._img_tab_data[index]
-        key = data.get("key", "")
-        if key == "main":
-            # Ana goruntu — _current veya history'den al
-            img = self._current
-            if img is None and hasattr(self, "_history") and self._history:
-                _, img = self._history[-1]
-            if img is not None:
-                self.viewer.show_image(img.copy(), "Ana Goruntu", slot=0)
-        else:
-            img = data.get("image")
-            if img is not None:
-                self.viewer.show_image(img.copy(), data.get("title", key), slot=0)
+        img = data.get("image")
+        if img is not None:
+            self._orig = img.copy()
+            self._set_image(img.copy(), data.get("title", "Image"), reset=True)
+            self.lbl_file.setText(data.get("title", "Image"))
 
     def _on_img_tab_close(self, index: int):
-        """Sekme kapatma. main = resmi temizle (tab kalir), diger = tab'i sil."""
+        """Sekme kapatma — tab'i kaldir."""
         if index < 0 or index >= len(self._img_tab_data):
             return
-        if self._img_tab_data[index].get("key") == "main":
-            # Ana goruntu: tab kalir, resim temizlenir
+        self._img_tabs.blockSignals(True)
+        self._img_tab_data.pop(index)
+        self._img_tabs.removeTab(index)
+        self._img_tabs.blockSignals(False)
+        # Kalan sekme varsa ona geç, yoksa temizle
+        if self._img_tab_data:
+            new_idx = min(index, len(self._img_tab_data) - 1)
+            self._img_tabs.setCurrentIndex(new_idx)
+            self._on_img_tab_changed(new_idx)
+        else:
             self._current = None
             self._history = []
             self._redo_stack = []
             if hasattr(self, "hist_panel"):
                 self.hist_panel.lst.clear()
-            self._img_tab_data[index]["image"] = None
             self.viewer.clear_all()
-            self._img_tabs.setTabText(index, "Ana Goruntu")
-            self.status.showMessage("Resim kapatildi")
-            return
-        # Diger sekmeler: tab'i kaldir
-        self._img_tabs.currentChanged.disconnect(self._on_img_tab_changed)
-        self._img_tab_data.pop(index)
-        self._img_tabs.removeTab(index)
-        self._img_tabs.currentChanged.connect(self._on_img_tab_changed)
-        # Ana goruntu sekmesine don
-        main_idx = self._find_main_tab_index()
-        self._img_tabs.setCurrentIndex(main_idx)
-        if self._current is not None:
-            self.viewer.show_image(self._current, "Ana Goruntu", slot=0)
+            self.lbl_file.setText("No file")
+            self.status.showMessage("Ready  —  Open a file to start")
 
     def _on_img_tab_moved(self, from_idx: int, to_idx: int):
         """Kullanici tab'i surukleyerek yer degistirdi — veri listesini senkronize et."""
@@ -5582,20 +5606,20 @@ class AstroApp(QMainWindow):
             grp.setStyleSheet(f"QWidget#{grp_id} {{ {_GRP_CSS} }}"
                               if False else _GRP_CSS)
             gl = QVBoxLayout(grp)
-            gl.setContentsMargins(4,2,4,4); gl.setSpacing(1)
+            gl.setContentsMargins(2,1,2,2); gl.setSpacing(0)
             # Baslik
             lbl = QLabel(title)
             lbl.setStyleSheet(
                 f"background:transparent; border:none; color:{ACCENT};"
-                f"font-size:8px; font-weight:800; letter-spacing:2px;"
-                f"padding:0 2px;")
+                f"font-size:7px; font-weight:800; letter-spacing:1px;"
+                f"padding:0 1px;")
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
             gl.addWidget(lbl)
             # Buton satiri
             brow = QWidget()
             brow.setStyleSheet("background:transparent; border:none;")
             bl = QHBoxLayout(brow)
-            bl.setContentsMargins(0,0,0,0); bl.setSpacing(2)
+            bl.setContentsMargins(0,0,0,0); bl.setSpacing(1)
             for b in btns_list:
                 bl.addWidget(b)
             gl.addWidget(brow)
@@ -5604,34 +5628,34 @@ class AstroApp(QMainWindow):
         # ── Row 1: main toolbar (FlowLayout — wrap to next line) ─────────
         row1 = QWidget()
         row1.setStyleSheet("background:transparent; border:none;")
-        lay = _FlowLayout(row1, margin=4, h_spacing=4, v_spacing=4)
+        lay = _FlowLayout(row1, margin=2, h_spacing=2, v_spacing=2)
 
         # Logo + Name panel
         logo_panel = QWidget()
         logo_panel.setStyleSheet(f"background:transparent; border:none;")
         lp_lay = QHBoxLayout(logo_panel)
-        lp_lay.setContentsMargins(2,2,8,2); lp_lay.setSpacing(6)
+        lp_lay.setContentsMargins(2,1,6,1); lp_lay.setSpacing(4)
         logo_lbl = QLabel()
         logo_path = os.path.join(os.path.dirname(__file__), "logo_thumb.jpg")
         if os.path.exists(logo_path):
-            pix = QPixmap(logo_path).scaled(52, 52,
+            pix = QPixmap(logo_path).scaled(28, 28,
                 Qt.AspectRatioMode.KeepAspectRatio,
                 Qt.TransformationMode.SmoothTransformation)
             logo_lbl.setPixmap(pix)
-            logo_lbl.setFixedSize(54, 54)
+            logo_lbl.setFixedSize(30, 30)
             logo_lbl.setStyleSheet(
                 f"border:1px solid {BORDER2}; border-radius:2px;"
                 f"background:{BG};")
         else:
-            logo_lbl.setText("🔭"); logo_lbl.setStyleSheet("font-size:26px;")
+            logo_lbl.setText("🔭"); logo_lbl.setStyleSheet("font-size:16px;")
         lp_lay.addWidget(logo_lbl)
         name_w = QWidget(); name_w.setStyleSheet("background:transparent;border:none;")
-        nv = QVBoxLayout(name_w); nv.setContentsMargins(0,4,0,4); nv.setSpacing(0)
+        nv = QVBoxLayout(name_w); nv.setContentsMargins(0,1,0,1); nv.setSpacing(0)
         n1 = QLabel("ASTRO MAESTRO PRO")
-        n1.setStyleSheet(f"color:{ACCENT2};font-size:12px;font-weight:800;"
-                         f"letter-spacing:3px;background:transparent;border:none;")
+        n1.setStyleSheet(f"color:{ACCENT2};font-size:9px;font-weight:800;"
+                         f"letter-spacing:2px;background:transparent;border:none;")
         n2 = QLabel("by Deniz")
-        n2.setStyleSheet(f"color:{GOLD};font-size:9px;font-weight:600;"
+        n2.setStyleSheet(f"color:{GOLD};font-size:8px;font-weight:600;"
                          f"letter-spacing:1px;background:transparent;border:none;")
         nv.addWidget(n1); nv.addWidget(n2)
         lp_lay.addWidget(name_w)
@@ -5733,7 +5757,7 @@ class AstroApp(QMainWindow):
             f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
             f"  stop:0 {BG3}, stop:0.5 {BG2}, stop:1 {BG});"
             f"border:none; border-top:1px solid {BORDER2};")
-        r2lay = _FlowLayout(row2, margin=4, h_spacing=3, v_spacing=3)
+        r2lay = _FlowLayout(row2, margin=2, h_spacing=2, v_spacing=2)
 
         self._proc_btns = {}
         proc_shortcuts = [
@@ -5753,15 +5777,15 @@ class AstroApp(QMainWindow):
         ]
         for key, icon, label in proc_shortcuts:
             b = QPushButton(f"{icon} {label}")
-            b.setFixedHeight(26)
+            b.setFixedHeight(20)
             b.setStyleSheet(
                 f"QPushButton{{"
                 f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
                 f"    stop:0 {BG4}, stop:0.5 {BG3}, stop:1 {BG2});"
                 f"  color:{MUTED}; border:1px solid {BORDER};"
                 f"  border-top:1px solid {BORDER2};"
-                f"  border-radius:2px; padding:0 10px;"
-                f"  font-size:10px; font-weight:700;}}"
+                f"  border-radius:2px; padding:0 6px;"
+                f"  font-size:9px; font-weight:700;}}"
                 f"QPushButton:hover{{"
                 f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
                 f"    stop:0 {ACCENT}33, stop:1 {BG3});"
@@ -5779,7 +5803,7 @@ class AstroApp(QMainWindow):
 
         # Workflow rehber butonu
         self._btn_workflow = QPushButton("🌌 Workflow")
-        self._btn_workflow.setFixedHeight(26)
+        self._btn_workflow.setFixedHeight(20)
         self._btn_workflow.setCheckable(True)
         self._btn_workflow.setStyleSheet(
             f"QPushButton{{"
@@ -5798,7 +5822,7 @@ class AstroApp(QMainWindow):
 
         # Customize panels button
         btn_cust = QPushButton("🔧")
-        btn_cust.setFixedSize(26, 26)
+        btn_cust.setFixedSize(20, 20)
         btn_cust.setStyleSheet(
             f"QPushButton{{"
             f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
@@ -5856,7 +5880,7 @@ class AstroApp(QMainWindow):
         w=QWidget(); w.setStyleSheet(f"background:{BG};")
         lay=QVBoxLayout(w); lay.setContentsMargins(0,0,0,0)
 
-        hbar=QWidget(); hbar.setFixedHeight(34)
+        hbar=QWidget(); hbar.setFixedHeight(28)
         hbar.setStyleSheet(f"background:{BG2};border-bottom:1px solid {BORDER};")
         hl=QHBoxLayout(hbar); hl.setContentsMargins(0,0,8,0); hl.setSpacing(4)
 
@@ -5893,16 +5917,27 @@ class AstroApp(QMainWindow):
             f"  background: {BG4}; }}"
             f"QTabBar::close-button:hover {{ background: {RED}; }}")
         from PyQt6.QtCore import QSize as _QSize
-        self._img_tabs.setIconSize(_QSize(22, 22))
-        # Ana sekme — X tiklaninca resim temizlenir, tab kalir
-        self._img_tabs.addTab("Ana Goruntu")
-        self._img_tabs.setTabToolTip(0, "X = resmi kapat / temizle")
+        self._img_tabs.setIconSize(_QSize(18, 18))
         self._img_tabs.currentChanged.connect(self._on_img_tab_changed)
         self._img_tabs.tabCloseRequested.connect(self._on_img_tab_close)
         self._img_tabs.tabMoved.connect(self._on_img_tab_moved)
         hl.addWidget(self._img_tabs)
 
         hl.addStretch()
+
+        # Histogram toggle butonu (tab bar'da her zaman görünür)
+        self._btn_hist_bar = QPushButton("📊")
+        self._btn_hist_bar.setFixedSize(26, 22)
+        self._btn_hist_bar.setCheckable(True)
+        self._btn_hist_bar.setChecked(True)
+        self._btn_hist_bar.setToolTip("Histogram Paneli Aç/Kapa (Ctrl+H)")
+        self._btn_hist_bar.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
+            f"border-radius:2px;font-size:11px;}}"
+            f"QPushButton:hover{{color:{ACCENT2};border-color:{ACCENT};}}"
+            f"QPushButton:checked{{color:{ACCENT};border-color:{ACCENT};}}")
+        self._btn_hist_bar.clicked.connect(self._toggle_hist_from_bar)
+        hl.addWidget(self._btn_hist_bar)
 
         # Slot selector (sag taraf)
         slot_lbl = QLabel("Slot:")
@@ -5922,9 +5957,8 @@ class AstroApp(QMainWindow):
         self.lbl_step.hide()
 
         # Sekme verileri: liste — her eleman {"key":str, "image":ndarray, "title":str}
-        # index 0 = "main" (ana goruntu), geri kalani dinamik
         # Liste sırası her zaman tab bar sırasıyla eşleşir
-        self._img_tab_data = [{"key": "main", "image": None, "title": "Ana Goruntu"}]
+        self._img_tab_data = []
         self.viewer=ImageViewer(); self.viewer._parent_app = self; lay.addWidget(self.viewer,1)
         # Wire histogram Apply button → create new history step
         self.viewer._hist_apply_cb = lambda img: self._hist_apply(img)
@@ -5935,7 +5969,7 @@ class AstroApp(QMainWindow):
         self._filmstrip_data = []  # [(path, img_array, thumb_label), ...]
         fs_wrap = QWidget()
         fs_wrap.setStyleSheet(f"background:{BG2};border-top:1px solid {BORDER};")
-        fs_wrap.setFixedHeight(90)
+        fs_wrap.setFixedHeight(72)
         fs_lay = QVBoxLayout(fs_wrap)
         fs_lay.setContentsMargins(4,2,4,2); fs_lay.setSpacing(0)
 
@@ -5970,7 +6004,7 @@ class AstroApp(QMainWindow):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self._fs_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._fs_scroll.setFixedHeight(62)
+        self._fs_scroll.setFixedHeight(48)
         self._fs_scroll.setStyleSheet(
             f"QScrollArea{{background:{BG};border:none;}}"
             f"QScrollBar:horizontal{{height:6px;background:{BG2};}}"
@@ -5996,36 +6030,39 @@ class AstroApp(QMainWindow):
 
     # ── File ops ────────────────────────────────────────────────────────
     def _open_file(self):
-        # En son kullanılan dosyadan başla
-        last_file = self._settings.get("last_open_file", "")
-        start_dir = (os.path.dirname(last_file)
-                     if last_file and os.path.isfile(last_file)
-                     else self._settings.get("last_open_dir", ""))
+        start_dir = self._working_dir or self._settings.get("last_open_dir", "")
         paths,_=QFileDialog.getOpenFileNames(self,"Open Image(s)", start_dir,
             _FILE_FILTER)
         if not paths: return
-        # İlk dosyayı ana görüntü olarak yükle
-        self._load_path(paths[0])
-        # Ek dosyaları thumbnail şeridine ekle
-        if len(paths) > 1:
-            for p in paths[1:]:
-                self._add_to_filmstrip(p)
+        # Tüm dosyaları yükle — ilkini aktif yap
+        for p in paths:
+            self._load_path(p)
 
     def _load_path(self, path):
-        """Verilen dosyayı yükle ve ayarlara kaydet."""
+        """Verilen dosyayı yükle — tab olarak ekle ve aktif yap."""
         try:
             from core.loader import load_image
             img=load_image(path); self._orig=img.copy()
             self._set_image(img,"Original",reset=True)
-            self.lbl_file.setText(os.path.basename(path))
+            fname = os.path.basename(path)
+            self.lbl_file.setText(fname)
             h,w=img.shape[:2]; ch="RGB" if img.ndim==3 else "Gray"
-            self.status.showMessage(f"✅  {os.path.basename(path)}  |  {w}×{h}  |  {ch}")
-            # Son kullanılan dosyayı kaydet
+            self.status.showMessage(f"✅  {fname}  |  {w}×{h}  |  {ch}")
+            # Calisma klasorunu ayarla
+            self._working_dir = os.path.dirname(os.path.abspath(path))
             self._settings["last_open_file"] = path
-            self._settings["last_open_dir"]  = os.path.dirname(path)
+            self._settings["last_open_dir"]  = self._working_dir
             self._add_to_recent(path)
             from gui.settings import save as _save_cfg
             _save_cfg(self._settings)
+            # Tab olarak ekle
+            tab_data = {"key": fname, "image": img.copy(), "title": fname, "path": path}
+            self._img_tab_data.append(tab_data)
+            self._img_tabs.blockSignals(True)
+            self._img_tabs.addTab(fname)
+            new_idx = len(self._img_tab_data) - 1
+            self._img_tabs.setCurrentIndex(new_idx)
+            self._img_tabs.blockSignals(False)
             # Filmstrip'e ekle
             self._add_to_filmstrip(path, img)
         except Exception as e:
@@ -6042,9 +6079,9 @@ class AstroApp(QMainWindow):
             except Exception:
                 return
 
-        # Thumbnail oluştur (56px yüksekliğe sığdır)
+        # Thumbnail oluştur (40px yüksekliğe sığdır)
         h, w = img.shape[:2]
-        th = 52
+        th = 38
         tw = max(20, int(w * th / max(h, 1)))
         thumb = cv2.resize(np.clip(img, 0, 1).astype(np.float32),
                            (tw, th), interpolation=cv2.INTER_AREA)
@@ -6062,7 +6099,7 @@ class AstroApp(QMainWindow):
 
         # Thumbnail widget
         frame = QWidget()
-        frame.setFixedSize(tw + 6, 58)
+        frame.setFixedSize(tw + 6, 44)
         frame.setStyleSheet(
             f"QWidget{{background:{BG2};border:2px solid {BORDER};"
             f"border-radius:3px;}}"
@@ -6100,16 +6137,30 @@ class AstroApp(QMainWindow):
         self._filmstrip_highlight(entry)
 
     def _filmstrip_click(self, entry):
-        """Filmstrip'teki thumbnail'e tıkla → ana viewer'da göster."""
+        """Filmstrip'teki thumbnail'e tıkla → ilgili tab'a geç veya yükle."""
         img = entry["img"]
         path = entry["path"]
+        fname = os.path.basename(path)
+        # Mevcut tab var mı kontrol et
+        for i, td in enumerate(self._img_tab_data):
+            if td.get("path") == path:
+                self._img_tabs.setCurrentIndex(i)
+                self._filmstrip_highlight(entry)
+                return
+        # Tab yoksa yeni tab oluştur ve yükle
+        tab_data = {"key": fname, "image": img.copy(), "title": fname, "path": path}
+        self._img_tab_data.append(tab_data)
+        self._img_tabs.blockSignals(True)
+        self._img_tabs.addTab(fname)
+        new_idx = len(self._img_tab_data) - 1
+        self._img_tabs.setCurrentIndex(new_idx)
+        self._img_tabs.blockSignals(False)
         self._orig = img.copy()
-        self._set_image(img, "Original", reset=True)
-        self.lbl_file.setText(os.path.basename(path))
+        self._set_image(img.copy(), "Original", reset=True)
+        self.lbl_file.setText(fname)
         h, w = img.shape[:2]
         ch = "RGB" if img.ndim == 3 else "Gray"
-        self.status.showMessage(
-            f"✅  {os.path.basename(path)}  |  {w}×{h}  |  {ch}")
+        self.status.showMessage(f"✅  {fname}  |  {w}×{h}  |  {ch}")
         self._filmstrip_highlight(entry)
 
     def _filmstrip_highlight(self, active_entry):
@@ -6147,12 +6198,13 @@ class AstroApp(QMainWindow):
             self._filmstrip_widget.setFixedHeight(22)
             self._fs_toggle_btn.setText("▲")
         else:
-            self._filmstrip_widget.setFixedHeight(90)
+            self._filmstrip_widget.setFixedHeight(72)
             self._fs_toggle_btn.setText("▼")
 
     def _save_file(self):
         if self._current is None: QMessageBox.information(self,"Info","No image loaded."); return
-        path,_=QFileDialog.getSaveFileName(self,"Save","result.fits",
+        default_path = os.path.join(self._working_dir, "result.fits") if self._working_dir else "result.fits"
+        path,_=QFileDialog.getSaveFileName(self,"Save", default_path,
             "FITS (*.fits);;PNG (*.png);;TIFF (*.tiff *.tif);;JPEG (*.jpg *.jpeg);;"
             "BMP (*.bmp);;WebP (*.webp);;HDR (*.hdr);;EXR (*.exr);;All (*)")
         if not path: return
@@ -6608,24 +6660,17 @@ class AstroApp(QMainWindow):
 
     def _hist_apply(self, img):
         """Called when histogram Apply is pressed — bakes into history."""
-        active_tab = self._img_tabs.currentIndex() if hasattr(self, "_img_tabs") else 0
-        # Hangi tab aktif?
-        data = None
+        self._set_image(img, "Histogram Adjust")
+        # Aktif tab'in datasini da guncelle
+        active_tab = self._img_tabs.currentIndex() if hasattr(self, "_img_tabs") else -1
         if 0 <= active_tab < len(self._img_tab_data):
             data = self._img_tab_data[active_tab]
-        key = data.get("key", "main") if data else "main"
-        if key == "main":
-            # Ana goruntu — history'ye ekle
-            self._set_image(img, "Histogram Adjust")
-        else:
-            # Yan sekme — tab datasini guncelle
-            if data:
-                data["image"] = img.copy()
-                if key == "starless":
-                    self._starless_img = img.copy()
-                elif key == "starmask":
-                    self._stars_img = img.copy()
-            self.viewer.show_image(img, data["title"] if data else "Adjusted", slot=0)
+            data["image"] = img.copy()
+            key = data.get("key", "")
+            if key == "starless":
+                self._starless_img = img.copy()
+            elif key == "starmask":
+                self._stars_img = img.copy()
         self.status.showMessage("Histogram adjustment applied")
 
 
@@ -6767,14 +6812,14 @@ class AstroApp(QMainWindow):
         QMessageBox.information(self, "Load Starless",
             "First select the STARLESS file:")
         p1, _ = QFileDialog.getOpenFileName(
-            self, "Select Starless Image", "",
+            self, "Select Starless Image", self._working_dir,
             _FILE_FILTER)
         if not p1: return None, None
 
         QMessageBox.information(self, "Load Stars Only",
             "Now select the STARS ONLY file:")
         p2, _ = QFileDialog.getOpenFileName(
-            self, "Select Stars-Only Image", "",
+            self, "Select Stars-Only Image", self._working_dir,
             _FILE_FILTER)
         if not p2: return None, None
 
@@ -6797,6 +6842,10 @@ class AstroApp(QMainWindow):
     def _load_settings(self):
         from gui.settings import load as _load_cfg
         self._settings = _load_cfg()
+        # Onceki calisma klasorunu geri yukle
+        saved_dir = self._settings.get("last_open_dir", "")
+        if saved_dir and os.path.isdir(saved_dir):
+            self._working_dir = saved_dir
         fs = int(self._settings.get("font_size", 10))
         if fs != 10:
             font = self.font(); font.setPointSize(fs)
@@ -6934,8 +6983,8 @@ class AstroApp(QMainWindow):
                 exe = self._settings.get("starnet_exe", "").strip()
 
         # Ask for output folder
-        default_dir = (self._settings.get("last_save_dir","") or
-                       self._settings.get("last_open_dir","") or
+        default_dir = (self._working_dir or
+                       self._settings.get("last_save_dir","") or
                        os.path.expanduser("~"))
         out_dir = QFileDialog.getExistingDirectory(
             self, "Select Output Folder for StarNet++ Results", default_dir)
@@ -7056,8 +7105,8 @@ class AstroApp(QMainWindow):
             return
 
         # Ask for output folder
-        default_dir = (self._settings.get("last_save_dir","") or
-                       self._settings.get("last_open_dir","") or
+        default_dir = (self._working_dir or
+                       self._settings.get("last_save_dir","") or
                        os.path.expanduser("~"))
         out_dir = QFileDialog.getExistingDirectory(
             self, "Mastro Starless — Çıktı Klasörü Seç", default_dir)
@@ -7219,7 +7268,7 @@ class AstroApp(QMainWindow):
             popped = self._history.pop()
             self._redo_stack.append(popped)
             lbl, img = self._history[-1]
-            self._current = img.copy()
+            self._current = img  # History snapshot'i paylas, show_image kendi copy'sini yapar
             idx = len(self._history) - 1
             self.viewer.show_image(img, lbl)
             self.lbl_step.setText(f"Step: {lbl}")
@@ -7231,7 +7280,7 @@ class AstroApp(QMainWindow):
         if self._redo_stack:
             lbl, img = self._redo_stack.pop()
             self._history.append((lbl, img))
-            self._current = img.copy()
+            self._current = img
             idx = len(self._history) - 1
             self.viewer.show_image(img, lbl)
             self.lbl_step.setText(f"Step: {lbl}")
@@ -7285,17 +7334,21 @@ class AstroApp(QMainWindow):
             self.status.showMessage(f"⏮  #{index} → {lbl}")
 
     def _set_image(self, img, label, reset=False):
-        self._current=img.copy() if img is not None else None
+        if img is None:
+            self._current = None
+            return
+        snapshot = img.copy()  # Tek copy — hem current hem history icin
+        self._current = snapshot
         # Yeni işlem → redo stack temizle
         self._redo_stack.clear()
         if reset:
-            self._history=[(label,img.copy())]
+            self._history=[(label, snapshot)]
             self.hist_panel.lst.clear(); self.hist_panel.push(label, 0)
             self.lbl_step.setText(f"Step: {label}")
         else:
-            self._history.append((label,img.copy()))
+            self._history.append((label, snapshot))
             # Bellek sınırı: en eski durumları sil
-            _MAX_HIST = 30
+            _MAX_HIST = 15
             while len(self._history) > _MAX_HIST:
                 self._history.pop(0)
             idx=len(self._history)-1
@@ -7721,8 +7774,8 @@ class AstroApp(QMainWindow):
                         self._run_worker(key, fn, params); return
 
                 # Klasör seç
-                default_dir = (self._settings.get("last_save_dir","") or
-                               self._settings.get("last_open_dir","") or
+                default_dir = (self._working_dir or
+                               self._settings.get("last_save_dir","") or
                                os.path.expanduser("~"))
                 out_dir = QFileDialog.getExistingDirectory(
                     self, "GraXpert Denoise Ciktisi Icin Klasor Sec", default_dir)

@@ -12,9 +12,9 @@ Güncelleme akışı:
 
 # ─── Versiyon ─────────────────────────────────────────────────────────────────
 APP_NAME       = "Astro Maestro Pro"
-APP_VERSION    = "1.2.0"          # Mevcut sürüm
+APP_VERSION    = "2.1.0"          # Mevcut sürüm
 APP_AUTHOR     = "Deniz"
-APP_BUILD_DATE = "2026-03-22"
+APP_BUILD_DATE = "2026-03-24"
 
 # GitHub güncelleme kaynağı
 GITHUB_REPO    = "sahindeniz/anka"
