@@ -196,7 +196,7 @@ class MainWindow(QMainWindow):
         self._panel_actions = {}
         panels_def = [
             ("BG Çıkar",  "🌌", "bg",     self._toggle_panel_bg),
-            ("BG Siyah",  "⬛", "bg_neutralize", self._toggle_panel_bg_neutralize),
+            ("BG Siyah",  "🌑", "bg_neutralize", self._toggle_panel_bg_neutralize),
             ("Stretch",   "📊", "stretch", self._toggle_panel_stretch),
             ("Noise",     "🔊", "noise",   self._toggle_panel_noise),
             ("Sharpen",   "🔬", "sharpen", self._toggle_panel_sharpen),
