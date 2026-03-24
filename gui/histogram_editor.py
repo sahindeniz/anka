@@ -197,12 +197,12 @@ class HistogramWidget(QWidget):
             x = self._val_to_x(frac, r)
             p.drawLine(x, r.top(), x, r.bottom())
 
-        # Histogram bars
+        # Histogram bars — L modunda tüm kanalları kendi renginde göster
         ch   = self._ch
-        show = {"L": [("L", ACCENT, 0.6)],
-                "R": [("L", ACCENT, 0.15), ("R", RED,   0.85)],
-                "G": [("L", ACCENT, 0.15), ("G", GREEN, 0.85)],
-                "B": [("L", ACCENT, 0.15), ("B", "#6699ff", 0.85)],
+        show = {"L": [("R", RED, 0.35), ("G", GREEN, 0.35), ("B", "#6699ff", 0.35), ("L", "#cccccc", 0.5)],
+                "R": [("L", ACCENT, 0.12), ("R", RED,   0.85)],
+                "G": [("L", ACCENT, 0.12), ("G", GREEN, 0.85)],
+                "B": [("L", ACCENT, 0.12), ("B", "#6699ff", 0.85)],
                 }.get(ch, [("L", ACCENT, 0.6)])
 
         for data_ch, color, alpha in show:
@@ -469,28 +469,29 @@ class CurvesWidget(QWidget):
         p.drawLine(pad, H-pad, W-pad, pad)
 
         # ── Histogram background (smooth filled) ──
-        hdata = self._hdata.get(ch if ch != "L" else "L")
-        if hdata is not None:
+        # L modunda: R/G/B kanallarını kendi renginde göster
+        if ch == "L":
+            _ch_layers = [("R", RED, 0.18), ("G", GREEN, 0.18), ("B", "#6699ff", 0.18)]
+        else:
+            _ch_layers = [(ch, glow[0], 0.25)]
+        for _lch, _lcol, _lalpha in _ch_layers:
+            hdata = self._hdata.get(_lch)
+            if hdata is None: continue
             mx = hdata.max()
-            if mx > 0:
-                hist_path = QPainterPath()
-                hist_path.moveTo(pad, H - pad)
-                n = len(hdata)
-                for i in range(n):
-                    bh = (hdata[i] / mx) * (H - 2*pad)
-                    hx = pad + (i / n) * (W - 2*pad)
-                    hist_path.lineTo(hx, H - pad - bh)
-                hist_path.lineTo(W - pad, H - pad)
-                hist_path.closeSubpath()
-
-                hist_grad = QLinearGradient(0, pad, 0, H - pad)
-                col_top = QColor(glow[0]); col_top.setAlphaF(0.25)
-                col_bot = QColor(glow[2]); col_bot.setAlphaF(0.05)
-                hist_grad.setColorAt(0, col_top)
-                hist_grad.setColorAt(1, col_bot)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(QBrush(hist_grad))
-                p.drawPath(hist_path)
+            if mx <= 0: continue
+            hist_path = QPainterPath()
+            hist_path.moveTo(pad, H - pad)
+            n = len(hdata)
+            for i in range(n):
+                bh = (hdata[i] / mx) * (H - 2*pad)
+                hx = pad + (i / n) * (W - 2*pad)
+                hist_path.lineTo(hx, H - pad - bh)
+            hist_path.lineTo(W - pad, H - pad)
+            hist_path.closeSubpath()
+            _hcol = QColor(_lcol); _hcol.setAlphaF(_lalpha)
+            p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(QBrush(_hcol))
+            p.drawPath(hist_path)
 
         # ── Curve fill (area under curve with gradient) ──
         pts  = sorted(self._pts[ch], key=lambda q:q[0])
