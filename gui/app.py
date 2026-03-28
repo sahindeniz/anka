@@ -4326,13 +4326,35 @@ class ImageViewer(QWidget):
         for sp in ax.spines.values(): sp.set_edgecolor(BORDER)
 
     def _show_welcome_bg(self):
-        """Program acildiginda arka plan composite goster."""
+        """Program acildiginda arka plan composite goster.
+        Settings'te bg_theme_path varsa o resmi kullan."""
         try:
-            from gui.bg_composer import generate_composite_background, generate_welcome_overlay
+            import os, cv2
+            from gui.bg_composer import generate_composite_background, generate_welcome_overlay, _resize_fill
 
-            # Senkron yukle — cache varsa <10ms, yoksa ~350ms (kabul edilir)
-            bg = generate_composite_background(1920, 1080)
-            bg = generate_welcome_overlay(bg)
+            # Kaydedilmiş tema var mı?
+            settings = getattr(getattr(self, '_parent_app', None), '_settings', None) or {}
+            theme_path = settings.get("bg_theme_path", "")
+
+            if theme_path and os.path.isfile(theme_path):
+                img = cv2.imread(theme_path, cv2.IMREAD_COLOR)
+                if img is not None:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                    img = _resize_fill(img, 1920, 1080) * 0.55
+                    h, w = 1080, 1920
+                    vy, vx = np.ogrid[0:h, 0:w]
+                    vdist = np.sqrt(((vx - w/2)/(w*0.60))**2 + ((vy - h/2)/(h*0.58))**2)
+                    vignette = np.clip(1.0 - 0.30 * vdist**1.5, 0, 1).astype(np.float32)
+                    img *= vignette[:, :, np.newaxis]
+                    img = np.clip(img, 0, 1).astype(np.float32)
+                    bg = generate_welcome_overlay(img)
+                else:
+                    bg = generate_composite_background(1920, 1080)
+                    bg = generate_welcome_overlay(bg)
+            else:
+                bg = generate_composite_background(1920, 1080)
+                bg = generate_welcome_overlay(bg)
+
             self._welcome_bg = bg
             self._welcome_visible = True
             self._apply_welcome_bg()
@@ -5316,6 +5338,9 @@ class AstroApp(QMainWindow):
                   lambda: self._switch_theme("dark"))
         self._act(vm, "☀️  Açık Tema",        None,
                   lambda: self._switch_theme("light"))
+        vm.addSeparator()
+        bg_menu = vm.addMenu("🖼  Arka Plan Teması")
+        self._build_bg_theme_menu(bg_menu)
 
         # ── İşlem ──────────────────────────────────────────────────────────
         pm = mb.addMenu("⚙  İşlem")
@@ -5430,6 +5455,77 @@ class AstroApp(QMainWindow):
         if hasattr(self, "hist_panel"):
             vis = self.hist_panel.isVisible()
             self.hist_panel.setVisible(not vis)
+
+    def _build_bg_theme_menu(self, menu):
+        """backgrounds/ klasöründeki resimleri alt menü olarak listele."""
+        import os, glob as _glob
+        bg_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backgrounds")
+
+        exts = ("*.jpg","*.jpeg","*.png","*.tif","*.tiff","*.bmp")
+        paths = []
+        for ext in exts:
+            paths.extend(_glob.glob(os.path.join(bg_dir, ext)))
+        paths = sorted(set(paths))
+
+        # Varsayılan (composite)
+        act = menu.addAction("🌌  Varsayılan (Composite)")
+        act.triggered.connect(lambda: self._set_bg_theme(None))
+        menu.addSeparator()
+
+        # Her resim bir menü öğesi
+        for p in paths:
+            name = os.path.splitext(os.path.basename(p))[0].replace("_", " ").title()
+            act = menu.addAction(f"🖼  {name}")
+            act.triggered.connect(lambda _, path=p: self._set_bg_theme(path))
+
+        if not paths:
+            act = menu.addAction("(backgrounds/ klasörü boş)")
+            act.setEnabled(False)
+
+    def _set_bg_theme(self, path):
+        """Seçilen resmi arka plan teması olarak ayarla."""
+        import cv2, numpy as np
+        if path is None:
+            # Varsayılan composite'e dön
+            self._settings.pop("bg_theme_path", None)
+            from gui.settings import save as _save
+            _save(self._settings)
+            self.viewer._show_welcome_bg()
+            self.status.showMessage("🌌  Varsayılan arka plan teması")
+            return
+
+        try:
+            img = cv2.imread(path, cv2.IMREAD_COLOR)
+            if img is None:
+                self.status.showMessage(f"⚠  Resim okunamadı: {path}")
+                return
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+            # Viewer boyutuna resize
+            h, w = 1080, 1920
+            from gui.bg_composer import _resize_fill, generate_welcome_overlay
+            img = _resize_fill(img, w, h)
+            # Hafif karart
+            img = img * 0.55
+            # Vignette
+            vy, vx = np.ogrid[0:h, 0:w]
+            vdist = np.sqrt(((vx - w/2) / (w*0.60))**2 + ((vy - h/2) / (h*0.58))**2)
+            vignette = np.clip(1.0 - 0.30 * vdist**1.5, 0, 1).astype(np.float32)
+            img *= vignette[:, :, np.newaxis]
+            img = np.clip(img, 0, 1).astype(np.float32)
+            # Welcome overlay ekle
+            img = generate_welcome_overlay(img)
+            # Viewer'a uygula
+            self.viewer._welcome_bg = img
+            self.viewer._welcome_visible = True
+            self.viewer._apply_welcome_bg()
+            # Ayarı kaydet
+            self._settings["bg_theme_path"] = path
+            from gui.settings import save as _save
+            _save(self._settings)
+            name = os.path.splitext(os.path.basename(path))[0].replace("_", " ").title()
+            self.status.showMessage(f"🖼  Arka plan teması: {name}")
+        except Exception as e:
+            self.status.showMessage(f"⚠  Tema hatası: {e}")
 
     def _switch_theme(self, theme: str):
         self._settings["theme"] = theme
