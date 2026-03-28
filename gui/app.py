@@ -322,16 +322,34 @@ class StackWorker(QThread):
       phase=1 → data = aligned frame listesi (np.ndarray list)
       phase=2 → data = stacking result dict
     """
-    finished   = pyqtSignal(object)   # dict — final stacking result
-    progress   = pyqtSignal(str)
-    phase_done = pyqtSignal(int, object)   # 1=align done, 2=stack done
-    error      = pyqtSignal(str)
+    finished        = pyqtSignal(object)   # dict — final stacking result
+    progress        = pyqtSignal(str)
+    phase_done      = pyqtSignal(int, object)   # 1=align done, 2=stack done
+    error           = pyqtSignal(str)
+    quality_warning = pyqtSignal(object)   # frame score dict → GUI popup
 
     def __init__(self, params, mode="full"):
         super().__init__()
         self.params = params
         self.mode   = mode    # "align" | "stack" | "full"
+        self._quality_skip = False
+        self._quality_event = None
         self.setObjectName("StackWorker")
+
+    def _quality_cb(self, score_info):
+        """Worker thread'den çağrılır — GUI'ye sinyal gönder, cevap bekle."""
+        import threading
+        self._quality_event = threading.Event()
+        self._quality_skip = False
+        self.quality_warning.emit(score_info)
+        self._quality_event.wait(timeout=30)  # 30s timeout
+        return self._quality_skip
+
+    def set_quality_response(self, skip: bool):
+        """GUI thread'den çağrılır — worker'ı serbest bırak."""
+        self._quality_skip = skip
+        if self._quality_event:
+            self._quality_event.set()
 
     def run(self):
         try:
@@ -343,10 +361,12 @@ class StackWorker(QThread):
 
             if self.mode == "align":
                 # Sadece hizalama — aligned kareleri döndür
-                aligned = align_frames_only(**self.params, progress_cb=cb)
+                aligned, frame_infos = align_frames_only(
+                    **self.params, progress_cb=cb,
+                    quality_warning_cb=self._quality_cb)
                 if not self.isInterruptionRequested():
                     self.phase_done.emit(1, aligned)
-                    self.finished.emit({"aligned": aligned, "phase": "align"})
+                    self.finished.emit({"aligned": aligned, "frame_infos": frame_infos, "phase": "align"})
 
             elif self.mode == "stack":
                 # Sadece stacking — önceden hizalanmış kareler geldi
@@ -356,7 +376,9 @@ class StackWorker(QThread):
 
             else:
                 # Tam pipeline — hizalama + stacking
-                result = stack_lights(**self.params, progress_cb=cb)
+                result = stack_lights(
+                    **self.params, progress_cb=cb,
+                    quality_warning_cb=self._quality_cb)
                 if not self.isInterruptionRequested():
                     self.finished.emit(result)
 
@@ -3121,9 +3143,8 @@ class StackingDialog(QDialog):
                 r.addWidget(ht)
             r.addStretch(); lay.addLayout(r)
         self.combo_method = QComboBox()
-        self.combo_method.addItems(["kappa_sigma","median_kappa_sigma","adaptive_weighted",
-                                    "winsorized","median","mean",
-                                    "linear_fit","entropy_weighted","maximum","minimum","sum"])
+        self.combo_method.addItems(["auto","sigma_clip","linear_fit","percentile",
+                                    "winsorized_sigma","median","mean"])
         self.combo_method.setStyleSheet(COMBO_CSS); self.combo_method.setFixedWidth(160)
         _row("Stacking Metodu:", self.combo_method)
         self.spin_kappa = QDoubleSpinBox()
@@ -3149,9 +3170,13 @@ class StackingDialog(QDialog):
         self.chk_normalize.setChecked(True); self.chk_normalize.setStyleSheet(CHECK_CSS)
         lay.addWidget(self.chk_normalize)
         self.combo_weight = QComboBox()
-        self.combo_weight.addItems(["none","snr","fwhm","stars"])
+        self.combo_weight.addItems(["snr","noise","fwhm","equal"])
         self.combo_weight.setStyleSheet(COMBO_CSS); self.combo_weight.setFixedWidth(120)
         _row("Kare Ağırlıklandırma:", self.combo_weight)
+        self.combo_normalization = QComboBox()
+        self.combo_normalization.addItems(["additive_scaling","multiplicative","none"])
+        self.combo_normalization.setStyleSheet(COMBO_CSS); self.combo_normalization.setFixedWidth(160)
+        _row("Normalizasyon:", self.combo_normalization)
         lay.addStretch(); return w
 
     # ── Tab: Hizalama ─────────────────────────────────────────────────────────
@@ -3237,6 +3262,7 @@ class StackingDialog(QDialog):
 
         # Hizalanmış kareleri sakla
         self._aligned_frames = None   # list of np.ndarray
+        self._frame_infos = []        # list of dict — kare kalite bilgileri
 
         lay.addStretch(); return w
 
@@ -3382,6 +3408,7 @@ class StackingDialog(QDialog):
             f"color:{GOLD};font-size:10px;background:{BG3};"
             f"border:1px solid {GOLD};border-radius:4px;padding:6px 10px;")
         self._aligned_frames = None
+        self._frame_infos = []
         self.log.clear()
         self._log(f"🎯 Hizalama başlıyor — {len(lights)} kare, "
                   f"metot: {self.combo_align.currentText()}")
@@ -3410,12 +3437,14 @@ class StackingDialog(QDialog):
         self._worker.progress.connect(self._log)
         self._worker.finished.connect(self._on_align_done)
         self._worker.error.connect(self._on_error)
+        self._worker.quality_warning.connect(self._on_quality_warning)
         self._worker.start()
 
     def _on_align_done(self, result):
         """Faz 1 tamamlandı — hizalanmış kareler hazır."""
         aligned = result.get("aligned", [])
         self._aligned_frames = aligned
+        self._frame_infos = result.get("frame_infos", [])
         n = len(aligned)
 
         self.btn_align.setEnabled(True)
@@ -3433,10 +3462,16 @@ class StackingDialog(QDialog):
             f"color:{GREEN};font-size:10px;background:{BG3};"
             f"border:1px solid {GREEN};border-radius:4px;padding:6px 10px;")
 
-        # Hizalanan kareleri listele
+        # Hizalanan kareleri listele (kare bilgileri ile)
         self._aligned_list.clear()
         for i, fr_arr in enumerate(aligned):
-            lbl = f"#{i+1}  {fr_arr.shape[1]}×{fr_arr.shape[0]}  ✓ hizalandı"
+            info = self._frame_infos[i] if i < len(self._frame_infos) else {}
+            rot = info.get("rotation_deg", 0)
+            sc = info.get("score", 0)
+            status = info.get("status", "ok")
+            rot_str = f"  rot={rot:.1f}°" if abs(rot) > 0.1 else ""
+            status_icon = "⚠" if status == "low_quality" else "✓"
+            lbl = f"#{i+1}  {fr_arr.shape[1]}×{fr_arr.shape[0]}  skor={sc:.3f}{rot_str}  {status_icon}"
             self._aligned_list.addItem(lbl)
         self._aligned_list_lbl.setVisible(True)
         self._aligned_list.setVisible(True)
@@ -3473,9 +3508,11 @@ class StackingDialog(QDialog):
                 "kappa_high":        float(self.spin_kappa_high.value()),
                 "iterations":        int(self.spin_iter.value()),
                 "weight_mode":       self.combo_weight.currentText(),
+                "normalization":     self.combo_normalization.currentText(),
                 "quality_reject":    self.chk_quality_reject.isChecked(),
                 "quality_threshold": float(self.spin_quality_thr.value()),
                 "drizzle_scale":     drizzle_scale,
+                "frame_scores":      getattr(self, '_frame_infos', None),
             }
             self._worker = StackWorker(params, mode="stack")
         else:
@@ -3508,6 +3545,7 @@ class StackingDialog(QDialog):
                 "quality_reject":    self.chk_quality_reject.isChecked(),
                 "quality_threshold": float(self.spin_quality_thr.value()),
                 "normalize":         self.chk_normalize.isChecked(),
+                "normalization":     self.combo_normalization.currentText(),
                 "weight_mode":       self.combo_weight.currentText(),
                 "dark_optimize":     self.chk_dark_optimize.isChecked(),
                 "drizzle_scale":     drizzle_scale2,
@@ -3520,6 +3558,7 @@ class StackingDialog(QDialog):
         self._worker.progress.connect(self._on_progress)
         self._worker.finished.connect(self._on_done)
         self._worker.error.connect(self._on_error)
+        self._worker.quality_warning.connect(self._on_quality_warning)
         self._worker.start()
 
     def _on_progress(self, msg):
@@ -3750,6 +3789,27 @@ class StackingDialog(QDialog):
         if saved_files:
             names = ", ".join(os.path.basename(f) for f in saved_files)
             self._lbl_progress.setText(f"💾 {names}")
+
+    def _on_quality_warning(self, score_info):
+        """Düşük kaliteli kare tespit edildi — kullanıcıya popup göster."""
+        name = score_info.get("name", "?")
+        sc = score_info.get("score", 0)
+        snr = score_info.get("snr", 0)
+        stars = score_info.get("star_count", 0)
+        idx = score_info.get("index", 0) + 1
+
+        msg = (f"Kare #{idx} ({name}) düşük kaliteli:\n\n"
+               f"  Skor: {sc:.3f}\n"
+               f"  SNR: {snr:.2f}\n"
+               f"  Yıldız sayısı: {stars}\n\n"
+               f"Bu kareyi atlamak ister misiniz?")
+        reply = QMessageBox.question(
+            self, "⚠ Düşük Kaliteli Kare",
+            msg, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No)
+        skip = reply == QMessageBox.StandardButton.Yes
+        if self._worker:
+            self._worker.set_quality_response(skip)
 
     def _on_error(self, msg):
         self._log(f"❌ HATA:\n{msg}")

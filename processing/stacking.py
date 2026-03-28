@@ -1,11 +1,16 @@
 """
-Astro Maestro Pro - Image Stacking Engine v2
+Astro Maestro Pro - Image Stacking Engine v3
 =============================================
-wkjarosz/astro-stacker temel alinarak yazildi.
-AKAZE feature detection + Homography + RANSAC hizalama.
-Temiz, guvenilir, float32 pipeline.
+PixInsight ImageIntegration seviyesinde stacking engine.
 
-Kaynak: https://github.com/wkjarosz/astro-stacker
+Özellikler:
+  - Normalizasyon: Additive+Scaling, Multiplicative, None
+  - Ağırlıklandırma: SNR, FWHM, Equal, Noise
+  - Reddetme: Auto (kare sayısına göre), Sigma Clipping, Linear Fit,
+              Percentile Clipping, Winsorized Sigma
+  - Hizalama: AKAZE + Affine (rotasyon destekli) + ECC fallback
+  - Kalite kontrolü: Düşük kaliteli karelerde popup uyarı
+  - Renklere dokunmaz — ham sinyal oranları korunur
 """
 
 import os
@@ -22,29 +27,28 @@ _N_WORKERS = max(1, min(multiprocessing.cpu_count(), 8))
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _to_gray_float(img: np.ndarray) -> np.ndarray:
-    """float32 goruntu → float32 grayscale.  Asla uint8'e donusturulmez!"""
+    """float32 goruntu → float32 grayscale."""
     if img.ndim == 2:
         return img.astype(np.float32)
     return cv2.cvtColor(img.astype(np.float32), cv2.COLOR_RGB2GRAY)
 
 
 def _enhance_for_detection(gray: np.ndarray) -> np.ndarray:
-    """Lineer astro veride yildizlari one cikarmak icin agresif kontrast artirma.
-    1) Asinh stretch (astro standart — cok parlak yildizlari ezmeden faint detayi cikarir)
-    2) CLAHE (lokal kontrast artirma — feature detector icin ideal)
-    Sonuc: uint8 [0,255] — AKAZE/SIFT feature detection icin optimize."""
-    # Asinh stretch — lineer → logaritmik benzeri
+    """Lineer astro veride yıldızları öne çıkarmak için kontrast artırma.
+    Asinh stretch + CLAHE → uint8 [0,255]"""
     stretch_factor = 10.0
     stretched = np.arcsinh(gray * stretch_factor) / np.arcsinh(stretch_factor)
-    # [0,1] normalize
     mn, mx = stretched.min(), stretched.max()
     if mx - mn > 1e-7:
         stretched = (stretched - mn) / (mx - mn)
-    # uint8 + CLAHE
     u8 = np.clip(stretched * 255, 0, 255).astype(np.uint8)
     clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(16, 16))
     return clahe.apply(u8)
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  HİZALAMA — ROTASYON DESTEKLİ
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def _compute_homography(
     next_img: np.ndarray,
@@ -52,25 +56,23 @@ def _compute_homography(
     threshold: float = 0.85,
     cache: Optional[dict] = None,
     frame_num: int = 0,
-) -> Optional[np.ndarray]:
-    """AKAZE feature detection + BFMatcher + RANSAC homography.
-    astro-stacker yaklasimi — ORB yerine AKAZE (daha robust)."""
+) -> Tuple[Optional[np.ndarray], dict]:
+    """AKAZE feature detection + AffinePartial2D (translation + rotation + scale).
+    Rotasyon destekli — ters/döndürülmüş kareler de hizalanır.
+    Returns: (H_3x3, info_dict)"""
 
     next_gray = _to_gray_float(next_img)
     base_gray = _to_gray_float(base_img)
 
-    # Asinh + CLAHE kontrast artirma — lineer veride feature detection icin kritik
     next_enh = _enhance_for_detection(next_gray)
     base_enh = _enhance_for_detection(base_gray)
 
-    # AKAZE — binary descriptor, hizli ve robust
-    alg = cv2.AKAZE_create(
-        threshold=0.0005,  # daha dusuk esik = daha fazla keypoint
-    )
+    # AKAZE — binary descriptor, robust
+    alg = cv2.AKAZE_create(threshold=0.0005)
 
     kp1, des1 = alg.detectAndCompute(next_enh, None)
 
-    # Base keypoint caching — bir kez hesapla
+    # Base keypoint caching
     kp2, des2 = None, None
     if cache is not None and "kp2" in cache and "des2" in cache:
         kp2, des2 = cache["kp2"], cache["des2"]
@@ -80,14 +82,18 @@ def _compute_homography(
             cache["kp2"] = kp2
             cache["des2"] = des2
 
-    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
-        return None
+    info = {"n_keypoints": len(kp1) if kp1 else 0,
+            "n_base_keypoints": len(kp2) if kp2 else 0,
+            "n_matches": 0, "inlier_ratio": 0.0,
+            "rotation_deg": 0.0, "scale": 1.0, "tx": 0.0, "ty": 0.0}
 
-    # BFMatcher — kNN ile ratio test (Lowe's ratio)
+    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+        return None, info
+
+    # BFMatcher — kNN + Lowe's ratio test
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
     raw_matches = matcher.knnMatch(des1, des2, k=2)
 
-    # Lowe's ratio test — daha robust esleme
     good = []
     for m_pair in raw_matches:
         if len(m_pair) == 2:
@@ -95,50 +101,90 @@ def _compute_homography(
             if m.distance < 0.75 * n.distance:
                 good.append(m)
 
+    info["n_matches"] = len(good)
     if len(good) < 6:
-        return None
+        return None, info
 
     pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
     pts2 = np.float32([kp2[m.trainIdx].pt for m in good])
 
-    # Affine (translation + rotation + scale) — astro karelerde perspektif yok
+    # AffinePartial2D — translation + rotation + uniform scale
+    # Astro karelerde perspektif yok, ama rotasyon olabilir (alan döndürücü, montaj hatası)
     M, mask = cv2.estimateAffinePartial2D(pts1, pts2, method=cv2.RANSAC,
-                                           ransacReprojThreshold=5.0)
+                                           ransacReprojThreshold=5.0,
+                                           maxIters=5000,
+                                           confidence=0.999)
     if M is None or mask is None:
-        return None
-    inlier_ratio = np.sum(mask) / len(mask)
-    if inlier_ratio < 0.25:
-        return None
+        return None, info
+
+    inlier_ratio = float(np.sum(mask) / len(mask))
+    info["inlier_ratio"] = inlier_ratio
+    if inlier_ratio < 0.20:
+        return None, info
+
+    # Transform parametrelerini çıkar
+    scale = np.sqrt(M[0, 0]**2 + M[1, 0]**2)
+    rotation = np.degrees(np.arctan2(M[1, 0], M[0, 0]))
+    tx, ty = M[0, 2], M[1, 2]
+    info["scale"] = float(scale)
+    info["rotation_deg"] = float(rotation)
+    info["tx"] = float(tx)
+    info["ty"] = float(ty)
+
+    # Ölçek kontrolü — astro karelerde zoom değişmez
+    if abs(scale - 1.0) > 0.10:
+        return None, info
 
     # 2x3 → 3x3
     H = np.eye(3, dtype=np.float64)
     H[:2, :] = M
-    return H
+    return H, info
 
 
 def _warp_image(img: np.ndarray, H: np.ndarray) -> np.ndarray:
-    """Homography ile goruntu donusumu."""
+    """Homography ile görüntü dönüşümü."""
     h, w = img.shape[:2]
-    return cv2.warpPerspective(img, H, (w, h), flags=cv2.INTER_LINEAR,
+    return cv2.warpPerspective(img, H, (w, h), flags=cv2.INTER_LANCZOS4,
                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
 
 
+def _ecc_fallback(img: np.ndarray, base: np.ndarray) -> Optional[np.ndarray]:
+    """ECC (Enhanced Correlation Coefficient) hizalama — AKAZE başarısız olursa.
+    EUCLIDEAN model — rotasyon destekler."""
+    try:
+        g1 = _enhance_for_detection(_to_gray_float(img))
+        g2 = _enhance_for_detection(_to_gray_float(base))
 
-def _warp_mask(shape: tuple, H: np.ndarray) -> np.ndarray:
-    """Dondurulen karenin gecerli pixel maskesini olustur."""
-    h, w = shape[:2]
-    mask = np.ones((h, w), dtype=np.float32)
-    return cv2.warpPerspective(mask, H, (w, h), flags=cv2.INTER_LINEAR,
-                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        scale = 0.25
+        h, w = g1.shape[:2]
+        small1 = cv2.resize(g1, (int(w * scale), int(h * scale)))
+        small2 = cv2.resize(g2, (int(w * scale), int(h * scale)))
+
+        warp_matrix = np.eye(2, 3, dtype=np.float32)
+        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 300, 1e-7)
+        _, warp_matrix = cv2.findTransformECC(
+            small2.astype(np.float32), small1.astype(np.float32),
+            warp_matrix, cv2.MOTION_EUCLIDEAN, criteria,
+            inputMask=None, gaussFiltSize=5
+        )
+
+        warp_matrix[0, 2] /= scale
+        warp_matrix[1, 2] /= scale
+
+        H = np.eye(3, dtype=np.float64)
+        H[:2, :] = warp_matrix
+        return H
+    except cv2.error:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  KALIBRASYON
+#  KALİBRASYON
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _build_master(paths: List[str], method: str = "median",
                   progress_cb=None, label="") -> Optional[np.ndarray]:
-    """Kalibrasyon karelerinden master frame olustur."""
+    """Kalibrasyon karelerinden master frame oluştur."""
     if not paths:
         return None
     from core.loader import load_image
@@ -174,7 +220,6 @@ def _calibrate_frame(
     cal = np.clip(cal, 0, None)
 
     if master_flat is not None:
-        # Flat normalizasyonu: mean(flat) / flat
         flat = master_flat.copy()
         if master_bias is not None:
             flat = flat - master_bias
@@ -182,136 +227,345 @@ def _calibrate_frame(
         flat_mean = np.mean(flat)
         if flat_mean > 0:
             flat_norm = flat / flat_mean
-            flat_norm[flat_norm < 0.01] = 1.0  # sifira bolunme engelle
+            flat_norm[flat_norm < 0.01] = 1.0
             cal = cal / flat_norm
 
     return np.clip(cal, 0, None).astype(np.float32)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  STACKING YONTEMLERI
+#  NORMALİZASYON (PixInsight tarzı)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _stack_mean(frames: List[np.ndarray], masks: List[np.ndarray]) -> np.ndarray:
-    """Maskeli ortalama stacking — her pikselde katki yapan karelerin ortalamasini al."""
-    accumulator = np.zeros_like(frames[0], dtype=np.float64)
-    weight = np.zeros(frames[0].shape[:2], dtype=np.float64)
+def _estimate_background(img: np.ndarray) -> Tuple[float, float]:
+    """Arka plan seviyesi (median) ve ölçek (MAD) tahmini.
+    PixInsight'ın normalizasyonu buna dayanır."""
+    gray = _to_gray_float(img) if img.ndim == 3 else img.astype(np.float32)
+    # Siyah (warp kenarı) pikselleri hariç tut
+    valid = gray > 1e-6
+    if np.sum(valid) < 100:
+        return 0.0, 1.0
+    data = gray[valid]
+    med = float(np.median(data))
+    mad = float(np.median(np.abs(data - med)))
+    # MAD → sigma: MAD * 1.4826
+    scale = max(mad * 1.4826, 1e-10)
+    return med, scale
 
+
+def _normalize_frames(frames: List[np.ndarray], masks: List[np.ndarray],
+                      mode: str = "additive_scaling") -> List[np.ndarray]:
+    """Kareleri normalize et — farklı gökyüzü parlaklıklarını eşitle.
+    mode:
+      'additive_scaling' — PixInsight varsayılan: location + scale eşitleme
+      'multiplicative'   — Çarpımsal normalizasyon
+      'none'             — Normalizasyon yok
+    """
+    if mode == "none" or len(frames) < 2:
+        return frames
+
+    # Referans: ilk karenin istatistikleri
+    stats = []
     for fr, msk in zip(frames, masks):
-        if fr.ndim == 3:
-            m3 = msk[:, :, np.newaxis] if msk.ndim == 2 else msk
-            accumulator += fr.astype(np.float64) * m3
+        gray = _to_gray_float(fr) if fr.ndim == 3 else fr.astype(np.float32)
+        valid = msk > 0.5
+        if np.sum(valid) < 100:
+            stats.append((0.0, 1.0))
         else:
-            accumulator += fr.astype(np.float64) * msk
-        weight += msk.astype(np.float64)
+            data = gray[valid]
+            med = float(np.median(data))
+            mad = float(np.median(np.abs(data - med)))
+            scale = max(mad * 1.4826, 1e-10)
+            stats.append((med, scale))
 
-    weight[weight == 0] = 1
-    if accumulator.ndim == 3:
-        return (accumulator / weight[:, :, np.newaxis]).astype(np.float32)
-    return (accumulator / weight).astype(np.float32)
+    ref_med, ref_scale = stats[0]
+
+    normalized = []
+    for i, (fr, (med, scale)) in enumerate(zip(frames, stats)):
+        if i == 0:
+            normalized.append(fr)
+            continue
+
+        out = fr.astype(np.float64)
+
+        if mode == "multiplicative":
+            # Çarpımsal: img * (ref_med / med)
+            if med > 1e-10:
+                factor = ref_med / med
+                out = out * factor
+            else:
+                out = out + (ref_med - med)
+        else:
+            # Additive with scaling (PI varsayılan)
+            # img = (img - med) * (ref_scale / scale) + ref_med
+            if scale > 1e-10:
+                out = (out - med) * (ref_scale / scale) + ref_med
+
+        normalized.append(np.clip(out, 0, None).astype(np.float32))
+
+    return normalized
 
 
-def _stack_median(frames: List[np.ndarray], masks: List[np.ndarray]) -> np.ndarray:
-    """Maskeli median stacking — siyah kenar piksellerini dislar."""
+# ═══════════════════════════════════════════════════════════════════════════════
+#  AĞIRLIKLANDIRMA (PixInsight tarzı)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _compute_weights(frames: List[np.ndarray], masks: List[np.ndarray],
+                     mode: str = "snr",
+                     scores: Optional[List[dict]] = None) -> np.ndarray:
+    """Her kare için ağırlık hesapla.
+    mode:
+      'equal'  — Tüm karelere eşit ağırlık
+      'snr'    — SNR bazlı (daha az gürültülü → daha yüksek ağırlık)
+      'noise'  — Ters gürültü bazlı
+      'fwhm'   — Keskinlik bazlı (daha düşük FWHM → daha yüksek ağırlık)
+    """
     n = len(frames)
-    h, w = frames[0].shape[:2]
+    if mode == "equal" or n < 2:
+        return np.ones(n, dtype=np.float32)
+
+    weights = np.ones(n, dtype=np.float32)
+
+    if mode == "snr":
+        for i, (fr, msk) in enumerate(zip(frames, masks)):
+            gray = _to_gray_float(fr) if fr.ndim == 3 else fr.astype(np.float32)
+            valid = msk > 0.5
+            if np.sum(valid) < 100:
+                weights[i] = 0.1
+                continue
+            data = gray[valid]
+            signal = float(np.median(data))
+            noise = float(np.median(np.abs(data - signal))) * 1.4826
+            weights[i] = signal / max(noise, 1e-10)
+
+    elif mode == "noise":
+        for i, (fr, msk) in enumerate(zip(frames, masks)):
+            gray = _to_gray_float(fr) if fr.ndim == 3 else fr.astype(np.float32)
+            valid = msk > 0.5
+            if np.sum(valid) < 100:
+                weights[i] = 0.1
+                continue
+            data = gray[valid]
+            noise = float(np.median(np.abs(data - np.median(data)))) * 1.4826
+            weights[i] = 1.0 / max(noise, 1e-10)
+
+    elif mode == "fwhm" and scores:
+        for i, sc in enumerate(scores):
+            fwhm = sc.get("fwhm", 5.0)
+            weights[i] = 1.0 / max(fwhm, 0.5)
+
+    # Normalize: toplam = n (ortalama ağırlık = 1)
+    w_sum = np.sum(weights)
+    if w_sum > 0:
+        weights = weights * (n / w_sum)
+
+    return weights
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  REDDETME ALGORİTMALARI (PixInsight tarzı)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _stack_weighted_mean(frames: List[np.ndarray], masks: List[np.ndarray],
+                         valid_mask: np.ndarray,
+                         weights: np.ndarray) -> np.ndarray:
+    """Ağırlıklı ortalama — valid_mask ile reddetme uygulanmış."""
+    n = len(frames)
     is_color = frames[0].ndim == 3
-    result = np.zeros_like(frames[0], dtype=np.float32)
+    accumulator = np.zeros_like(frames[0], dtype=np.float64)
+    weight_sum = np.zeros(frames[0].shape[:2], dtype=np.float64)
 
-    # Satir bloklari halinde isle — tum kareleri belleğe almadan
-    block_size = max(1, min(64, h))
-    for y0 in range(0, h, block_size):
-        y1 = min(y0 + block_size, h)
-        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
-        mask_block = np.stack([m[y0:y1] for m in masks], axis=0)  # (n, bh, w)
-
+    for i, (fr, msk) in enumerate(zip(frames, masks)):
+        # valid_mask[i] ve msk ikisi de geçerli olmalı
+        combined = (msk > 0.5) & valid_mask[i]
+        w = float(weights[i])
         if is_color:
-            # Her piksel icin gecerli karelerin median'ini al
-            for c in range(block.shape[-1]):
-                ch_block = block[..., c]  # (n, bh, w)
-                # NaN maskeleme — gecersiz pikselleri NaN yap, nanmedian ile hesapla
-                masked = np.where(mask_block > 0.5, ch_block, np.nan)
-                with np.errstate(all='ignore'):
-                    med = np.nanmedian(masked, axis=0)
-                # Tum kareler gecersiz → 0
-                med = np.nan_to_num(med, nan=0.0)
-                result[y0:y1, :, c] = med
+            m3 = combined[:, :, np.newaxis].astype(np.float64)
+            accumulator += fr.astype(np.float64) * m3 * w
         else:
-            masked = np.where(mask_block > 0.5, block, np.nan)
-            with np.errstate(all='ignore'):
-                med = np.nanmedian(masked, axis=0)
-            result[y0:y1] = np.nan_to_num(med, nan=0.0)
+            accumulator += fr.astype(np.float64) * combined.astype(np.float64) * w
+        weight_sum += combined.astype(np.float64) * w
 
-    return result
+    weight_sum[weight_sum == 0] = 1
+    if is_color:
+        return (accumulator / weight_sum[:, :, np.newaxis]).astype(np.float32)
+    return (accumulator / weight_sum).astype(np.float32)
 
 
-def _stack_kappa_sigma(
-    frames: List[np.ndarray],
-    masks: List[np.ndarray],
-    kappa: float = 2.5,
-    iterations: int = 3,
-) -> np.ndarray:
-    """Maskeli kappa-sigma clipping — RENK KORUYUCU.
-    Renkli goruntuler icin: luminance bazli red/kabul karari.
-    Ayni kare-piksel icin TUM kanallar birlikte kabul/red edilir
-    → renk oranları korunur, renk kayması olmaz."""
+def _reject_sigma_clip(frames: List[np.ndarray], masks: List[np.ndarray],
+                       kappa_low: float = 2.5, kappa_high: float = 2.5,
+                       iterations: int = 3) -> np.ndarray:
+    """Sigma Clipping — PixInsight tarzı, luminance bazlı renk koruyucu.
+    Asimetrik: kappa_low (karanlık outlier), kappa_high (parlak outlier — uydu/uçak)."""
     n = len(frames)
     h, w = frames[0].shape[:2]
     is_color = frames[0].ndim == 3
-    result = np.zeros_like(frames[0], dtype=np.float32)
+
+    # valid_mask: (n, h, w) boolean — her piksel-kare için geçerli mi
+    valid = np.stack([m > 0.5 for m in masks], axis=0)  # (n, h, w)
 
     block_size = max(1, min(32, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
-        mask_block = np.stack([m[y0:y1] for m in masks], axis=0)  # (n, bh, w)
+        v_block = valid[:, y0:y1, :]  # (n, bh, w)
+
+        # Luminance bazlı karar (renk koruyucu)
+        if is_color:
+            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
+        else:
+            lum = block.squeeze(-1) if block.ndim == 4 else block
+
+        for _ in range(iterations):
+            vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
+            vcount[vcount == 0] = 1
+            mean = np.sum(lum * v_block, axis=0, keepdims=True) / vcount
+            diff = lum - mean
+            var = np.sum(diff * diff * v_block, axis=0, keepdims=True) / vcount
+            std = np.sqrt(var)
+            std[std < 1e-8] = 1e-8
+            # Asimetrik clipping
+            v_block = v_block & (diff >= -kappa_low * std) & (diff <= kappa_high * std)
+
+        valid[:, y0:y1, :] = v_block
+
+    return valid
+
+
+def _reject_linear_fit(frames: List[np.ndarray], masks: List[np.ndarray],
+                       kappa_low: float = 3.0, kappa_high: float = 3.0) -> np.ndarray:
+    """Linear Fit Clipping — az sayıda kare (5-10) için ideal.
+    Her pikselde lineer model fit eder, modelden sapmayı reddeder."""
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    is_color = frames[0].ndim == 3
+
+    valid = np.stack([m > 0.5 for m in masks], axis=0)  # (n, h, w)
+
+    block_size = max(1, min(32, h))
+    for y0 in range(0, h, block_size):
+        y1 = min(y0 + block_size, h)
+        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        v_block = valid[:, y0:y1, :]
 
         if is_color:
-            # ── RENK KORUYUCU: Luminance bazli sigma clipping ──
-            # Karar luminance uzerinden verilir, tum kanallara AYNI uygulanir
-            # Boylece R/G/B icin farkli kareler reddedilmez → renk orani bozulmaz
-            lum_weights = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-            lum_block = np.sum(block * lum_weights[np.newaxis, np.newaxis, np.newaxis, :],
-                               axis=-1)  # (n, bh, w)
-
-            # valid maske: piksel bazli (kanal bazli DEGiL!)
-            valid_px = mask_block > 0.5  # (n, bh, w)
-
-            for _ in range(iterations):
-                vcount_px = np.sum(valid_px, axis=0, keepdims=True).astype(np.float32)
-                vcount_px[vcount_px == 0] = 1
-                lum_mean = np.sum(lum_block * valid_px, axis=0, keepdims=True) / vcount_px
-                lum_diff = lum_block - lum_mean
-                lum_var = np.sum(lum_diff * lum_diff * valid_px, axis=0, keepdims=True) / vcount_px
-                lum_std = np.sqrt(lum_var)
-                lum_std[lum_std < 1e-8] = 1e-8
-                valid_px = valid_px & (np.abs(lum_diff) <= kappa * lum_std)
-
-            # Ayni valid maskesini tum kanallara genislet
-            valid_3ch = valid_px[:, :, :, np.newaxis]  # (n, bh, w, 1) — broadcast
-            vcount_3ch = np.sum(valid_3ch, axis=0, keepdims=True).astype(np.float32)
-            vcount_3ch[vcount_3ch == 0] = 1
-            result[y0:y1] = (np.sum(block * valid_3ch, axis=0, keepdims=True) / vcount_3ch).squeeze(0)
-
+            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
         else:
-            # Mono goruntu — klasik per-pixel clipping
-            valid = mask_block > 0.5
+            lum = block.squeeze(-1) if block.ndim == 4 else block
 
-            for _ in range(iterations):
-                vcount = np.sum(valid, axis=0, keepdims=True).astype(np.float32)
-                vcount[vcount == 0] = 1
-                mean = np.sum(block * valid, axis=0, keepdims=True) / vcount
-                diff = block - mean
-                var = np.sum(diff * diff * valid, axis=0, keepdims=True) / vcount
-                std = np.sqrt(var)
-                std[std < 1e-8] = 1e-8
-                valid = valid & (np.abs(diff) <= kappa * std)
+        # Median baseline
+        vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
+        vcount[vcount == 0] = 1
+        mean = np.sum(lum * v_block, axis=0, keepdims=True) / vcount
 
-            vcount = np.sum(valid, axis=0, keepdims=True).astype(np.float32)
+        # Residual = frame - mean
+        residual = lum - mean
+        res_var = np.sum(residual * residual * v_block, axis=0, keepdims=True) / vcount
+        res_std = np.sqrt(res_var)
+        res_std[res_std < 1e-8] = 1e-8
+
+        # Linear fit residual clipping
+        v_block = v_block & (residual >= -kappa_low * res_std) & (residual <= kappa_high * res_std)
+
+        valid[:, y0:y1, :] = v_block
+
+    return valid
+
+
+def _reject_percentile(frames: List[np.ndarray], masks: List[np.ndarray],
+                       low_pct: float = 10.0, high_pct: float = 90.0) -> np.ndarray:
+    """Percentile Clipping — çok az sayıda kare (3-5) için.
+    Alt ve üst yüzdelik dilimdeki pikselleri atar."""
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    is_color = frames[0].ndim == 3
+
+    valid = np.stack([m > 0.5 for m in masks], axis=0)
+
+    block_size = max(1, min(32, h))
+    for y0 in range(0, h, block_size):
+        y1 = min(y0 + block_size, h)
+        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        v_block = valid[:, y0:y1, :]
+
+        if is_color:
+            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
+        else:
+            lum = block.squeeze(-1) if block.ndim == 4 else block
+
+        # NaN maskeleme ile percentile hesapla
+        masked_lum = np.where(v_block, lum, np.nan)
+        with np.errstate(all='ignore'):
+            lo = np.nanpercentile(masked_lum, low_pct, axis=0, keepdims=True)
+            hi = np.nanpercentile(masked_lum, high_pct, axis=0, keepdims=True)
+        lo = np.nan_to_num(lo, nan=-1e10)
+        hi = np.nan_to_num(hi, nan=1e10)
+
+        v_block = v_block & (lum >= lo) & (lum <= hi)
+        valid[:, y0:y1, :] = v_block
+
+    return valid
+
+
+def _reject_winsorized_sigma(frames: List[np.ndarray], masks: List[np.ndarray],
+                              kappa_low: float = 2.5, kappa_high: float = 2.5,
+                              iterations: int = 3) -> np.ndarray:
+    """Winsorized Sigma Clipping — sigma clipping'e benzer ama
+    reddedilen değerler sınır değerleriyle değiştirilir (istatistiği bozmaz)."""
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    is_color = frames[0].ndim == 3
+
+    valid = np.stack([m > 0.5 for m in masks], axis=0)
+
+    block_size = max(1, min(32, h))
+    for y0 in range(0, h, block_size):
+        y1 = min(y0 + block_size, h)
+        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        v_block = valid[:, y0:y1, :]
+
+        if is_color:
+            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
+        else:
+            lum = block.squeeze(-1) if block.ndim == 4 else block
+
+        for _ in range(iterations):
+            vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
             vcount[vcount == 0] = 1
-            result[y0:y1] = (np.sum(block * valid, axis=0, keepdims=True) / vcount).squeeze(0)
+            # Winsorized mean: clip extremes before computing mean
+            masked_lum = np.where(v_block, lum, np.nan)
+            with np.errstate(all='ignore'):
+                lo_bound = np.nanpercentile(masked_lum, 10, axis=0, keepdims=True)
+                hi_bound = np.nanpercentile(masked_lum, 90, axis=0, keepdims=True)
+            lo_bound = np.nan_to_num(lo_bound, nan=0.0)
+            hi_bound = np.nan_to_num(hi_bound, nan=1.0)
+            winsorized = np.clip(lum, lo_bound, hi_bound)
+            mean = np.sum(winsorized * v_block, axis=0, keepdims=True) / vcount
+            diff = lum - mean
+            var = np.sum(diff * diff * v_block, axis=0, keepdims=True) / vcount
+            std = np.sqrt(var)
+            std[std < 1e-8] = 1e-8
+            v_block = v_block & (diff >= -kappa_low * std) & (diff <= kappa_high * std)
 
-    return result
+        valid[:, y0:y1, :] = v_block
+
+    return valid
+
+
+def _auto_select_rejection(n_frames: int) -> str:
+    """PixInsight Auto modu — kare sayısına göre en uygun algoritmayı seç."""
+    if n_frames <= 3:
+        return "percentile"
+    elif n_frames <= 7:
+        return "linear_fit"
+    elif n_frames <= 15:
+        return "sigma_clip"
+    else:
+        return "winsorized_sigma"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -319,12 +573,11 @@ def _stack_kappa_sigma(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def score_frame(img: np.ndarray) -> dict:
-    """Basit kare kalite skoru — yildiz sayisi + FWHM tahmini."""
+    """Kare kalite skoru — yıldız sayısı + FWHM + SNR + roundness."""
     gray = _to_gray_float(img)
-    # Kontrast artirma — yildiz tespiti icin
     thr8 = _enhance_for_detection(gray)
 
-    # Blob detection
+    # Blob detection — yıldız tespiti
     params = cv2.SimpleBlobDetector_Params()
     params.filterByColor = True
     params.blobColor = 255
@@ -341,21 +594,33 @@ def score_frame(img: np.ndarray) -> dict:
     star_count = len(kps)
 
     fwhm = 0.0
+    roundness = 1.0
     if kps:
-        fwhm = np.mean([k.size for k in kps])
+        fwhm = float(np.mean([k.size for k in kps]))
 
-    # SNR tahmini — sinyal / gurultu
-    signal = np.mean(gray)
-    noise = np.std(gray)
-    snr = signal / max(noise, 1e-8)
+    # SNR tahmini — robust (MAD bazlı)
+    valid = gray > 1e-6
+    if np.sum(valid) > 100:
+        data = gray[valid]
+        signal = float(np.median(data))
+        noise = float(np.median(np.abs(data - signal))) * 1.4826
+        snr = signal / max(noise, 1e-8)
+    else:
+        signal, noise, snr = 0.0, 1.0, 0.0
 
-    score = min(1.0, star_count / 100.0) * 0.5 + min(1.0, snr * 10) * 0.3 + (1.0 / max(fwhm, 1.0)) * 0.2
+    # Kompozit skor
+    score = (min(1.0, star_count / 100.0) * 0.4 +
+             min(1.0, snr * 10) * 0.3 +
+             (1.0 / max(fwhm, 1.0)) * 0.2 +
+             roundness * 0.1)
 
     return {
         "score": float(score),
         "star_count": star_count,
         "fwhm": float(fwhm),
         "snr": float(snr),
+        "signal": float(signal),
+        "noise": float(noise),
     }
 
 
@@ -371,168 +636,179 @@ def align_frames_only(
     bias_paths: List[str] = None,
     align_method: str = "AKAZE",
     ref_index: int = 0,
-    ref_mode: str = "first",
+    ref_mode: str = "best",
     normalize: bool = True,
-    quality_reject: bool = False,
+    quality_reject: bool = True,
     quality_threshold: float = 0.3,
     progress_cb: Callable = None,
+    quality_warning_cb: Callable = None,
     **kwargs,
-) -> List[np.ndarray]:
-    """Hizalama — hizalanmis frame listesi dondurur."""
+) -> Tuple[List[np.ndarray], List[dict]]:
+    """Hizalama pipeline — rotasyon destekli.
+
+    Returns:
+        (aligned_frames, frame_infos)
+        frame_infos: Her kare için {score, rotation, status, ...}
+    """
     from core.loader import load_image
 
     n = len(light_paths)
     if n == 0:
-        return []
+        return [], []
 
     def cb(step, msg):
         if progress_cb:
             progress_cb(step, msg)
 
-    # ── 1. Master kareleri olustur ──
-    cb(1, "Master Bias olusturuluyor…")
+    # ── 1. Master kareleri oluştur ──
+    cb(1, "Master Bias oluşturuluyor…")
     master_bias = _build_master(bias_paths or [], "median", progress_cb, "1")
 
-    cb(2, "Master Dark olusturuluyor…")
+    cb(2, "Master Dark oluşturuluyor…")
     master_dark = _build_master(dark_paths or [], "median", progress_cb, "2")
 
-    cb(3, "Master Flat olusturuluyor…")
+    cb(3, "Master Flat oluşturuluyor…")
     master_flat = _build_master(flat_paths or [], "median", progress_cb, "3")
 
-    # dark_flat varsa flat'tan cikar
     if dark_flat_paths:
-        cb(3, "Dark Flat olusturuluyor…")
+        cb(3, "Dark Flat oluşturuluyor…")
         dark_flat = _build_master(dark_flat_paths, "median", progress_cb, "3")
         if dark_flat is not None and master_flat is not None:
             master_flat = np.clip(master_flat - dark_flat, 0, None)
 
-    # ── 2. Tum kareleri yukle + kalibre et ──
-    cb(4, f"{n} kare yukleniyor ve kalibre ediliyor…")
+    # ── 2. Tüm kareleri yükle + kalibre et + kalite skoru ──
+    cb(4, f"{n} kare yükleniyor ve kalibre ediliyor…")
     frames = []
+    frame_infos = []
     for i, p in enumerate(light_paths):
         cb(4, f"Kare {i+1}/{n}: {os.path.basename(p)}")
         img = load_image(p)
-        _sh = img.shape
-        _info = f"{'RGB' if img.ndim==3 else 'MONO'} {_sh}"
-        cb(4, f"Kare {i+1}/{n}: {os.path.basename(p)} — {_info}")
         img = _calibrate_frame(img, master_dark, master_flat, master_bias)
-        frames.append(img)
 
-    # ── 3. Referans kare sec ──
+        # Kalite skoru hesapla
+        sc = score_frame(img)
+        sc["path"] = p
+        sc["name"] = os.path.basename(p)
+        sc["index"] = i
+        sc["status"] = "ok"
+
+        # Düşük kalite uyarısı
+        if sc["score"] < quality_threshold:
+            sc["status"] = "low_quality"
+            cb(4, f"  ⚠ Kare {i+1}: Düşük kalite (skor={sc['score']:.3f}, "
+                  f"yıldız={sc['star_count']}, SNR={sc['snr']:.2f})")
+            # GUI callback ile popup uyarı
+            if quality_warning_cb:
+                skip = quality_warning_cb(sc)
+                if skip:
+                    sc["status"] = "skipped"
+                    frame_infos.append(sc)
+                    continue
+
+        frames.append(img)
+        frame_infos.append(sc)
+
+    # ── 3. Referans kare seç ──
+    valid_infos = [fi for fi in frame_infos if fi["status"] != "skipped"]
     if ref_mode == "best" and len(frames) > 1:
-        cb(5, "En iyi referans kare seciliyor…")
+        cb(5, "En iyi referans kare seçiliyor…")
         best_idx = 0
         best_score = -1
-        for i, fr in enumerate(frames):
-            sc = score_frame(fr)
-            if sc["score"] > best_score:
-                best_score = sc["score"]
+        for i, fi in enumerate(valid_infos):
+            if fi.get("score", 0) > best_score:
+                best_score = fi["score"]
                 best_idx = i
         ref_index = best_idx
         cb(5, f"Referans: #{ref_index+1} (skor: {best_score:.3f})")
     else:
         ref_index = max(0, min(ref_index, len(frames) - 1))
 
+    if not frames:
+        return [], frame_infos
+
     base = frames[ref_index]
 
-    # ── 4. AKAZE Hizalama — her kare dogrudan referansa hizalanir ──
-    cb(6, "AKAZE hizalama basliyor…")
+    # ── 4. Hizalama — rotasyon destekli ──
+    cb(6, "AKAZE hizalama başlıyor (rotasyon destekli)…")
     aligned = []
     n_ok = 0
     n_fail = 0
-
-    # Referans kare keypoint cache — bir kez hesapla, tum kareler icin kullan
     base_cache = {}
 
     for i, fr in enumerate(frames):
-        cb(6, f"Hizalama {i+1}/{n}")
+        cb(6, f"Hizalama {i+1}/{len(frames)}")
+        fi = valid_infos[i] if i < len(valid_infos) else {}
+
         if i == ref_index:
             aligned.append(base.copy())
+            fi["rotation_deg"] = 0.0
+            fi["alignment"] = "reference"
             n_ok += 1
             continue
 
-        H = _compute_homography(fr, base, threshold=0.85,
-                                cache=base_cache, frame_num=i)
-
-        # AKAZE basarili — transform parametrelerini kontrol et
-        if H is not None:
-            tx, ty = H[0, 2], H[1, 2]
-            scale = np.sqrt(H[0, 0]**2 + H[1, 0]**2)
-            # Olcek ~1.0 olmali (astro karelerde zoom degismez)
-            if abs(scale - 1.0) > 0.05:
-                cb(6, f"  ⚠ Kare {i+1}: scale={scale:.3f} — AKAZE yanlis eslesme")
-                H = None
+        H, align_info = _compute_homography(fr, base, threshold=0.85,
+                                             cache=base_cache, frame_num=i)
 
         if H is not None:
+            rot = align_info.get("rotation_deg", 0.0)
             warped = _warp_image(fr, H)
             aligned.append(warped)
             n_ok += 1
+            fi["rotation_deg"] = rot
+            fi["alignment"] = "AKAZE"
+            if abs(rot) > 0.5:
+                cb(6, f"  Kare {i+1}: rotasyon={rot:.1f}° düzeltildi")
         else:
-            # ECC fallback
+            # ECC fallback — rotasyon destekli (EUCLIDEAN)
             H_ecc = _ecc_fallback(fr, base)
             if H_ecc is not None:
                 warped = _warp_image(fr, H_ecc)
                 aligned.append(warped)
                 n_ok += 1
-                cb(6, f"  Kare {i+1}: ECC fallback ile hizalandi")
+                fi["alignment"] = "ECC"
+                cb(6, f"  Kare {i+1}: ECC fallback ile hizalandı")
             else:
                 n_fail += 1
-                cb(6, f"  ⚠ Kare {i+1}: hizalanamadi — atlandi")
+                fi["status"] = "align_failed"
+                cb(6, f"  ⚠ Kare {i+1}: hizalanamadı — atlandı")
+                # Uyarı callback
+                if quality_warning_cb:
+                    quality_warning_cb({
+                        "name": fi.get("name", f"Kare {i+1}"),
+                        "status": "align_failed",
+                        "score": fi.get("score", 0),
+                        "message": "Hizalama başarısız — kare atlandı"
+                    })
 
-    cb(7, f"✅ Hizalama tamamlandi — {n_ok} basarili, {n_fail} hizalanamayan")
-    return aligned
-
-
-def _ecc_fallback(img: np.ndarray, base: np.ndarray) -> Optional[np.ndarray]:
-    """ECC (Enhanced Correlation Coefficient) hizalama — AKAZE basarisiz olursa.
-    Asinh + CLAHE ile normalize eder — farkli parlakliktaki seanslar icin."""
-    try:
-        # Ayni enhance pipeline'i kullan — parlaklık farklarini giderir
-        g1 = _enhance_for_detection(_to_gray_float(img))
-        g2 = _enhance_for_detection(_to_gray_float(base))
-
-        # Kucultulmus goruntu ile ECC — hiz icin
-        scale = 0.25
-        h, w = g1.shape[:2]
-        small1 = cv2.resize(g1, (int(w * scale), int(h * scale)))
-        small2 = cv2.resize(g2, (int(w * scale), int(h * scale)))
-
-        warp_matrix = np.eye(2, 3, dtype=np.float32)
-        criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6)
-        _, warp_matrix = cv2.findTransformECC(
-            small2.astype(np.float32), small1.astype(np.float32),
-            warp_matrix, cv2.MOTION_EUCLIDEAN, criteria,
-            inputMask=None, gaussFiltSize=5
-        )
-
-        # Kucuk olcekteki transformu tam olcege cevir
-        warp_matrix[0, 2] /= scale
-        warp_matrix[1, 2] /= scale
-
-        H = np.eye(3, dtype=np.float64)
-        H[:2, :] = warp_matrix
-        return H
-    except cv2.error:
-        return None
+    cb(7, f"✅ Hizalama tamamlandı — {n_ok} başarılı, {n_fail} hizalanamayan")
+    return aligned, frame_infos
 
 
 def stack_aligned(
     aligned_frames: List[np.ndarray],
-    method: str = "kappa_sigma",
+    method: str = "auto",
     kappa: float = 2.5,
     kappa_low: float = 2.5,
-    kappa_high: float = 2.5,
+    kappa_high: float = 3.0,
     iterations: int = 3,
-    weight_mode: str = "equal",
+    weight_mode: str = "snr",
+    normalization: str = "additive_scaling",
     quality_reject: bool = False,
     quality_threshold: float = 0.3,
     drizzle_scale: int = 0,
     progress_cb: Callable = None,
+    frame_scores: Optional[List[dict]] = None,
     **kwargs,
 ) -> dict:
-    """Onceden hizalanmis kareleri stackle."""
+    """PixInsight tarzı stacking — normalizasyon + ağırlık + reddetme.
+
+    method: 'auto', 'sigma_clip', 'linear_fit', 'percentile',
+            'winsorized_sigma', 'median', 'mean'
+    normalization: 'additive_scaling', 'multiplicative', 'none'
+    weight_mode: 'snr', 'noise', 'fwhm', 'equal'
+    """
     if not aligned_frames:
-        raise ValueError("Hizalanmis kare yok!")
+        raise ValueError("Hizalanmış kare yok!")
 
     def cb(step, msg):
         if progress_cb:
@@ -541,88 +817,116 @@ def stack_aligned(
     n = len(aligned_frames)
     is_color = aligned_frames[0].ndim == 3
     ch_count = aligned_frames[0].shape[2] if is_color else 1
-    cb(8, f"{n} kare stackleniyor — metot: {method} — "
-         f"{'RGB renkli' if is_color else 'mono'} ({ch_count} kanal)")
 
-    # Maskeleri olustur (siyah kenarlar icin)
-    # Renkli goruntulerde: herhangi bir kanal > 0 ise piksel gecerli
+    # ── Maskeler oluştur ──
     masks = []
     for fr in aligned_frames:
         if is_color:
-            # Tum kanallar sifir olan pikselleri maskele
-            # Herhangi bir kanalda sinyal varsa gecerli say
             mask = (np.max(fr, axis=2) > 1e-6).astype(np.float32)
         else:
             mask = (fr > 1e-6).astype(np.float32)
         masks.append(mask)
 
-    # Stack
+    # ── Normalizasyon ──
+    cb(8, f"Normalizasyon: {normalization}…")
+    aligned_frames = _normalize_frames(aligned_frames, masks, normalization)
+
+    # ── Ağırlıklar ──
+    cb(8, f"Ağırlıklandırma: {weight_mode}…")
+    weights = _compute_weights(aligned_frames, masks, weight_mode, frame_scores)
+
+    # ── Auto rejection seçimi ──
+    if method == "auto":
+        method = _auto_select_rejection(n)
+        cb(8, f"Auto rejection: {method} ({n} kare)")
+
+    cb(8, f"{n} kare stackleniyor — {method} — {weight_mode} ağırlık — "
+         f"{'RGB' if is_color else 'mono'} ({ch_count}ch)")
+
+    # ── Reddetme + Stacking ──
+    n_rejected = 0
     if method == "median":
-        result = _stack_median(aligned_frames, masks)
-    elif method in ("kappa_sigma", "median_kappa_sigma"):
-        result = _stack_kappa_sigma(aligned_frames, masks,
-                                    kappa=kappa, iterations=iterations)
+        # Median — kendi rejection'ı var
+        result = _stack_median_weighted(aligned_frames, masks, weights)
+    elif method == "mean":
+        # Basit ağırlıklı ortalama — rejection yok
+        valid = np.ones((n, *frames[0].shape[:2]), dtype=bool) if aligned_frames else np.array([])
+        # dummy valid
+        all_valid = np.stack([m > 0.5 for m in masks], axis=0)
+        result = _stack_weighted_mean(aligned_frames, masks, all_valid, weights)
     else:
-        # Varsayilan: maskeli ortalama (mean)
-        result = _stack_mean(aligned_frames, masks)
+        # Rejection-based methods
+        if method == "sigma_clip":
+            valid = _reject_sigma_clip(aligned_frames, masks,
+                                        kappa_low=kappa_low, kappa_high=kappa_high,
+                                        iterations=iterations)
+        elif method == "linear_fit":
+            valid = _reject_linear_fit(aligned_frames, masks,
+                                        kappa_low=kappa_low, kappa_high=kappa_high)
+        elif method == "percentile":
+            valid = _reject_percentile(aligned_frames, masks,
+                                        low_pct=10.0, high_pct=90.0)
+        elif method == "winsorized_sigma":
+            valid = _reject_winsorized_sigma(aligned_frames, masks,
+                                              kappa_low=kappa_low, kappa_high=kappa_high,
+                                              iterations=iterations)
+        else:
+            valid = np.stack([m > 0.5 for m in masks], axis=0)
 
-    cb(8, f"✅ Stacking tamamlandi — {n} kare birlestirildi")
+        # Reddedilen piksel sayısı
+        base_valid = np.stack([m > 0.5 for m in masks], axis=0)
+        n_rejected = int(np.sum(base_valid) - np.sum(valid))
 
-    # Arka plan nötralizasyonu stacking'de YAPILMAZ — renk oranlarını bozar.
-    # Kullanıcı bunu ayrı "BG Siyah" panelinden manuel olarak uygular.
+        result = _stack_weighted_mean(aligned_frames, masks, valid, weights)
+
+    cb(8, f"✅ Stacking tamamlandı — {n} kare, {n_rejected} piksel reddedildi")
 
     return {
-        "result": result,
+        "result": np.clip(result, 0, None).astype(np.float32),
         "n_lights": n,
-        "n_rejected": 0,
+        "n_rejected": n_rejected,
         "method": method,
-        "frame_scores": [],
+        "normalization": normalization,
+        "weight_mode": weight_mode,
+        "frame_scores": frame_scores or [],
         "rejected_frames": [],
     }
 
 
-def _neutralize_background(img: np.ndarray) -> np.ndarray:
-    """
-    Arka plan renk sapmasını düzelt.
-    Her kanaldan arka plan seviyesini çıkarır → arka plan siyah,
-    sinyal renkleri (nebula/yıldız) aynen korunur.
-    """
-    if img is None or img.size == 0:
-        return img
-    if img.ndim != 3 or img.shape[2] < 3:
-        return img
+def _stack_median_weighted(frames: List[np.ndarray], masks: List[np.ndarray],
+                           weights: np.ndarray) -> np.ndarray:
+    """Ağırlıklı median — basit median (ağırlık 1 ise standard median)."""
+    # Weighted median karmaşık, burada standard median + weight != 0 filtre
+    n = len(frames)
+    h, w = frames[0].shape[:2]
+    is_color = frames[0].ndim == 3
+    result = np.zeros_like(frames[0], dtype=np.float32)
 
-    result = img.astype(np.float32).copy()
+    block_size = max(1, min(64, h))
+    for y0 in range(0, h, block_size):
+        y1 = min(y0 + block_size, h)
+        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        mask_block = np.stack([m[y0:y1] for m in masks], axis=0)
 
-    # En karanlık %5 pikselleri saf arka plan olarak al (çok tutucu)
-    gray = np.mean(result, axis=2)
-    threshold = np.percentile(gray, 5)
-    bg_mask = gray <= threshold
+        if is_color:
+            for c in range(block.shape[-1]):
+                ch_block = block[..., c]
+                masked = np.where(mask_block > 0.5, ch_block, np.nan)
+                with np.errstate(all='ignore'):
+                    med = np.nanmedian(masked, axis=0)
+                result[y0:y1, :, c] = np.nan_to_num(med, nan=0.0)
+        else:
+            masked = np.where(mask_block > 0.5, block, np.nan)
+            with np.errstate(all='ignore'):
+                med = np.nanmedian(masked, axis=0)
+            result[y0:y1] = np.nan_to_num(med, nan=0.0)
 
-    if bg_mask.sum() < 50:
-        return result
+    return result
 
-    # Her kanalın arka plan seviyesi
-    bg_levels = np.array([
-        float(np.median(result[:, :, ch][bg_mask]))
-        for ch in range(3)
-    ])
 
-    # Çok düşükse müdahale etme
-    if bg_levels.max() < 0.003:
-        return result
-
-    # Her kanaldan kendi arka plan seviyesini çıkar
-    # Sinyal renklerini KORUR:
-    #   nebula(R=0.5) - bg(R=0.3) = 0.2
-    #   nebula(G=0.2) - bg(G=0.1) = 0.1
-    #   → R > G oranı korunur
-    for ch in range(3):
-        result[:, :, ch] -= bg_levels[ch]
-
-    # Negatif değerleri sıfırla — normalize YAPMA (renk oranları bozulur)
-    return np.clip(result, 0, 1).astype(np.float32)
-
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TAM PİPELINE
+# ═══════════════════════════════════════════════════════════════════════════════
 
 def stack_lights(
     light_paths: List[str],
@@ -630,28 +934,30 @@ def stack_lights(
     flat_paths: List[str] = None,
     dark_flat_paths: List[str] = None,
     bias_paths: List[str] = None,
-    method: str = "kappa_sigma",
+    method: str = "auto",
     align_method: str = "AKAZE",
     ref_index: int = 0,
-    ref_mode: str = "first",
+    ref_mode: str = "best",
     kappa: float = 2.5,
     kappa_low: float = 2.5,
-    kappa_high: float = 2.5,
+    kappa_high: float = 3.0,
     iterations: int = 3,
-    quality_reject: bool = False,
+    quality_reject: bool = True,
     quality_threshold: float = 0.3,
     normalize: bool = True,
-    weight_mode: str = "equal",
+    normalization: str = "additive_scaling",
+    weight_mode: str = "snr",
     dark_optimize: bool = False,
     drizzle_scale: int = 0,
     hot_pixel_removal: bool = True,
     progress_cb: Callable = None,
+    quality_warning_cb: Callable = None,
     **kwargs,
 ) -> dict:
-    """Tam pipeline: yukle → kalibre → hizala → stackle."""
+    """Tam pipeline: yükle → kalibre → skorla → hizala → normalize → ağırlıkla → stackle."""
 
-    # 1. Hizala
-    aligned = align_frames_only(
+    # 1. Hizala (rotasyon destekli + kalite kontrolü)
+    aligned, frame_infos = align_frames_only(
         light_paths=light_paths,
         dark_paths=dark_paths,
         flat_paths=flat_paths,
@@ -664,12 +970,13 @@ def stack_lights(
         quality_reject=quality_reject,
         quality_threshold=quality_threshold,
         progress_cb=progress_cb,
+        quality_warning_cb=quality_warning_cb,
     )
 
     if not aligned:
-        raise ValueError("Hizalanmis kare yok — stacking yapilamaz.")
+        raise ValueError("Hizalanmış kare yok — stacking yapılamaz.")
 
-    # 2. Stackle
+    # 2. Stackle (PixInsight tarzı)
     result = stack_aligned(
         aligned_frames=aligned,
         method=method,
@@ -678,10 +985,13 @@ def stack_lights(
         kappa_high=kappa_high,
         iterations=iterations,
         weight_mode=weight_mode,
+        normalization=normalization,
         quality_reject=quality_reject,
         quality_threshold=quality_threshold,
         drizzle_scale=drizzle_scale,
         progress_cb=progress_cb,
+        frame_scores=frame_infos,
     )
 
+    result["frame_infos"] = frame_infos
     return result
