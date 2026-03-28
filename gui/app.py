@@ -1934,100 +1934,130 @@ class WorkflowPanel(QFrame):
     STEPS = [
         # (key, icon, baslik, faz_rengi, faz_etiket, aciklama)
 
-        # ── HAM VERI ──
-        ("stack",      "🗂", "Stacking",
-         "#2255aa", "HAM VERI",
-         "Bias, Dark, Flat kalibrasyon + hizalama + yiginlama. "
-         "Ham kareleri tek temiz goruntuye donustur. Sigma-clip outlier reject."),
+        # ══════════════════════════════════════════════════════════════
+        # ── 1. HAM VERİ ──
+        # ══════════════════════════════════════════════════════════════
+        ("stack",      "🗂", "1. Stacking",
+         "#2255aa", "HAM VERİ",
+         "Bias, Dark, Flat kalibrasyon + AKAZE hizalama + kappa-sigma yığınlama.\n"
+         "Ham kareleri tek güçlü görüntüye birleştirir. Renklere DOKUNMAZ —\n"
+         "orijinal sinyal oranları korunur. Daha fazla kare = daha güçlü sinyal."),
 
-        # ── LINEER FAZ (stretch oncesi — piksel degerleri orantili) ──
-        ("crop",       "✂", "Crop / Cerceve",
-         "#22aa55", "LINEER",
-         "Kenar artifact'lari ve stacking sinirlarin kirp. "
-         "Daha kucuk dosya = sonraki islemler daha hizli."),
+        ("crop",       "✂", "2. Crop / Çerçeve",
+         "#22aa55", "LİNEER",
+         "Stacking sonrası kenar artefaktlarını ve siyah sınırları kırp.\n"
+         "Daha küçük dosya = sonraki işlemler daha hızlı çalışır."),
 
-        ("bg",         "🌌", "Arkaplan Cikarma",
-         "#22aa55", "LINEER",
-         "Gradyan ve isik kirliligini cikar. GraXpert AI (RBF/Kriging) veya Nox membran modeli. "
-         "Stretch oncesi ZORUNLU — yoksa gradient stretch ile amplify olur!"),
+        # ══════════════════════════════════════════════════════════════
+        # ── 2. LİNEER FAZ (stretch öncesi — piksel değerleri orantılı) ──
+        # ══════════════════════════════════════════════════════════════
+        ("bg",         "🌌", "3. Arka Plan Çıkarma (Gradient)",
+         "#22aa55", "LİNEER",
+         "Işık kirliliği gradyanını çıkar. GraXpert AI veya Nox membran modeli.\n"
+         "Stretch öncesi ZORUNLU — yoksa gradient stretch ile büyütülür!\n"
+         "Sadece gradyan temizler, arka plan seviyesine dokunmaz."),
 
-        ("noise",      "✨", "Gurultu Azaltma (Lineer)",
-         "#22aa55", "LINEER",
-         "Lineer gurulutu bastirma. Silentium (fiziksel model) veya Mastro AI (NAFNet). "
-         "Lineer fazda gurultu karakter uniform — en etkili nokta burasi."),
+        ("bg_neutralize", "🌑", "4. BG Siyah (Arka Plan Nötralize)",
+         "#22aa55", "LİNEER",
+         "Arka plan seviyesini siyaha çeker. Percentile, sigma-clip veya grid.\n"
+         "Sinyal renklerini KORUR — sadece arka plan parlaklığını düşürür.\n"
+         "Gradient çıkarma sonrası, stretch öncesi en ideal nokta."),
 
-        ("deconv",     "🔭", "Deconvolution",
-         "#22aa55", "LINEER",
-         "Optik bulaniklik ve yildiz PSF duzeltme. Richardson-Lucy, Wiener veya Blur Exterminator. "
-         "Lineer veride PSF modeli en dogru calisirir."),
+        ("deconv",     "🔭", "5. Deconvolution",
+         "#22aa55", "LİNEER",
+         "Optik bulanıklık ve yıldız PSF düzeltme. Richardson-Lucy, Wiener\n"
+         "veya Blur Exterminator. Lineer veride PSF modeli en doğru çalışır.\n"
+         "Yıldızları küçültür ve nebula detaylarını ortaya çıkarır."),
 
-        ("aberration", "🌀", "Aberasyon Duzeltme",
-         "#22aa55", "LINEER",
-         "Kromatik aberasyon, koma, yuvarlaklk ve spike duzeltme. "
-         "Optik hatalari stretch oncesi temizle — sonra dugumlesir."),
+        ("aberration", "🌀", "6. Aberasyon Düzeltme",
+         "#22aa55", "LİNEER",
+         "Kromatik aberasyon, koma ve spike düzeltme.\n"
+         "Optik hataları stretch öncesi temizle — sonra düzeltmek çok zor."),
 
-        ("color",      "🎨", "Renk Kalibrasyon",
-         "#22aa55", "LINEER",
-         "SPCC G2V (Gunes tipi) veya Avg Spiral Galaxy referansi ile dogru renk dengesi. "
-         "Stretch renk oranlarini bozar — kalibrasyonu ONCE yap!"),
+        ("noise",      "✨", "7. Gürültü Azaltma (Lineer)",
+         "#22aa55", "LİNEER",
+         "Lineer fazda gürültü karakteri uniform — en etkili nokta burası.\n"
+         "Mastro AI (NAFNet) veya Silentium (fiziksel model).\n"
+         "Güçlü uygulamayın — stretch sonrası ikinci tur daha iyi."),
 
-        # ── GECIS NOKTASI ──
-        ("stretch",    "📊", "Histogram Stretch",
-         "#cc6622", "GECIS NOKTASI",
-         "Lineer → Non-lineer donusum. Veralux HMS (fizik-tabanli), Auto STF, GHS veya ASinH. "
-         "Bu noktadan sonra LINEER islem yapilamaz! En kritik adim."),
+        ("color",      "🎨", "8. Renk Kalibrasyon",
+         "#22aa55", "LİNEER",
+         "SPCC G2V (Güneş tipi) veya Avg Spiral Galaxy referansı ile renk dengesi.\n"
+         "Stretch renk oranlarını bozar — kalibrasyonu STRETCH ÖNCESİ yap!\n"
+         "Doğru beyaz dengesi tüm sonraki işlemlerin temelini oluşturur."),
 
-        # ── NON-LINEER FAZ (stretch sonrasi — gorsel islemler) ──
-        ("stars",      "⭐", "Yildiz Ayirma",
-         "#884488", "NON-LINEER",
-         "StarNet++ veya Mastro Starless (NAFNet AI) ile yildizlari ayir. "
-         "Starless katmanda nebula kontrastini bagmsiz olarak isle."),
+        # ══════════════════════════════════════════════════════════════
+        # ── 3. GEÇİŞ NOKTASI ──
+        # ══════════════════════════════════════════════════════════════
+        ("stretch",    "📊", "9. Histogram Stretch ⚠",
+         "#cc6622", "GEÇİŞ",
+         "Lineer → Non-lineer dönüşüm. En kritik adım!\n"
+         "Veralux HMS (fizik-tabanlı), Auto STF, GHS veya ASinH.\n"
+         "Bu noktadan sonra LİNEER işlem YAPILAMAZ.\n"
+         "İpucu: Hafif stretch + Curves ile ince ayar en iyi sonucu verir."),
 
-        ("nebula",     "🌠", "Nebula Gelistirme",
-         "#884488", "NON-LINEER",
-         "Multiscale LCE, HDR GC veya Structure Amp ile nebula detaylari. "
-         "CLAHE Astro lokal kontrast. Yildizsiz katmanda cok daha temiz sonuc."),
+        # ══════════════════════════════════════════════════════════════
+        # ── 4. NON-LİNEER FAZ (stretch sonrası — görsel işlemler) ──
+        # ══════════════════════════════════════════════════════════════
+        ("stars",      "⭐", "10. Yıldız Ayırma",
+         "#884488", "NON-LİNEER",
+         "StarNet++ veya Mastro Starless (NAFNet AI) ile yıldızları ayır.\n"
+         "Starless katmanda nebula kontrastını bağımsız olarak işle.\n"
+         "Yıldızları korumak için ayır → işle → birleştir stratejisi."),
 
-        ("sharp",      "🔪", "Keskinlestirme",
-         "#884488", "NON-LINEER",
-         "Revela (wavelet yapi), Multiscale VLC veya Unsharp Mask. "
-         "Yildizsiz katmanda en temiz sonuc — yildiz halolari amplify olmaz."),
+        ("nebula",     "🌠", "11. Nebula Geliştirme",
+         "#884488", "NON-LİNEER",
+         "Multiscale LCE, HDR veya Structure Amp ile nebula detayları.\n"
+         "CLAHE Astro lokal kontrast. Yıldızsız katmanda çok daha temiz sonuç.\n"
+         "Dikkat: Aşırı güçlendirme gürültüyü de büyütür."),
 
-        ("noise",      "✨", "Gurultu Azaltma (Final)",
-         "#884488", "NON-LINEER",
-         "Keskinlestirme sonrasi ortaya cikan ince gurulutuyu temizle. "
-         "Hafif dokunusla (strength 0.3-0.5). NLM veya bilateral filtre."),
+        ("sharp",      "🔪", "12. Keskinleştirme",
+         "#884488", "NON-LİNEER",
+         "Revela (wavelet yapı), Multiscale VLC veya Unsharp Mask.\n"
+         "Yıldızsız katmanda en temiz sonuç — yıldız haloları amplify olmaz.\n"
+         "Hafif uygula: 0.3-0.7 arası strength önerilir."),
 
-        ("star_shrink","✦↓", "Yildiz Kucultme",
-         "#884488", "NON-LINEER",
-         "Yildiz boyutunu kucult — cekirdek/halo ayirimi ile orantili shrink. "
-         "Halo fill ile dogal gorunum. Recomposition oncesi son yildiz duzeltmesi."),
+        ("noise",      "✨", "13. Gürültü Azaltma (Final)",
+         "#884488", "NON-LİNEER",
+         "Keskinleştirme sonrası ortaya çıkan ince gürültüyü temizle.\n"
+         "Hafif dokunuşla: strength 0.3-0.5. NLM veya bilateral filtre.\n"
+         "Detayları korumak için çok agresif uygulamayın."),
 
-        ("color",      "🎨", "Renk Grading",
-         "#884488", "NON-LINEER",
-         "Vectra LCH renk cerrahi: ton, doygunluk, parlaklik bagimsiz kontrol. "
-         "Ha/OIII/SHO vektor ayari. Vibrance + Color Temp ince ayar."),
+        ("star_shrink","✦↓", "14. Yıldız Küçültme",
+         "#884488", "NON-LİNEER",
+         "Yıldız boyutunu küçült — çekirdek/halo ayrımı ile orantılı shrink.\n"
+         "Halo fill ile doğal görünüm. Birleştirme öncesi son yıldız düzeltmesi."),
 
-        ("recomp",     "✦+", "Yildiz Birlestirme",
-         "#884488", "NON-LINEER",
-         "Islenmis starless + orijinal yildiz maskesini blend et. "
-         "Screen/Lighten modlari, yildiz renk ve boyut kontrolu."),
+        ("color",      "🎨", "15. Renk Grading",
+         "#884488", "NON-LİNEER",
+         "Vectra LCH renk cerrahisi: ton, doygunluk, parlaklık bağımsız kontrol.\n"
+         "Hα/OIII/SHO vektör ayarı. Vibrance + Color Temp ince ayar.\n"
+         "Nebula renklerini güçlendir, arka planı nötr tut."),
 
-        # ── FINAL ──
-        ("hist",       "📈", "Histogram / Curves",
-         "#557799", "FINAL",
-         "Levels (B/M/W), Curves (noktali egri), per-kanal ayar. "
-         "Exposure, Contrast, Highlights, Shadows, Dehaze, Clarity ince ayari."),
+        ("recomp",     "✦+", "16. Yıldız Birleştirme",
+         "#884488", "NON-LİNEER",
+         "İşlenmiş starless + orijinal yıldız maskesini blend et.\n"
+         "Screen/Lighten modları, yıldız renk ve boyut kontrolü.\n"
+         "Yıldız küçültme uygulandıysa burada birleştir."),
 
-        ("morph",      "🔮", "Morfoloji (Opsiyonel)",
-         "#557799", "FINAL",
-         "Erosion/Dilation/Opening/Closing ile son duzeltmeler. "
-         "Kucuk kozmik iz ve hot pixel temizligi."),
+        # ══════════════════════════════════════════════════════════════
+        # ── 5. FİNAL DOKUNUŞ ──
+        # ══════════════════════════════════════════════════════════════
+        ("hist",       "📈", "17. Histogram / Curves",
+         "#557799", "FİNAL",
+         "Levels (B/M/W), Curves (noktalı eğri), per-kanal ayar.\n"
+         "Exposure, Contrast, Highlights, Shadows, Dehaze, Clarity.\n"
+         "Son ince ayar — görüntüyü tam istediğin kıvama getir."),
 
-        ("script",     "⚡", "Script (Opsiyonel)",
-         "#557799", "FINAL",
-         "Python script ile ozel islem. Galaxy Enhance, CLAHE, custom pipeline. "
-         "Tekrarlanabilir islemler icin kaydet ve tekrar calistir."),
+        ("morph",      "🔮", "18. Morfoloji (Opsiyonel)",
+         "#557799", "FİNAL",
+         "Erosion/Dilation/Opening/Closing ile son düzeltmeler.\n"
+         "Küçük kozmik iz ve hot pixel temizliği."),
+
+        ("script",     "⚡", "19. Script (Opsiyonel)",
+         "#557799", "FİNAL",
+         "Python script ile özel işlem. Galaxy Enhance, CLAHE, custom pipeline.\n"
+         "Tekrarlanabilir işlemler için kaydet ve tekrar çalıştır."),
     ]
 
     def __init__(self, anchor_btn, parent=None):
