@@ -5808,12 +5808,54 @@ class AstroApp(QMainWindow):
         lp_lay.addWidget(name_w)
         lay.addWidget(logo_panel)
 
-        # FILE group
+        # FILE group + working dir path
         self._tb_open  = make_icon_btn("📂","Open")
         self._tb_save  = make_icon_btn("💾","Save")
         self._tb_open.clicked.connect(self._open_file)
         self._tb_save.clicked.connect(self._save_file)
-        lay.addWidget(_make_group("FILE", [self._tb_open, self._tb_save]))
+
+        # Çalışma klasörü göstergesi + seç butonu
+        self._tb_dir_btn = QPushButton("📁")
+        self._tb_dir_btn.setFixedSize(24, 24)
+        self._tb_dir_btn.setToolTip("Çalışma klasörünü seç\n(Open/Save için varsayılan)")
+        self._tb_dir_btn.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{ACCENT};border:1px solid {BORDER};"
+            f"border-radius:2px;font-size:11px;}}"
+            f"QPushButton:hover{{background:{BG4};border:1px solid {ACCENT};}}")
+        self._tb_dir_btn.clicked.connect(self._choose_working_dir)
+
+        self._tb_dir_label = QLabel(self._get_short_dir())
+        self._tb_dir_label.setFixedHeight(24)
+        self._tb_dir_label.setMinimumWidth(60)
+        self._tb_dir_label.setMaximumWidth(200)
+        self._tb_dir_label.setStyleSheet(
+            f"background:{BG};color:{MUTED};border:1px solid {BORDER};"
+            f"border-radius:2px;font-size:8px;padding:1px 4px;")
+        self._tb_dir_label.setToolTip(
+            self._working_dir or self._settings.get("last_open_dir", "Seçilmedi"))
+
+        # FILE grubu: Open + Save + DirBtn + DirLabel
+        _file_grp = QWidget()
+        _file_grp.setStyleSheet(_GRP_CSS)
+        _fg_lay = QVBoxLayout(_file_grp)
+        _fg_lay.setContentsMargins(2,1,2,2); _fg_lay.setSpacing(0)
+        _fg_lbl = QLabel("FILE")
+        _fg_lbl.setStyleSheet(
+            f"background:transparent; border:none; color:{ACCENT};"
+            f"font-size:7px; font-weight:800; letter-spacing:1px;"
+            f"padding:0 1px;")
+        _fg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        _fg_lay.addWidget(_fg_lbl)
+        _fg_row = QWidget()
+        _fg_row.setStyleSheet("background:transparent; border:none;")
+        _fg_rl = QHBoxLayout(_fg_row)
+        _fg_rl.setContentsMargins(0,0,0,0); _fg_rl.setSpacing(1)
+        _fg_rl.addWidget(self._tb_open)
+        _fg_rl.addWidget(self._tb_save)
+        _fg_rl.addWidget(self._tb_dir_btn)
+        _fg_rl.addWidget(self._tb_dir_label)
+        _fg_lay.addWidget(_fg_row)
+        lay.addWidget(_file_grp)
 
         # EDIT group
         self._tb_undo  = make_icon_btn("↺","Undo")
@@ -6178,6 +6220,39 @@ class AstroApp(QMainWindow):
         return self.hist_panel
 
     # ── File ops ────────────────────────────────────────────────────────
+    def _get_short_dir(self):
+        """Çalışma klasörünü kısa göster."""
+        d = self._working_dir or self._settings.get("last_open_dir", "")
+        if not d:
+            return "Klasör seç…"
+        # Son 2 parça göster
+        parts = d.replace("\\", "/").rstrip("/").split("/")
+        if len(parts) <= 2:
+            return d
+        return "…/" + "/".join(parts[-2:])
+
+    def _update_dir_label(self):
+        """Dir label'ı güncelle."""
+        if hasattr(self, '_tb_dir_label'):
+            short = self._get_short_dir()
+            full = self._working_dir or self._settings.get("last_open_dir", "")
+            self._tb_dir_label.setText(short)
+            self._tb_dir_label.setToolTip(full or "Seçilmedi")
+
+    def _choose_working_dir(self):
+        """Çalışma klasörü seç — Open/Save için varsayılan olur."""
+        start = self._working_dir or self._settings.get("last_open_dir", "")
+        d = QFileDialog.getExistingDirectory(self, "Çalışma Klasörü Seç", start)
+        if not d:
+            return
+        self._working_dir = d
+        self._settings["last_open_dir"] = d
+        self._settings["last_save_dir"] = d
+        from gui.settings import save as _save_cfg
+        _save_cfg(self._settings)
+        self._update_dir_label()
+        self.status.showMessage(f"📁  Çalışma klasörü: {d}")
+
     def _open_file(self):
         start_dir = self._working_dir or self._settings.get("last_open_dir", "")
         paths,_=QFileDialog.getOpenFileNames(self,"Open Image(s)", start_dir,
@@ -6197,13 +6272,15 @@ class AstroApp(QMainWindow):
             self.lbl_file.setText(fname)
             h,w=img.shape[:2]; ch="RGB" if img.ndim==3 else "Gray"
             self.status.showMessage(f"✅  {fname}  |  {w}×{h}  |  {ch}")
-            # Calisma klasorunu ayarla
+            # Calisma klasorunu ayarla — open ve save için varsayılan
             self._working_dir = os.path.dirname(os.path.abspath(path))
             self._settings["last_open_file"] = path
             self._settings["last_open_dir"]  = self._working_dir
+            self._settings["last_save_dir"]  = self._working_dir
             self._add_to_recent(path)
             from gui.settings import save as _save_cfg
             _save_cfg(self._settings)
+            self._update_dir_label()
             # Tab olarak ekle
             tab_data = {"key": fname, "image": img.copy(), "title": fname, "path": path}
             self._img_tab_data.append(tab_data)
@@ -6352,13 +6429,22 @@ class AstroApp(QMainWindow):
 
     def _save_file(self):
         if self._current is None: QMessageBox.information(self,"Info","No image loaded."); return
-        default_path = os.path.join(self._working_dir, "result.fits") if self._working_dir else "result.fits"
+        save_dir = self._working_dir or self._settings.get("last_save_dir", "")
+        default_path = os.path.join(save_dir, "result.fits") if save_dir else "result.fits"
         path,_=QFileDialog.getSaveFileName(self,"Save", default_path,
             "FITS (*.fits);;PNG (*.png);;TIFF (*.tiff *.tif);;JPEG (*.jpg *.jpeg);;"
             "BMP (*.bmp);;WebP (*.webp);;HDR (*.hdr);;EXR (*.exr);;All (*)")
         if not path: return
         try:
             from core.loader import save_image; save_image(path,self._current)
+            # Kaydetme klasörünü güncelle
+            saved_dir = os.path.dirname(os.path.abspath(path))
+            self._working_dir = saved_dir
+            self._settings["last_save_dir"] = saved_dir
+            self._settings["last_open_dir"] = saved_dir
+            from gui.settings import save as _save_cfg
+            _save_cfg(self._settings)
+            self._update_dir_label()
             self.status.showMessage(f"💾  Kaydedildi: {path}")
         except Exception as e:
             QMessageBox.critical(self,"Save Error",str(e))
