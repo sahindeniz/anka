@@ -19,9 +19,8 @@ from gui.canvas import ImageCanvas
 from gui.history_panel import HistoryPanel
 from gui.histogram_widget import HistogramPanel
 from gui.histogram_editor import HistogramEditorPanel
-from gui.panels import (BgPanel, BgNeutralizePanel, StretchPanel, NoisePanel,
-                         SharpenPanel, ColorPanel, DeconvPanel, StarShrinkPanel,
-                         RecompPanel)
+from gui.panels import (BgPanel, StretchPanel, NoisePanel, SharpenPanel,
+                         ColorPanel, DeconvPanel, StarShrinkPanel, RecompPanel)
 from gui.settings_dialog import SettingsDialog
 from gui.theme import get_stylesheet
 from gui.worker import ProcessWorker
@@ -39,6 +38,7 @@ class MainWindow(QMainWindow):
         self._starmask_image = None   # yıldız maskesi (recomp için)
         self._current_path = None     # son açılan dosya
         self._worker = None           # aktif ProcessWorker
+        self._live_base_image = None  # live preview öncesi orijinal görüntü
 
         self._init_ui()
         self._setup_menubar()
@@ -196,7 +196,6 @@ class MainWindow(QMainWindow):
         self._panel_actions = {}
         panels_def = [
             ("BG Çıkar",  "🌌", "bg",     self._toggle_panel_bg),
-            ("BG Siyah",  "🌑", "bg_neutralize", self._toggle_panel_bg_neutralize),
             ("Stretch",   "📊", "stretch", self._toggle_panel_stretch),
             ("Noise",     "🔊", "noise",   self._toggle_panel_noise),
             ("Sharpen",   "🔬", "sharpen", self._toggle_panel_sharpen),
@@ -462,6 +461,7 @@ class MainWindow(QMainWindow):
                 p = panel_class()
                 p.apply_requested.connect(self._on_apply)
                 p.preview_requested.connect(self._on_preview)
+                p.live_preview_requested.connect(self._on_live_preview)
                 self._panels[key] = p
 
             panel = self._panels[key]
@@ -469,6 +469,12 @@ class MainWindow(QMainWindow):
             self._active_panel = panel
             self._panel_container.setVisible(True)
         else:
+            # Panel kapatılırken live preview'u iptal et, orijinale dön
+            if self._live_base_image is not None:
+                self._current_image = self._live_base_image
+                self._live_base_image = None
+                self._canvas.set_image(self._current_image)
+                self._histogram_editor.set_image(self._current_image)
             if self._active_panel is not None:
                 self._panel_layout.removeWidget(self._active_panel)
                 self._active_panel.setParent(None)
@@ -476,7 +482,6 @@ class MainWindow(QMainWindow):
             self._panel_container.setVisible(False)
 
     def _toggle_panel_bg(self):      self._toggle_panel("bg",     BgPanel)
-    def _toggle_panel_bg_neutralize(self): self._toggle_panel("bg_neutralize", BgNeutralizePanel)
     def _toggle_panel_stretch(self): self._toggle_panel("stretch", StretchPanel)
     def _toggle_panel_noise(self):   self._toggle_panel("noise",   NoisePanel)
     def _toggle_panel_sharpen(self): self._toggle_panel("sharpen", SharpenPanel)
@@ -491,11 +496,31 @@ class MainWindow(QMainWindow):
         if self._current_image is None:
             QMessageBox.warning(self, "Uyarı", "Önce bir görüntü açın.")
             return
+        # Live preview varsa orijinalden uygula
+        if self._live_base_image is not None:
+            self._current_image = self._live_base_image.copy()
+            self._live_base_image = None
         self._run_processing(params, apply=True)
 
     def _on_preview(self, params: dict):
         if self._current_image is None:
             return
+        self._run_processing(params, apply=False)
+
+    def _on_live_preview(self, params: dict):
+        """Live preview — parametre değişikliklerinde anlık önizleme.
+        Her zaman orijinal görüntü üstüne uygulanır (katlanma olmaz)."""
+        if self._current_image is None:
+            return
+        # İlk live preview çağrısında orijinali sakla
+        if self._live_base_image is None:
+            self._live_base_image = self._current_image.copy()
+        # Zaten çalışan bir worker varsa iptal et
+        if self._worker and self._worker.isRunning():
+            self._worker.quit()
+            self._worker.wait(200)
+        # Orijinal görüntüyü kullan (katlanmayı önle)
+        self._current_image = self._live_base_image.copy()
         self._run_processing(params, apply=False)
 
     def _run_processing(self, params: dict, apply: bool = True):
@@ -515,9 +540,12 @@ class MainWindow(QMainWindow):
             self._worker.quit()
             self._worker.wait(500)
 
+        # Live preview sırasında paneli kilitleme (slider kullanımı devam etsin)
+        is_live = self._live_base_image is not None
         self._progress.setVisible(True)
         self._status("İşleniyor…")
-        self._set_processing_lock(True)
+        if not is_live:
+            self._set_processing_lock(True)
 
         self._worker = ProcessWorker(fn, self._current_image, **params)
         self._worker.finished.connect(
@@ -532,10 +560,6 @@ class MainWindow(QMainWindow):
             if panel_key == "bg":
                 from processing.background import remove_gradient_dispatch
                 return remove_gradient_dispatch
-
-            elif panel_key == "bg_neutralize":
-                from processing.bg_neutralize import neutralize_background
-                return neutralize_background
 
             elif panel_key == "stretch":
                 from processing.stretch import stretch
@@ -613,14 +637,14 @@ class MainWindow(QMainWindow):
             return
 
         label_map = {
-            "bg": "BG Çıkarma", "bg_neutralize": "BG Siyahlaştırma",
-            "stretch": "Stretch", "noise": "Gürültü Azaltma",
+            "bg": "BG Çıkarma", "stretch": "Stretch", "noise": "Gürültü Azaltma",
             "sharpen": "Keskinleştirme", "color": "Renk Kalibrasyonu",
             "deconv": "Dekonvolüsyon", "recomp": "Yıldız Birleştirme",
         }
         label = label_map.get(panel_key, "İşlem")
 
         if apply:
+            self._live_base_image = None  # Apply sonrası live base temizle
             self._set_image(image, label=label)
             self._status(f"✓ {label} uygulandı")
         else:

@@ -10,7 +10,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QCheckBox, QPushButton, QDoubleSpinBox,
     QSpinBox, QGroupBox, QScrollArea, QFrame
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 
 
 # ── Temel panel sınıfı ───────────────────────────────────────────────────────
@@ -22,19 +22,33 @@ class BasePanel(QWidget):
     """
     apply_requested = pyqtSignal(dict)
     preview_requested = pyqtSignal(dict)
+    live_preview_requested = pyqtSignal(dict)
 
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setMaximumWidth(430)
 
+        # Live preview debounce timer (300ms)
+        self._live_timer = QTimer(self)
+        self._live_timer.setSingleShot(True)
+        self._live_timer.setInterval(300)
+        self._live_timer.timeout.connect(self._emit_live_preview)
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(4, 4, 4, 4)
         outer.setSpacing(6)
 
-        # Başlık
+        # Başlık + Live checkbox satırı
+        title_row = QHBoxLayout()
         lbl = QLabel(title)
         lbl.setStyleSheet("font-size: 12pt; font-weight: bold; color: #88aaff; padding: 2px;")
-        outer.addWidget(lbl)
+        title_row.addWidget(lbl)
+        title_row.addStretch()
+        self._chk_live = QCheckBox("Live")
+        self._chk_live.setChecked(False)
+        self._chk_live.setStyleSheet("color: #ff8844; font-weight: bold; font-size: 10pt;")
+        title_row.addWidget(self._chk_live)
+        outer.addLayout(title_row)
 
         sep = QFrame()
         sep.setFrameShape(QFrame.Shape.HLine)
@@ -76,6 +90,14 @@ class BasePanel(QWidget):
     def _on_preview(self):
         self.preview_requested.emit(self.get_params())
 
+    def _schedule_live(self):
+        """Parametre değiştiğinde debounce ile live preview tetikle."""
+        if self._chk_live.isChecked():
+            self._live_timer.start()
+
+    def _emit_live_preview(self):
+        self.live_preview_requested.emit(self.get_params())
+
     # Yardımcılar
     def _add_combo(self, label: str, items: list, key: str) -> QComboBox:
         row = QHBoxLayout()
@@ -83,6 +105,7 @@ class BasePanel(QWidget):
         cb = QComboBox()
         cb.addItems(items)
         cb.setProperty("param_key", key)
+        cb.currentIndexChanged.connect(lambda: self._schedule_live())
         row.addWidget(cb)
         self._layout.addLayout(row)
         return cb
@@ -104,6 +127,7 @@ class BasePanel(QWidget):
                 f"{v * sc:.2f}" if sc != 1.0 else str(v)
             )
         )
+        sl.valueChanged.connect(lambda: self._schedule_live())
         row.addWidget(sl)
         row.addWidget(lbl_val)
         v.addLayout(row)
@@ -121,6 +145,7 @@ class BasePanel(QWidget):
         sp.setSingleStep(step)
         sp.setDecimals(decimals)
         sp.setProperty("param_key", key)
+        sp.valueChanged.connect(lambda: self._schedule_live())
         row.addWidget(sp)
         self._layout.addLayout(row)
         return sp
@@ -138,53 +163,174 @@ class BasePanel(QWidget):
 class BgPanel(BasePanel):
     def __init__(self, parent=None):
         super().__init__("🌌 Arka Plan Çıkarma", parent)
-        self._method = self._add_combo(
-            "Yöntem:", ["dbe_spline", "polynomial", "median_grid", "ai_gradient", "gaussian", "graxpert"],
-            "method"
-        )
-        self._grid = self._add_slider("Grid Boyutu", 4, 64, 16, "grid_size")
-        self._degree = self._add_slider("Polinom Derecesi", 1, 8, 4, "poly_degree")
-        self._clip = self._add_spinbox("Alçak Klip (%)", 0, 10, 0, 0.5, "clip_low", 1)
+
+        # Her metot için bağımsız grup oluştur
+        self._method_groups = {}
+
+        # ── DBE Spline ──
+        grp1 = QGroupBox("DBE Spline (RBF)")
+        grp1.setStyleSheet("QGroupBox { font-weight: bold; color: #88ccff; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 14px; }")
+        v1 = QVBoxLayout(grp1)
+        self._dbe_grid = self._make_slider(v1, "Grid Boyutu", 4, 64, 16)
+        self._dbe_clip = self._make_spinbox(v1, "Alçak Klip (%)", 0, 10, 0, 0.5, 1)
+        self._make_buttons(v1, "dbe_spline")
+        self._layout.addWidget(grp1)
+        self._method_groups["dbe_spline"] = grp1
+
+        # ── Polynomial ──
+        grp2 = QGroupBox("Polinom Yüzey")
+        grp2.setStyleSheet("QGroupBox { font-weight: bold; color: #88ccff; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 14px; }")
+        v2 = QVBoxLayout(grp2)
+        self._poly_degree = self._make_slider(v2, "Polinom Derecesi", 1, 8, 4)
+        self._poly_clip = self._make_spinbox(v2, "Alçak Klip (%)", 0, 10, 0, 0.5, 1)
+        self._make_buttons(v2, "polynomial")
+        self._layout.addWidget(grp2)
+        self._method_groups["polynomial"] = grp2
+
+        # ── Median Grid ──
+        grp3 = QGroupBox("Medyan Grid")
+        grp3.setStyleSheet("QGroupBox { font-weight: bold; color: #88ccff; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 14px; }")
+        v3 = QVBoxLayout(grp3)
+        self._med_clip = self._make_spinbox(v3, "Alçak Klip (%)", 0, 10, 0, 0.5, 1)
+        self._make_buttons(v3, "median_grid")
+        self._layout.addWidget(grp3)
+        self._method_groups["median_grid"] = grp3
+
+        # ── AI Gradient ──
+        grp4 = QGroupBox("AI Gradient")
+        grp4.setStyleSheet("QGroupBox { font-weight: bold; color: #88ccff; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 14px; }")
+        v4 = QVBoxLayout(grp4)
+        self._ai_degree = self._make_slider(v4, "Polinom Derecesi", 1, 8, 3)
+        self._ai_clip = self._make_spinbox(v4, "Alçak Klip (%)", 0, 10, 0, 0.5, 1)
+        self._make_buttons(v4, "ai_gradient")
+        self._layout.addWidget(grp4)
+        self._method_groups["ai_gradient"] = grp4
+
+        # ── Gaussian ──
+        grp5 = QGroupBox("Gaussian Bulanıklaştırma")
+        grp5.setStyleSheet("QGroupBox { font-weight: bold; color: #88ccff; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 14px; }")
+        v5 = QVBoxLayout(grp5)
+        self._gauss_clip = self._make_spinbox(v5, "Alçak Klip (%)", 0, 10, 0, 0.5, 1)
+        self._make_buttons(v5, "gaussian")
+        self._layout.addWidget(grp5)
+        self._method_groups["gaussian"] = grp5
+
+        # ── GraXpert ──
+        grp6 = QGroupBox("GraXpert (DBE)")
+        grp6.setStyleSheet("QGroupBox { font-weight: bold; color: #88ccff; border: 1px solid #444; border-radius: 4px; margin-top: 6px; padding-top: 14px; }")
+        v6 = QVBoxLayout(grp6)
+        self._grax_grid = self._make_slider(v6, "Grid Boyutu", 4, 64, 16)
+        self._grax_clip = self._make_spinbox(v6, "Alçak Klip (%)", 0, 10, 0, 0.5, 1)
+        self._make_buttons(v6, "graxpert")
+        self._layout.addWidget(grp6)
+        self._method_groups["graxpert"] = grp6
+
         self._layout.addStretch()
 
-    def get_params(self):
-        return {
-            "method": self._method.currentText(),
-            "grid_size": self._grid.value(),
-            "poly_degree": self._degree.value(),
-            "clip_low": self._clip.value(),
-        }
+        # Alt butonları gizle — her grubun kendi butonları var
+        self._btn_preview.setVisible(False)
+        self._btn_apply.setVisible(False)
 
+        # Son tıklanan metot bilgisi
+        self._last_method = "dbe_spline"
 
-# ── Arka Plan Siyahlaştırma ──────────────────────────────────────────────────
+    def _make_slider(self, layout, label, mn, mx, default):
+        """Grup içi slider oluşturur (BasePanel._add_slider yerine)."""
+        grp = QGroupBox(label)
+        v = QVBoxLayout(grp)
+        row = QHBoxLayout()
+        sl = QSlider(Qt.Orientation.Horizontal)
+        sl.setRange(mn, mx)
+        sl.setValue(default)
+        lbl_val = QLabel(str(default))
+        lbl_val.setFixedWidth(40)
+        sl.valueChanged.connect(lambda val, lv=lbl_val: lv.setText(str(val)))
+        sl.valueChanged.connect(lambda: self._schedule_live())
+        row.addWidget(sl)
+        row.addWidget(lbl_val)
+        v.addLayout(row)
+        layout.addWidget(grp)
+        return sl
 
-class BgNeutralizePanel(BasePanel):
-    def __init__(self, parent=None):
-        super().__init__("⬛ Arka Plan Siyahlaştırma", parent)
-        self._method = self._add_combo(
-            "Yöntem:", ["percentile", "sigma_clip", "grid"],
-            "method"
+    def _make_spinbox(self, layout, label, mn, mx, default, step, decimals):
+        """Grup içi spinbox oluşturur."""
+        row = QHBoxLayout()
+        row.addWidget(QLabel(label))
+        sp = QDoubleSpinBox()
+        sp.setRange(mn, mx)
+        sp.setValue(default)
+        sp.setSingleStep(step)
+        sp.setDecimals(decimals)
+        sp.valueChanged.connect(lambda: self._schedule_live())
+        row.addWidget(sp)
+        layout.addLayout(row)
+        return sp
+
+    def _make_buttons(self, layout, method_name):
+        """Her metot grubu için bağımsız Önizle/Uygula butonları."""
+        row = QHBoxLayout()
+        btn_prev = QPushButton("Önizle")
+        btn_prev.clicked.connect(lambda _, m=method_name: self._emit_method(m, preview=True))
+        row.addWidget(btn_prev)
+
+        btn_apply = QPushButton("Uygula")
+        btn_apply.setStyleSheet(
+            "QPushButton { background-color: #285299; color: #fff; font-weight: bold; }"
+            "QPushButton:hover { background-color: #355ea1; }"
         )
-        self._strength = self._add_slider("Güç", 0, 100, 100, "strength", 0.01)
-        self._pct = self._add_spinbox("BG Yüzdelik (%)", 1, 30, 5, 1.0, "bg_percentile", 1)
-        self._sigma = self._add_spinbox("Sigma", 1.0, 5.0, 2.5, 0.1, "sigma", 1)
-        self._grid = self._add_slider("Grid Boyutu", 4, 32, 8, "grid_size")
-        self._protect = self._add_spinbox("Sinyal Koruma", 0.0, 1.0, 0.3, 0.05, "protect_signal", 2)
-        self._per_ch = QCheckBox("Kanal Başına (renk dengesi)")
-        self._per_ch.setChecked(True)
-        self._layout.addWidget(self._per_ch)
-        self._layout.addStretch()
+        btn_apply.clicked.connect(lambda _, m=method_name: self._emit_method(m, preview=False))
+        row.addWidget(btn_apply)
+        layout.addLayout(row)
+
+    def _emit_method(self, method, preview=False):
+        """Belirli metodun parametrelerini toplayıp sinyal gönderir."""
+        self._last_method = method
+        params = self._get_method_params(method)
+        if preview:
+            self.preview_requested.emit(params)
+        else:
+            self.apply_requested.emit(params)
+
+    def _get_method_params(self, method):
+        """Her metot için sadece kendi parametrelerini döndürür."""
+        if method == "dbe_spline":
+            return {
+                "method": "dbe_spline",
+                "grid_size": self._dbe_grid.value(),
+                "clip_low": self._dbe_clip.value(),
+            }
+        elif method == "polynomial":
+            return {
+                "method": "polynomial",
+                "poly_degree": self._poly_degree.value(),
+                "clip_low": self._poly_clip.value(),
+            }
+        elif method == "median_grid":
+            return {
+                "method": "median_grid",
+                "clip_low": self._med_clip.value(),
+            }
+        elif method == "ai_gradient":
+            return {
+                "method": "ai_gradient",
+                "poly_degree": self._ai_degree.value(),
+                "clip_low": self._ai_clip.value(),
+            }
+        elif method == "gaussian":
+            return {
+                "method": "gaussian",
+                "clip_low": self._gauss_clip.value(),
+            }
+        elif method == "graxpert":
+            return {
+                "method": "graxpert",
+                "grid_size": self._grax_grid.value(),
+                "clip_low": self._grax_clip.value(),
+            }
+        return {"method": method}
 
     def get_params(self):
-        return {
-            "method": self._method.currentText(),
-            "strength": self._strength.value() * 0.01,
-            "bg_percentile": self._pct.value(),
-            "sigma": self._sigma.value(),
-            "grid_size": self._grid.value(),
-            "protect_signal": self._protect.value(),
-            "per_channel": self._per_ch.isChecked(),
-        }
+        return self._get_method_params(self._last_method)
 
 
 # ── Histogram Gerdirme ───────────────────────────────────────────────────────
