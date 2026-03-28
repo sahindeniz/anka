@@ -5793,6 +5793,7 @@ class AstroApp(QMainWindow):
         self._proc_btns = {}
         proc_shortcuts = [
             ("bg",      "🌌","BG Extract"),
+            ("bg_neutralize","🌑","BG Siyah"),
             ("noise",   "✨","Noise"),
             ("deconv",  "🔭","Deconv"),
             ("stars",   "⭐","Stars"),
@@ -6394,6 +6395,27 @@ class AstroApp(QMainWindow):
         cur_method = "graxpert" if self._settings.get("graxpert_exe","") else "nox"
         _bg_method_changed(cur_method)
         p.run_requested.connect(lambda s,k="bg": self._run_key(k,s))
+
+        # BG Siyah (Arka Plan Nötrleştirme)
+        p = _make("🌑","BG Siyah","bg_neutralize")
+        p.add_combo("method","Yöntem",
+                    ["percentile","sigma_clip","grid"],
+                    "percentile",
+                    "percentile  — Alt yüzdelik arka plan tahmini (hızlı)\n"
+                    "sigma_clip  — Sigma-kırpmalı istatistik (hassas)\n"
+                    "grid        — Grid tabanlı yerel çıkarma (gradient)")
+        p.add_slider("strength","Güç",0.0,1.0,1.0,2,
+                     "Siyahlaştırma gücü (0=yok, 1=tam)")
+        p.add_slider("bg_percentile","BG Yüzdelik",1.0,20.0,5.0,1,
+                     "Arka plan olarak kabul edilecek en karanlık yüzde")
+        p.add_slider("sigma","Sigma",1.0,5.0,2.5,1,
+                     "Sigma-clip yöntemi için sigma değeri")
+        p.add_slider("grid_size","Grid Boyutu",4,16,8,0,
+                     "Grid yöntemi için ızgara boyutu")
+        p.add_slider("protect_signal","Sinyal Koruma",0.0,1.0,0.3,2,
+                     "Parlak sinyal bölgelerini koruma eşiği")
+        p.add_check("per_channel","Kanal Bağımsız",True)
+        p.run_requested.connect(lambda s,k="bg_neutralize": self._run_key(k,s))
 
         # Noise Reduction
         p = _make("✨","Noise Reduction","noise")
@@ -7407,6 +7429,7 @@ class AstroApp(QMainWindow):
         self._preview_only = preview_only
         _dispatch = {
             "bg":      ("processing.background",       "remove_gradient_dispatch"),
+            "bg_neutralize": ("processing.bg_neutralize", "neutralize_background"),
             "noise":   ("processing.noise_reduction",   "reduce_noise"),
             "stars":   ("processing.starsmaller",        "reduce_stars"),
             "deconv":  ("processing.deconvolution", "deconvolve_dispatch"),
@@ -7966,7 +7989,7 @@ class AstroApp(QMainWindow):
         result = _np.clip(img, 0, 1).astype(_np.float32) if isinstance(img, _np.ndarray) else img
         # Label oluştur
         method_names = {
-            "bg":"BG Extract","noise":"Noise Reduce","deconv":"Deconvolve",
+            "bg":"BG Extract","bg_neutralize":"BG Siyah","noise":"Noise Reduce","deconv":"Deconvolve",
             "stars":"Star Smaller","star_shrink":"Star Shrink",
             "sharp":"Sharpen","color":"Color Cal",
             "stretch":"Stretch","nebula":"Nebula","morph":"Morph",
