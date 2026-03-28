@@ -4168,40 +4168,7 @@ class ImageViewer(QWidget):
             f"QTabBar::tab:selected{{color:{ACCENT2};border-bottom:2px solid {ACCENT};"
             f"  border-top:1px solid {ACCENT};}}"
             f"QTabBar::tab:hover{{color:{TEXT};background:{BG4};}}")
-        # ── Tab bar satırı: [Image | Stats] + [RGB R G B L] ──────────────
-        _tab_row = QHBoxLayout()
-        _tab_row.setContentsMargins(0,0,0,0); _tab_row.setSpacing(0)
-        _tab_row.addWidget(self.tabs, 1)
-
-        # Channel butonları — Stats tab'ın sağ yanında
-        _ch_col = QVBoxLayout()
-        _ch_col.setContentsMargins(0,0,0,0); _ch_col.setSpacing(0)
-        _ch_bar = QWidget()
-        _ch_bar.setFixedHeight(30)
-        _ch_bar.setStyleSheet(f"background:{BG2};")
-        _ch_bar_lay = QHBoxLayout(_ch_bar)
-        _ch_bar_lay.setContentsMargins(4,2,4,2); _ch_bar_lay.setSpacing(2)
-        for ch, clr in [("RGB","#aaaaaa"),("R","#ff4444"),("G","#44cc44"),("B","#4488ff"),("L","#cccccc")]:
-            btn = QPushButton(ch)
-            btn.setCheckable(True)
-            btn.setFixedSize(36, 24)
-            btn.setStyleSheet(
-                f"QPushButton{{"
-                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-                f"    stop:0 {BG3}, stop:1 {BG});"
-                f"  color:{clr}; border:1px solid {BORDER};"
-                f"  border-top:1px solid {BORDER2};"
-                f"  border-radius:2px; font-size:11px; font-weight:800; padding:1px 4px;}}"
-                f"QPushButton:checked{{background:{clr};color:#000;border:1px solid {clr};}}"
-                f"QPushButton:hover{{border:1px solid {clr};background:{BG4};}}")
-            btn.clicked.connect(lambda _, c=ch: self._switch_channel(c))
-            _ch_bar_lay.addWidget(btn)
-            self._ch_view_btns[ch] = btn
-        self._ch_view_btns["RGB"].setChecked(True)
-        _ch_col.addWidget(_ch_bar)
-        _ch_col.addStretch()
-        _tab_row.addLayout(_ch_col)
-        lay.addLayout(_tab_row, 1)
+        lay.addWidget(self.tabs, 1)
 
         # ── Image tab (main) ─────────────────────────────────────────────
         # Ana sekme: SOL=resim grid, SAĞ=histogram editör (sürüklenebilir splitter)
@@ -4320,7 +4287,30 @@ class ImageViewer(QWidget):
         self._canvas_stat.setStyleSheet(f"background:{BG};")
         self.tabs.addTab(self._canvas_stat, "📈  Stats")
 
-        # Channel buttons artık _tab_row layout'unda (yukarıda, line ~4172)
+        # ── Channel buttons — Stats tab'ın hemen sağında ─────────────────
+        _ch_corner = QWidget()
+        _ch_corner.setStyleSheet("background:transparent;")
+        _ch_lay = QHBoxLayout(_ch_corner)
+        _ch_lay.setContentsMargins(4,0,4,0); _ch_lay.setSpacing(2)
+        for ch, clr in [("RGB","#aaaaaa"),("R","#ff4444"),("G","#44cc44"),("B","#4488ff"),("L","#cccccc")]:
+            btn = QPushButton(ch)
+            btn.setCheckable(True)
+            btn.setFixedSize(36, 22)
+            btn.setStyleSheet(
+                f"QPushButton{{"
+                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                f"    stop:0 {BG3}, stop:1 {BG});"
+                f"  color:{clr}; border:1px solid {BORDER};"
+                f"  border-top:1px solid {BORDER2};"
+                f"  border-radius:2px; font-size:11px; font-weight:800; padding:1px 4px;}}"
+                f"QPushButton:checked{{background:{clr};color:#000;border:1px solid {clr};}}"
+                f"QPushButton:hover{{border:1px solid {clr};background:{BG4};}}")
+            btn.clicked.connect(lambda _, c=ch: self._switch_channel(c))
+            _ch_lay.addWidget(btn)
+            self._ch_view_btns[ch] = btn
+        self._ch_view_btns["RGB"].setChecked(True)
+        _ch_corner.setFixedHeight(self.tabs.tabBar().sizeHint().height())
+        self.tabs.setCornerWidget(_ch_corner, Qt.Corner.TopRightCorner)
 
         self.cmap_cb.currentTextChanged.connect(lambda _: self._redraw_all())
         self._set_layout(1)
