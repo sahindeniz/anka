@@ -6622,10 +6622,10 @@ class AstroApp(QMainWindow):
         # Noise Reduction
         p = _make("✨","Noise Reduction","noise")
         p.add_combo("method","Method",
-                    ["silentium","mastro_noise","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
-                    "silentium",
-                    "silentium        — Veralux Silentium (wavelet, hızlı, önerilen)\n"
-                    "mastro_noise     — Mastro Noise (NAFNet AI, en iyi ama yavaş, GPU önerilir)\n"
+                    ["mastro_noise","silentium","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
+                    "mastro_noise",
+                    "mastro_noise     — Mastro Noise (NAFNet AI, en iyi kalite)\n"
+                    "silentium        — Veralux Silentium (wavelet, hızlı alternatif)\n"
                     "silentium        — Veralux Silentium (linear-phase)\n"
                     "bilateral        — Kenar-koruyucu bilateral\n"
                     "gaussian         — Gaussian bulaniklik\n"
