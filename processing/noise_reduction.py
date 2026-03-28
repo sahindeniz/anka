@@ -7,15 +7,57 @@ Astro Maestro Pro — Noise Reduction  (optimised v3)
 import cv2
 import numpy as np
 
-_MAX_PX = 768  # çalışma çözünürlüğü
+_MAX_PX = 4096  # çalışma çözünürlüğü — astro detayları korumak için yüksek tut
 
-def reduce_noise(image, strength=0.7, method="bilateral", iterations=1, **kw):
+def reduce_noise(image, strength=0.7, method="bilateral", iterations=1,
+                  progress_cb=None, **kw):
     img = np.ascontiguousarray(image, dtype=np.float32)
     np.clip(img, 0, 1, out=img)
     s = float(np.clip(strength, 0, 1))
     n = max(1, min(3, int(iterations)))
-    h, w = img.shape[:2]
+    modulation = float(kw.get("modulation", 1.0))
+    detail = float(kw.get("detail", 0.5))
 
+    # ── Harici modül dispatch ───────────────────────────────────────
+    if method == "mastro_noise":
+        try:
+            from processing.mastro_noise import process_denoise
+            result = process_denoise(img, modulation=modulation,
+                                      progress_callback=progress_cb)
+            return np.clip(result, 0, 1).astype(np.float32)
+        except Exception as e:
+            print(f"[NOISE] mastro_noise failed ({e}), fallback to bilateral", flush=True)
+            method = "bilateral"
+
+    if method == "silentium":
+        try:
+            from processing.veralux_silentium import denoise_silentium
+            result = denoise_silentium(img, strength=s)
+            return np.clip(result, 0, 1).astype(np.float32)
+        except Exception as e:
+            print(f"[NOISE] silentium failed ({e}), fallback to bilateral", flush=True)
+            method = "bilateral"
+
+    if method == "noisexterminator":
+        try:
+            from processing.noisexterminator import denoise as _nx_denoise
+            result = _nx_denoise(img, strength=s, detail_preserve=detail)
+            return np.clip(result, 0, 1).astype(np.float32)
+        except Exception as e:
+            print(f"[NOISE] noisexterminator failed ({e}), fallback to bilateral", flush=True)
+            method = "bilateral"
+
+    if method == "graxpert":
+        try:
+            from processing.graxpert_engine import graxpert_denoise
+            result = graxpert_denoise(img, strength=s)
+            return np.clip(result, 0, 1).astype(np.float32)
+        except Exception as e:
+            print(f"[NOISE] graxpert failed ({e}), fallback to bilateral", flush=True)
+            method = "bilateral"
+
+    # ── Klasik OpenCV methodlar (hızlı) ─────────────────────────────
+    h, w = img.shape[:2]
     scale = min(1.0, _MAX_PX / max(h, w, 1))
     if scale < 0.99:
         sw, sh = max(4, int(w * scale)), max(4, int(h * scale))
