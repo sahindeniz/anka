@@ -776,7 +776,7 @@ class HistogramEditorPanel(QWidget):
         self._ch_btns["L"].setChecked(True)
         ch_row.addSpacing(8)
         self._chk_link = QCheckBox("Link RGB")
-        self._chk_link.setChecked(True)
+        self._chk_link.setChecked(False)
         self._chk_link.setStyleSheet(
             f"QCheckBox{{color:{MUTED};font-size:9px;spacing:4px;}}"
             f"QCheckBox::indicator{{width:14px;height:14px;border-radius:3px;"
@@ -1026,14 +1026,23 @@ class HistogramEditorPanel(QWidget):
         return ["L"]
 
     def _schedule_preview(self):
+        import sys
+        print(f"[HIST DEBUG] _schedule_preview, live={self._chk_live.isChecked()}, img={'SET' if self._img is not None else 'NONE'}", flush=True)
         if self._chk_live.isChecked():
             self._debounce.start(50)
 
     def _emit_preview(self):
-        if self._img is None: return
+        import sys
+        if self._img is None:
+            print(f"[HIST DEBUG] _emit_preview ABORT — no image", flush=True)
+            return
+        print(f"[HIST DEBUG] _emit_preview CALLING _apply...", flush=True)
         result = self._apply(emit=False)
         if result is not None:
+            print(f"[HIST DEBUG] _emit_preview EMITTING, shape={result.shape}", flush=True)
             self.preview_changed.emit(result)
+        else:
+            print(f"[HIST DEBUG] _emit_preview — _apply returned None", flush=True)
 
     def _auto_levels(self):
         if self._img is None: return

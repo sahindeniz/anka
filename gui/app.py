@@ -490,7 +490,7 @@ class ProcessPanel(QWidget):
         # ── Live preview debounce timer ──────────────────────────────────
         self._preview_timer = QTimer()
         self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(400)  # ms
+        self._preview_timer.setInterval(300)  # ms
         self._preview_timer.timeout.connect(self._emit_preview)
 
         # ── Body ──────────────────────────────────────────────────────────
@@ -551,12 +551,16 @@ class ProcessPanel(QWidget):
 
     def _schedule_preview(self, *_args):
         """Start debounce timer if live preview is on."""
+        print(f"[LIVE DEBUG] _schedule_preview called, live_cb={self._live_cb.isChecked()}, key={self._key}", flush=True)
         if self._live_cb.isChecked():
             self._preview_timer.start()
+            print(f"[LIVE DEBUG] timer started (300ms)", flush=True)
 
     def _emit_preview(self):
         """Emit preview signal with current params."""
-        self.preview_requested.emit(self.collect())
+        params = self.collect()
+        print(f"[LIVE DEBUG] _emit_preview FIRING, key={self._key}, params={list(params.keys())}", flush=True)
+        self.preview_requested.emit(params)
 
     def add_sep(self):
         sep = QFrame(); sep.setFrameShape(QFrame.Shape.HLine)
@@ -2202,6 +2206,15 @@ class ProcessFlyout(QFrame):
         title_lbl.setStyleSheet(
             f"color:{HEAD};font-size:12px;font-weight:700;")
         hl.addWidget(title_lbl, 1)
+
+        # Live preview toggle — paneldeki checkbox'u flyout header'a taşı
+        panel._live_cb.setParent(hdr)
+        panel._live_cb.setStyleSheet(
+            f"QCheckBox{{color:{ACCENT2};font-size:12px;spacing:2px;}}"
+            f"QCheckBox::indicator{{width:14px;height:14px;border-radius:2px;"
+            f"border:1px solid {BORDER};background:{BG};}}"
+            f"QCheckBox::indicator:checked{{background:{ACCENT};border:1px solid {ACCENT2};}}")
+        hl.addWidget(panel._live_cb)
 
         close_btn = QPushButton("✕")
         close_btn.setFixedSize(22, 22)
@@ -4136,27 +4149,8 @@ class ImageViewer(QWidget):
         grp_cmap.add(cmap_lbl); grp_cmap.add(self.cmap_cb)
         self._drag_bar.add_group(grp_cmap)
 
-        # -- GROUP: Channels --
-        grp_ch = _DragGroup("channels")
+        # -- Channels — tab bar'ın yanına eklenecek (aşağıda) --
         self._ch_view_btns = {}
-        for ch, clr in [("RGB","#aaaaaa"),("R","#ff4444"),("G","#44cc44"),("B","#4488ff"),("L","#cccccc")]:
-            btn = QPushButton(ch)
-            btn.setCheckable(True)
-            btn.setFixedSize(44, _TB_H)
-            btn.setStyleSheet(
-                f"QPushButton{{"
-                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
-                f"    stop:0 {BG3}, stop:1 {BG});"
-                f"  color:{clr}; border:1px solid {BORDER};"
-                f"  border-top:1px solid {BORDER2};"
-                f"  border-radius:2px; font-size:13px; font-weight:800; padding:2px 6px;}}"
-                f"QPushButton:checked{{background:{clr};color:#000;border:1px solid {clr};}}"
-                f"QPushButton:hover{{border:1px solid {clr};background:{BG4};}}")
-            btn.clicked.connect(lambda _, c=ch: self._switch_channel(c))
-            grp_ch.add(btn)
-            self._ch_view_btns[ch] = btn
-        self._ch_view_btns["RGB"].setChecked(True)
-        self._drag_bar.add_group(grp_ch)
 
         lay.addWidget(tb)
 
@@ -4174,7 +4168,40 @@ class ImageViewer(QWidget):
             f"QTabBar::tab:selected{{color:{ACCENT2};border-bottom:2px solid {ACCENT};"
             f"  border-top:1px solid {ACCENT};}}"
             f"QTabBar::tab:hover{{color:{TEXT};background:{BG4};}}")
-        lay.addWidget(self.tabs, 1)
+        # ── Tab bar satırı: [Image | Stats] + [RGB R G B L] ──────────────
+        _tab_row = QHBoxLayout()
+        _tab_row.setContentsMargins(0,0,0,0); _tab_row.setSpacing(0)
+        _tab_row.addWidget(self.tabs, 1)
+
+        # Channel butonları — Stats tab'ın sağ yanında
+        _ch_col = QVBoxLayout()
+        _ch_col.setContentsMargins(0,0,0,0); _ch_col.setSpacing(0)
+        _ch_bar = QWidget()
+        _ch_bar.setFixedHeight(30)
+        _ch_bar.setStyleSheet(f"background:{BG2};")
+        _ch_bar_lay = QHBoxLayout(_ch_bar)
+        _ch_bar_lay.setContentsMargins(4,2,4,2); _ch_bar_lay.setSpacing(2)
+        for ch, clr in [("RGB","#aaaaaa"),("R","#ff4444"),("G","#44cc44"),("B","#4488ff"),("L","#cccccc")]:
+            btn = QPushButton(ch)
+            btn.setCheckable(True)
+            btn.setFixedSize(36, 24)
+            btn.setStyleSheet(
+                f"QPushButton{{"
+                f"  background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+                f"    stop:0 {BG3}, stop:1 {BG});"
+                f"  color:{clr}; border:1px solid {BORDER};"
+                f"  border-top:1px solid {BORDER2};"
+                f"  border-radius:2px; font-size:11px; font-weight:800; padding:1px 4px;}}"
+                f"QPushButton:checked{{background:{clr};color:#000;border:1px solid {clr};}}"
+                f"QPushButton:hover{{border:1px solid {clr};background:{BG4};}}")
+            btn.clicked.connect(lambda _, c=ch: self._switch_channel(c))
+            _ch_bar_lay.addWidget(btn)
+            self._ch_view_btns[ch] = btn
+        self._ch_view_btns["RGB"].setChecked(True)
+        _ch_col.addWidget(_ch_bar)
+        _ch_col.addStretch()
+        _tab_row.addLayout(_ch_col)
+        lay.addLayout(_tab_row, 1)
 
         # ── Image tab (main) ─────────────────────────────────────────────
         # Ana sekme: SOL=resim grid, SAĞ=histogram editör (sürüklenebilir splitter)
@@ -4292,6 +4319,8 @@ class ImageViewer(QWidget):
         self._canvas_stat = FigureCanvas(self._fig_stat)
         self._canvas_stat.setStyleSheet(f"background:{BG};")
         self.tabs.addTab(self._canvas_stat, "📈  Stats")
+
+        # Channel buttons artık _tab_row layout'unda (yukarıda, line ~4172)
 
         self.cmap_cb.currentTextChanged.connect(lambda _: self._redraw_all())
         self._set_layout(1)
@@ -4590,6 +4619,7 @@ class ImageViewer(QWidget):
 
     def _on_hist_preview(self, result):
         """Live preview — throttled to avoid excessive redraws."""
+        print(f"[HIST DEBUG] _on_hist_preview received, shape={result.shape if hasattr(result,'shape') else '?'}", flush=True)
         self._pending_preview = np.clip(result, 0, 1).astype(np.float32)
         if not hasattr(self, '_hist_preview_timer'):
             from PyQt6.QtCore import QTimer
@@ -4602,6 +4632,7 @@ class ImageViewer(QWidget):
 
     def _flush_hist_preview(self):
         """Throttled histogram preview flush."""
+        print(f"[HIST DEBUG] _flush_hist_preview called", flush=True)
         if hasattr(self, '_pending_preview') and self._pending_preview is not None:
             slot = self._active
             self._preview_img = self._pending_preview
@@ -5764,6 +5795,7 @@ class AstroApp(QMainWindow):
             ("bg",      "🌌","BG Extract"),
             ("noise",   "✨","Noise"),
             ("deconv",  "🔭","Deconv"),
+            ("stars",   "⭐","Stars"),
             ("sharp",   "🔪","Sharpen"),
             ("nebula",  "🌠","Nebula"),
             ("color",   "🎨","Color"),
@@ -6270,15 +6302,8 @@ class AstroApp(QMainWindow):
         for k, b in self._proc_btns.items():
             b.setChecked(k == key)
 
-        # Bazi butonlar birden fazla panel gosterir
-        extra_panels = []
-        if key == "deconv":
-            stars_panel = self._panels.get("stars")
-            if stars_panel:
-                extra_panels = [stars_panel]
-
         # Create flyout
-        flyout = ProcessFlyout(panel, btn, parent=self, extra_panels=extra_panels)
+        flyout = ProcessFlyout(panel, btn, parent=self)
 
         def _on_flyout_closed():
             btn.setChecked(False)
@@ -7989,13 +8014,25 @@ class AstroApp(QMainWindow):
 
     # ── Live Preview (parametre değişince anında göster) ────────────────
     def _run_preview(self, key, params):
-        """Run process as preview — result shown but NOT saved to history."""
+        """Run process as preview — result shown but NOT saved to history.
+        Önceki preview worker'ını iptal eder (live preview için)."""
+        print(f"[LIVE DEBUG] _run_preview called, key={key}, current={'SET' if self._current is not None else 'NONE'}", flush=True)
         if self._current is None:
+            print(f"[LIVE DEBUG] _run_preview ABORTED — no image", flush=True)
             return
-        # Eğer zaten bir worker çalışıyorsa, sıraya koyma
-        active = [w for w in self._workers if w.isRunning()]
-        if active:
-            return
+
+        # Çalışan preview worker'larını iptal et (live preview'da katlanmayı önle)
+        for w in list(self._workers):
+            if w.isRunning():
+                w.quit()
+                w.wait(200)
+                try: self._workers.remove(w)
+                except ValueError: pass
+
+        # Panel progress'i resetle
+        panel = self._panels.get(key)
+        if panel:
+            panel.set_running(False)
 
         self.status.showMessage(f"👁  {key} önizleme…")
 
