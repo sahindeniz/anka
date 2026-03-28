@@ -568,12 +568,8 @@ def stack_aligned(
 
     cb(8, f"✅ Stacking tamamlandi — {n} kare birlestirildi")
 
-    # ── Otomatik arka plan nötralizasyonu ─────────────────────────────
-    # Stacking sonrası ışık kirliliği / sensör glow kaynaklı renk sapmasını düzelt
-    # Sadece RGB görüntülerde uygula
-    if result.ndim == 3 and result.shape[2] >= 3:
-        result = _neutralize_background(result)
-        cb(9, "Arka plan nötralize edildi")
+    # Arka plan nötralizasyonu stacking'de YAPILMAZ — renk oranlarını bozar.
+    # Kullanıcı bunu ayrı "BG Siyah" panelinden manuel olarak uygular.
 
     return {
         "result": result,
