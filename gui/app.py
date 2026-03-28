@@ -6622,9 +6622,10 @@ class AstroApp(QMainWindow):
         # Noise Reduction
         p = _make("✨","Noise Reduction","noise")
         p.add_combo("method","Method",
-                    ["mastro_noise","silentium","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
-                    "mastro_noise",
-                    "mastro_noise     — Mastro Noise (NAFNet AI, en iyi)\n"
+                    ["silentium","mastro_noise","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
+                    "silentium",
+                    "silentium        — Veralux Silentium (wavelet, hızlı, önerilen)\n"
+                    "mastro_noise     — Mastro Noise (NAFNet AI, en iyi ama yavaş, GPU önerilir)\n"
                     "silentium        — Veralux Silentium (linear-phase)\n"
                     "bilateral        — Kenar-koruyucu bilateral\n"
                     "gaussian         — Gaussian bulaniklik\n"
@@ -7956,7 +7957,7 @@ class AstroApp(QMainWindow):
                     pcb = kw.get("_progress_cb")
                     def _cb(v):
                         if pcb: pcb(f"[{v}/100] Mastro Noise…", step=v, total=100)
-                    r = process_denoise(img, tile=512, overlap=64,
+                    r = process_denoise(img, tile=256, overlap=32,
                                         modulation=modulation, use_gpu=True,
                                         progress_callback=_cb)
                     return _np.clip(r, 0, 1).astype("float32")
