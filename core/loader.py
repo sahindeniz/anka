@@ -9,6 +9,17 @@ import cv2 as _cv2
 _CV2_IMREAD_ORIG = _cv2.imread
 
 
+def _needs_unicode_imread_fallback(path: str) -> bool:
+    """Only use the byte-buffer fallback for Windows Unicode paths."""
+    if os.name != "nt":
+        return False
+    try:
+        path.encode("ascii")
+        return False
+    except UnicodeEncodeError:
+        return True
+
+
 def _fix_hot_pixels_bayer(raw, sigma=5.0):
     """Raw Bayer veride hot/dead pixel temizleme — debayer'dan ÖNCE çağrılır.
     Her piksel kendi Bayer kanalındaki komşularıyla (2px uzak) karşılaştırılır."""
@@ -64,6 +75,9 @@ def read_image_file(path: str, flags: int):
     if data is not None:
         return data
 
+    if not _needs_unicode_imread_fallback(path):
+        return None
+
     try:
         raw = np.fromfile(path, dtype=np.uint8)
     except OSError:
@@ -92,7 +106,7 @@ def load_image(path: str) -> np.ndarray:
     ext = os.path.splitext(path)[1].lower()
     orig_dtype = None   # orijinal veri tipi (normalize icin)
 
-    # ── FITS ──────────────────────────────────────────────────────────────
+    # â”€â”€ FITS â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if ext in (".fits", ".fit", ".fts"):
         from astropy.io import fits
         import cv2
@@ -124,32 +138,32 @@ def load_image(path: str) -> np.ndarray:
                 if val in ("RGGB", "BGGR", "GRBG", "GBRG"):
                     bayer_pat = val
                     break
-            # Header'da yoksa otomatik tespit — SADECE ham integer veri için
-            # float32 = zaten işlenmiş veri, debayer uygulanmaz
+            # Header'da yoksa otomatik tespit â€” SADECE ham integer veri iÃ§in
+            # float32 = zaten iÅŸlenmiÅŸ veri, debayer uygulanmaz
             if (bayer_pat is None
                     and orig_dtype in (np.uint8, np.uint16, np.uint32)
                     and img.shape[0] % 2 == 0 and img.shape[1] % 2 == 0):
-                # 2x2 blok varyansı kontrol et — Bayer desende yüksek olur
+                # 2x2 blok varyansÄ± kontrol et â€” Bayer desende yÃ¼ksek olur
                 h2, w2 = img.shape[0] // 2, img.shape[1] // 2
                 block = img[:h2*2, :w2*2].reshape(h2, 2, w2, 2)
-                ch_means = block.mean(axis=(0, 2))  # 2x2 kanal ortalamaları
+                ch_means = block.mean(axis=(0, 2))  # 2x2 kanal ortalamalarÄ±
                 ch_range = ch_means.max() - ch_means.min()
                 img_range = img.max() - img.min()
                 if img_range > 1e-6 and ch_range / img_range > 0.05:
-                    bayer_pat = "RGGB"  # en yaygın DSLR/CMOS deseni
+                    bayer_pat = "RGGB"  # en yaygÄ±n DSLR/CMOS deseni
 
             if bayer_pat is not None:
-                # Normalize → uint16
+                # Normalize â†’ uint16
                 mx = img.max()
                 if mx > 0:
                     img_u16 = (img / mx * 65535).astype(np.uint16)
                 else:
                     img_u16 = img.astype(np.uint16)
 
-                # 1) Hot/dead pixel temizle — debayer'dan ÖNCE (kritik!)
+                # 1) Hot/dead pixel temizle â€” debayer'dan Ã–NCE (kritik!)
                 img_u16 = _fix_hot_pixels_bayer(img_u16, sigma=5.0)
 
-                # 2) Debayer — EA (Edge-Aware)
+                # 2) Debayer â€” EA (Edge-Aware)
                 bayer_map_ea = {
                     "RGGB": cv2.COLOR_BAYER_RG2RGB_EA,
                     "BGGR": cv2.COLOR_BAYER_BG2RGB_EA,
@@ -171,7 +185,7 @@ def load_image(path: str) -> np.ndarray:
                 if mx > 0:
                     img = img / 65535.0 * mx
 
-    # ── XISF (PixInsight) ────────────────────────────────────────────────
+    # â”€â”€ XISF (PixInsight) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     elif ext == ".xisf":
         try:
             from xisf import XISF
@@ -186,7 +200,7 @@ def load_image(path: str) -> np.ndarray:
         except ImportError:
             raise ImportError("XISF format icin: pip install xisf")
 
-    # ── RAW (rawpy) ──────────────────────────────────────────────────────
+    # â”€â”€ RAW (rawpy) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     elif ext in _RAW_EXTS:
         try:
             import rawpy
@@ -197,7 +211,7 @@ def load_image(path: str) -> np.ndarray:
         except ImportError:
             raise ImportError("RAW format icin: pip install rawpy")
 
-    # ── Standard bitmap (PNG/TIFF/JPEG/BMP/WebP/GIF/HDR/EXR …) ──────────
+    # â”€â”€ Standard bitmap (PNG/TIFF/JPEG/BMP/WebP/GIF/HDR/EXR â€¦) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     else:
         import cv2
         if ext in (".hdr", ".exr"):
@@ -214,9 +228,9 @@ def load_image(path: str) -> np.ndarray:
         else:
             img = cv2.cvtColor(data, cv2.COLOR_BGR2RGB)
 
-    # ── Normalise to [0,1] — veri tipine gore mutlak olcekle ─────────────
+    # â”€â”€ Normalise to [0,1] â€” veri tipine gore mutlak olcekle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Mutlak olcekleme: dark frame 0.02 ise 0.02 olarak kalir.
-    # Min-max KULLANILMAZ — kalibrasyon kareleri bozulur.
+    # Min-max KULLANILMAZ â€” kalibrasyon kareleri bozulur.
     if orig_dtype == np.uint8:
         img = img.astype(np.float32) / 255.0
     elif orig_dtype == np.uint16:
@@ -230,7 +244,7 @@ def load_image(path: str) -> np.ndarray:
         if mx > 1.5:
             img /= mx
     else:
-        # Bilinmeyen dtype — guvenli normalize
+        # Bilinmeyen dtype â€” guvenli normalize
         img = img.astype(np.float32)
         mx = img.max()
         if mx > 1.0:
