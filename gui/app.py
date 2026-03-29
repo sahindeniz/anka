@@ -6314,7 +6314,13 @@ class AstroApp(QMainWindow):
     def _choose_working_dir(self):
         """Çalışma klasörü seç — Open/Save için varsayılan olur."""
         start = self._working_dir or self._settings.get("last_open_dir", "")
-        d = QFileDialog.getExistingDirectory(self, "Çalışma Klasörü Seç", start)
+        dlg = QFileDialog(self, "Çalışma Klasörü Seç", start)
+        dlg.setFileMode(QFileDialog.FileMode.Directory)
+        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        if not dlg.exec():
+            return
+        selected = dlg.selectedFiles()
+        d = selected[0] if selected else ""
         if not d:
             return
         self._working_dir = d
