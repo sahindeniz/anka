@@ -22,6 +22,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
 
 _N_WORKERS = max(1, min(multiprocessing.cpu_count(), 8))
+_ANALYSIS_MAX_DIM = 960
+_ECC_MAX_DIM = 768
+_BLOB_DETECTOR = None
+_ORB_DETECTOR = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  YARDIMCI FONKSIYONLAR
@@ -32,6 +36,64 @@ def _to_gray_float(img: np.ndarray) -> np.ndarray:
     if img.ndim == 2:
         return img.astype(np.float32)
     return cv2.cvtColor(img.astype(np.float32), cv2.COLOR_RGB2GRAY)
+
+
+def _resize_for_analysis(img: np.ndarray, max_dim: int = _ANALYSIS_MAX_DIM) -> Tuple[np.ndarray, np.ndarray]:
+    """Downsample large frames for scoring/alignment and return full-res scale factors."""
+    h, w = img.shape[:2]
+    longest = max(h, w)
+    if longest <= max_dim or max_dim <= 0:
+        return img.astype(np.float32, copy=False), np.array([1.0, 1.0], dtype=np.float64)
+
+    scale = float(max_dim) / float(longest)
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(img.astype(np.float32, copy=False), (new_w, new_h), interpolation=cv2.INTER_AREA)
+    scale_back = np.array([w / float(new_w), h / float(new_h)], dtype=np.float64)
+    return resized, scale_back
+
+
+def _scale_affine_to_full_res(M: np.ndarray, src_scale: np.ndarray, dst_scale: np.ndarray) -> np.ndarray:
+    """Convert affine estimated on downsampled images back to full-resolution coordinates."""
+    H_small = np.eye(3, dtype=np.float64)
+    H_small[:2, :] = M
+    S_src = np.diag([float(src_scale[0]), float(src_scale[1]), 1.0])
+    S_dst = np.diag([float(dst_scale[0]), float(dst_scale[1]), 1.0])
+    return S_dst @ H_small @ np.linalg.inv(S_src)
+
+
+def _get_blob_detector():
+    global _BLOB_DETECTOR
+    if _BLOB_DETECTOR is not None:
+        return _BLOB_DETECTOR
+
+    params = cv2.SimpleBlobDetector_Params()
+    params.filterByColor = True
+    params.blobColor = 255
+    params.filterByArea = True
+    params.minArea = 3
+    params.maxArea = 500
+    params.filterByCircularity = True
+    params.minCircularity = 0.3
+    params.filterByConvexity = False
+    params.filterByInertia = False
+    _BLOB_DETECTOR = cv2.SimpleBlobDetector_create(params)
+    return _BLOB_DETECTOR
+
+
+def _get_orb_detector():
+    global _ORB_DETECTOR
+    if _ORB_DETECTOR is not None:
+        return _ORB_DETECTOR
+    _ORB_DETECTOR = cv2.ORB_create(
+        nfeatures=2500,
+        scaleFactor=1.2,
+        nlevels=8,
+        edgeThreshold=31,
+        patchSize=31,
+        fastThreshold=5,
+    )
+    return _ORB_DETECTOR
 
 
 def _enhance_for_detection(gray: np.ndarray) -> np.ndarray:
@@ -58,18 +120,18 @@ def _compute_homography(
     cache: Optional[dict] = None,
     frame_num: int = 0,
 ) -> Tuple[Optional[np.ndarray], dict]:
-    """AKAZE feature detection + AffinePartial2D (translation + rotation + scale).
+    """Fast feature alignment on downsampled previews + AffinePartial2D.
     Rotasyon destekli — ters/döndürülmüş kareler de hizalanır.
     Returns: (H_3x3, info_dict)"""
 
-    next_gray = _to_gray_float(next_img)
-    base_gray = _to_gray_float(base_img)
+    next_gray, next_scale = _resize_for_analysis(_to_gray_float(next_img), _ANALYSIS_MAX_DIM)
+    base_gray, base_scale = _resize_for_analysis(_to_gray_float(base_img), _ANALYSIS_MAX_DIM)
 
     next_enh = _enhance_for_detection(next_gray)
     base_enh = _enhance_for_detection(base_gray)
 
-    # AKAZE — binary descriptor, robust
-    alg = cv2.AKAZE_create(threshold=0.0005)
+    # ORB on downsampled previews is much faster than full-res AKAZE
+    alg = _get_orb_detector()
 
     kp1, des1 = alg.detectAndCompute(next_enh, None)
 
@@ -88,7 +150,7 @@ def _compute_homography(
             "n_matches": 0, "inlier_ratio": 0.0,
             "rotation_deg": 0.0, "scale": 1.0, "tx": 0.0, "ty": 0.0}
 
-    if des1 is None or des2 is None or len(kp1) < 4 or len(kp2) < 4:
+    if des1 is None or des2 is None or len(kp1) < 8 or len(kp2) < 8:
         return None, info
 
     # BFMatcher — kNN + Lowe's ratio test
@@ -99,11 +161,11 @@ def _compute_homography(
     for m_pair in raw_matches:
         if len(m_pair) == 2:
             m, n = m_pair
-            if m.distance < 0.75 * n.distance:
+            if m.distance < 0.80 * n.distance:
                 good.append(m)
 
     info["n_matches"] = len(good)
-    if len(good) < 6:
+    if len(good) < 8:
         return None, info
 
     pts1 = np.float32([kp1[m.queryIdx].pt for m in good])
@@ -137,44 +199,50 @@ def _compute_homography(
         return None, info
 
     # 2x3 → 3x3
-    H = np.eye(3, dtype=np.float64)
-    H[:2, :] = M
+    H = _scale_affine_to_full_res(M, next_scale, base_scale)
     return H, info
 
 
 def _warp_image(img: np.ndarray, H: np.ndarray) -> np.ndarray:
     """Homography ile görüntü dönüşümü."""
     h, w = img.shape[:2]
-    return cv2.warpPerspective(img, H, (w, h), flags=cv2.INTER_LANCZOS4,
-                               borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    if H.shape == (3, 3) and np.allclose(H[2], [0.0, 0.0, 1.0], atol=1e-6):
+        return cv2.warpAffine(
+            img,
+            H[:2, :],
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+    return cv2.warpPerspective(
+        img,
+        H,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
 
 
 def _ecc_fallback(img: np.ndarray, base: np.ndarray) -> Optional[np.ndarray]:
     """ECC (Enhanced Correlation Coefficient) hizalama — AKAZE başarısız olursa.
     EUCLIDEAN model — rotasyon destekler."""
     try:
-        g1 = _enhance_for_detection(_to_gray_float(img))
-        g2 = _enhance_for_detection(_to_gray_float(base))
-
-        scale = 0.25
-        h, w = g1.shape[:2]
-        small1 = cv2.resize(g1, (int(w * scale), int(h * scale)))
-        small2 = cv2.resize(g2, (int(w * scale), int(h * scale)))
+        g1_small, src_scale = _resize_for_analysis(_to_gray_float(img), _ECC_MAX_DIM)
+        g2_small, dst_scale = _resize_for_analysis(_to_gray_float(base), _ECC_MAX_DIM)
+        g1_small = _enhance_for_detection(g1_small)
+        g2_small = _enhance_for_detection(g2_small)
 
         warp_matrix = np.eye(2, 3, dtype=np.float32)
         criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 300, 1e-7)
         _, warp_matrix = cv2.findTransformECC(
-            small2.astype(np.float32), small1.astype(np.float32),
+            g2_small.astype(np.float32), g1_small.astype(np.float32),
             warp_matrix, cv2.MOTION_EUCLIDEAN, criteria,
             inputMask=None, gaussFiltSize=5
         )
 
-        warp_matrix[0, 2] /= scale
-        warp_matrix[1, 2] /= scale
-
-        H = np.eye(3, dtype=np.float64)
-        H[:2, :] = warp_matrix
-        return H
+        return _scale_affine_to_full_res(warp_matrix, src_scale, dst_scale)
     except cv2.error:
         return None
 
@@ -587,8 +655,11 @@ def _auto_select_rejection(n_frames: int) -> str:
         return "linear_fit"
     elif n_frames <= 32:
         return "sigma_clip"
-    else:
+    elif n_frames <= 96:
         return "winsorized_sigma"
+    else:
+        # Large stacks benefit more from the lighter sigma-clip path.
+        return "sigma_clip"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -597,29 +668,19 @@ def _auto_select_rejection(n_frames: int) -> str:
 
 def score_frame(img: np.ndarray) -> dict:
     """Kare kalite skoru — yıldız sayısı + FWHM + SNR + roundness."""
-    gray = _to_gray_float(img)
+    gray_full = _to_gray_float(img)
+    gray, scale_back = _resize_for_analysis(gray_full, _ANALYSIS_MAX_DIM)
     thr8 = _enhance_for_detection(gray)
 
     # Blob detection — yıldız tespiti
-    params = cv2.SimpleBlobDetector_Params()
-    params.filterByColor = True
-    params.blobColor = 255
-    params.filterByArea = True
-    params.minArea = 3
-    params.maxArea = 500
-    params.filterByCircularity = True
-    params.minCircularity = 0.3
-    params.filterByConvexity = False
-    params.filterByInertia = False
-
-    detector = cv2.SimpleBlobDetector_create(params)
+    detector = _get_blob_detector()
     kps = detector.detect(thr8)
     star_count = len(kps)
 
     fwhm = 0.0
     roundness = 1.0
     if kps:
-        fwhm = float(np.mean([k.size for k in kps]))
+        fwhm = float(np.mean([k.size for k in kps]) * float(np.mean(scale_back)))
 
     # SNR tahmini — robust (MAD bazlı)
     valid = gray > 1e-6
