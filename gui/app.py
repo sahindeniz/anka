@@ -573,15 +573,12 @@ class ProcessPanel(QWidget):
 
     def _schedule_preview(self, *_args):
         """Start debounce timer if live preview is on."""
-        print(f"[LIVE DEBUG] _schedule_preview called, live_cb={self._live_cb.isChecked()}, key={self._key}", flush=True)
         if self._live_cb.isChecked():
             self._preview_timer.start()
-            print(f"[LIVE DEBUG] timer started (300ms)", flush=True)
 
     def _emit_preview(self):
         """Emit preview signal with current params."""
         params = self.collect()
-        print(f"[LIVE DEBUG] _emit_preview FIRING, key={self._key}, params={list(params.keys())}", flush=True)
         self.preview_requested.emit(params)
 
     def add_sep(self):
@@ -4862,7 +4859,6 @@ class ImageViewer(QWidget):
 
     def _on_hist_preview(self, result):
         """Live preview — throttled to avoid excessive redraws."""
-        print(f"[HIST DEBUG] _on_hist_preview received, shape={result.shape if hasattr(result,'shape') else '?'}", flush=True)
         self._pending_preview = np.clip(result, 0, 1).astype(np.float32)
         if not hasattr(self, '_hist_preview_timer'):
             from PyQt6.QtCore import QTimer
@@ -4875,7 +4871,6 @@ class ImageViewer(QWidget):
 
     def _flush_hist_preview(self):
         """Throttled histogram preview flush."""
-        print(f"[HIST DEBUG] _flush_hist_preview called", flush=True)
         if hasattr(self, '_pending_preview') and self._pending_preview is not None:
             slot = self._active
             self._preview_img = self._pending_preview
@@ -8014,7 +8009,6 @@ class AstroApp(QMainWindow):
     # ── Process key→function dispatch ───────────────────────────────────
     def _run_key(self, key, params, preview_only=False):
         """Dispatch process key to the correct function (no forward-ref issue)."""
-        print(f"[DEBUG _run_key] key={key}, params_keys={list(params.keys())}")
         self._preview_only = preview_only
         _dispatch = {
             "bg":      ("processing.background",       "remove_gradient_dispatch"),
@@ -8513,13 +8507,11 @@ class AstroApp(QMainWindow):
             self._run_worker(key, fn, params)
 
     def _run_worker(self, key, fn, params):
-        print(f"[DEBUG _run_worker] key={key}, fn={fn.__name__ if hasattr(fn,'__name__') else fn}, current={'set' if self._current is not None else 'None'}")
         if self._current is None:
             QMessageBox.information(self,"Info","Please open an image first."); return
 
         active = [w for w in self._workers if w.isRunning()]
         if active:
-            print(f"[DEBUG _run_worker] BLOCKED — {len(active)} workers still running")
             self.status.showMessage("⚠  A process is already running. Please wait…"); return
 
         panel = self._panels.get(key)
@@ -8628,9 +8620,7 @@ class AstroApp(QMainWindow):
     def _run_preview(self, key, params):
         """Run process as preview — result shown but NOT saved to history.
         Önceki preview worker'ını iptal eder (live preview için)."""
-        print(f"[LIVE DEBUG] _run_preview called, key={key}, current={'SET' if self._current is not None else 'NONE'}", flush=True)
         if self._current is None:
-            print(f"[LIVE DEBUG] _run_preview ABORTED — no image", flush=True)
             return
 
         # Çalışan preview worker'larını iptal et (live preview'da katlanmayı önle)
