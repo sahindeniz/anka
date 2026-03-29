@@ -326,69 +326,69 @@ def _normalize_frames(frames: List[np.ndarray], masks: List[np.ndarray],
                       mode: str = "additive_scaling",
                       work_dtype: np.dtype = np.float32,
                       allow_float16_fallback: bool = True) -> List[np.ndarray]:
-    """Kareleri normalize et — farklı gökyüzü parlaklıklarını eşitle.
-    mode:
-      'additive_scaling' — PixInsight varsayılan: location + scale eşitleme
-      'multiplicative'   — Çarpımsal normalizasyon
-      'none'             — Normalizasyon yok
-    """
+    """Kareleri per-channel normalize et — renk dengesini korur.
+    Tüm işlemler in-place, ekstra kopya oluşturmaz."""
     if mode == "none" or len(frames) < 2:
         return frames
 
-    # Referans: ilk karenin istatistikleri
-    stats = []
-    for fr, msk in zip(frames, masks):
-        gray = _to_gray_float(fr) if fr.ndim == 3 else fr.astype(np.float32)
-        valid = msk > 0.5
-        if np.sum(valid) < 100:
-            stats.append((0.0, 1.0))
-        else:
-            data = gray[valid]
-            med = float(np.median(data))
-            mad = float(np.median(np.abs(data - med)))
-            scale = max(mad * 1.4826, 1e-10)
-            stats.append((med, scale))
-
-    ref_med, ref_scale = stats[0]
-
+    is_color = frames[0].ndim == 3
+    n_ch = frames[0].shape[2] if is_color else 1
     target_dtype = np.dtype(work_dtype)
     if target_dtype not in (np.dtype(np.float32), np.dtype(np.float16)):
         target_dtype = np.dtype(np.float32)
 
+    # Per-channel istatistikler — sampling ile hızlı
+    stats = []  # list of (meds_per_ch, scales_per_ch)
+    for fr, msk in zip(frames, masks):
+        valid = msk > 0.5
+        n_valid = int(np.sum(valid))
+        if n_valid < 100:
+            stats.append((np.zeros(n_ch, np.float32), np.ones(n_ch, np.float32)))
+            continue
+        meds = np.zeros(n_ch, dtype=np.float32)
+        scales = np.ones(n_ch, dtype=np.float32)
+        for c in range(n_ch):
+            ch = fr[:, :, c] if is_color else fr
+            data = ch[valid]
+            if len(data) > 300000:
+                idx = np.random.choice(len(data), 300000, replace=False)
+                data = data[idx]
+            med = float(np.median(data))
+            mad = float(np.median(np.abs(data - med)))
+            meds[c] = med
+            scales[c] = max(mad * 1.4826, 1e-10)
+        stats.append((meds, scales))
+
+    ref_meds, ref_scales = stats[0]
+
     normalized = []
-    for i, (fr, (med, scale)) in enumerate(zip(frames, stats)):
+    for i, (fr, (meds, scales)) in enumerate(zip(frames, stats)):
         if i == 0:
             normalized.append(fr)
             continue
 
-        # Bellek kullanımını düşük tutmak için mümkün olduğunca float32 üzerinde
-        # çalış. copy=False, kaynak zaten float32 ise gereksiz bir kopyayı önler.
         try:
             out = fr.astype(target_dtype, copy=False)
         except MemoryError:
             if not allow_float16_fallback or target_dtype == np.dtype(np.float16):
                 raise
-            # float32 kopyası için RAM yetmiyorsa geçici olarak float16'ya düş.
             out = fr.astype(np.float16, copy=False)
-            target_dtype = np.dtype(np.float16)
 
-        if mode == "multiplicative":
-            # Çarpımsal: img * (ref_med / med)
-            if med > 1e-10:
-                factor = target_dtype.type(ref_med / med)
-                out = out * factor
+        scalar_t = out.dtype.type
+
+        for c in range(n_ch):
+            ch = out[:, :, c] if is_color else out
+            if mode == "multiplicative":
+                if meds[c] > 1e-10:
+                    np.multiply(ch, scalar_t(ref_meds[c] / meds[c]), out=ch, casting="unsafe")
+                else:
+                    np.add(ch, scalar_t(ref_meds[c] - meds[c]), out=ch, casting="unsafe")
             else:
-                out = out + target_dtype.type(ref_med - med)
-        else:
-            # Additive with scaling (PI varsayılan)
-            # img = (img - med) * (ref_scale / scale) + ref_med
-            if scale > 1e-10:
-                # Ara çıktıları float32 tutmak için işlemi adım adım uygula.
-                np.subtract(out, target_dtype.type(med), out=out, casting="unsafe")
-                np.multiply(out, target_dtype.type(ref_scale / scale), out=out, casting="unsafe")
-                np.add(out, target_dtype.type(ref_med), out=out, casting="unsafe")
+                if scales[c] > 1e-10:
+                    np.subtract(ch, scalar_t(meds[c]), out=ch, casting="unsafe")
+                    np.multiply(ch, scalar_t(ref_scales[c] / scales[c]), out=ch, casting="unsafe")
+                    np.add(ch, scalar_t(ref_meds[c]), out=ch, casting="unsafe")
 
-        # np.clip(out=...) ile ek bir büyük ara dizi oluşturma.
         np.clip(out, 0, None, out=out)
         normalized.append(out)
 
@@ -456,55 +456,85 @@ def _compute_weights(frames: List[np.ndarray], masks: List[np.ndarray],
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _stack_weighted_mean(frames: List[np.ndarray], masks: List[np.ndarray],
-                         valid_mask: np.ndarray,
+                         valid_mask: Optional[np.ndarray],
                          weights: np.ndarray) -> np.ndarray:
-    """Ağırlıklı ortalama — valid_mask ile reddetme uygulanmış."""
-    n = len(frames)
+    """Ağırlıklı ortalama — in-place ops ile minimum RAM."""
     is_color = frames[0].ndim == 3
     accumulator = np.zeros_like(frames[0], dtype=np.float32)
     weight_sum = np.zeros(frames[0].shape[:2], dtype=np.float32)
+    # Tek bir temp buffer — her iterasyonda yeniden kullan
+    tmp = np.empty_like(frames[0], dtype=np.float32)
 
     for i, (fr, msk) in enumerate(zip(frames, masks)):
-        # valid_mask[i] ve msk ikisi de geçerli olmalı
-        combined = (msk > 0.5) & valid_mask[i]
-        w = float(weights[i])
+        combined = msk > 0.5
+        if valid_mask is not None:
+            combined = combined & valid_mask[i]
+        w = np.float32(weights[i])
         if is_color:
-            m3 = combined[:, :, np.newaxis].astype(np.float32)
-            accumulator += fr.astype(np.float32, copy=False) * m3 * w
+            # tmp = fr * w  (in-place)
+            np.multiply(fr, w, out=tmp, casting="unsafe")
+            # tmp *= mask (broadcast, in-place)
+            m3 = combined[:, :, np.newaxis]
+            np.multiply(tmp, m3, out=tmp)
+            accumulator += tmp
         else:
-            accumulator += fr.astype(np.float32, copy=False) * combined.astype(np.float32) * w
-        weight_sum += combined.astype(np.float32) * w
+            np.multiply(fr, w, out=tmp, casting="unsafe")
+            np.multiply(tmp, combined, out=tmp)
+            accumulator += tmp
+        weight_sum += combined * w
 
+    del tmp
     weight_sum[weight_sum == 0] = 1
     if is_color:
-        return accumulator / weight_sum[:, :, np.newaxis]
-    return accumulator / weight_sum
+        accumulator /= weight_sum[:, :, np.newaxis]
+    else:
+        accumulator /= weight_sum
+    return accumulator
 
 
-def _reject_sigma_clip(frames: List[np.ndarray], masks: List[np.ndarray],
+def _build_valid_mask_stack(masks: List[np.ndarray]) -> np.ndarray:
+    """Maskeleri tek bir bool stack içine çevir."""
+    valid = np.empty((len(masks),) + masks[0].shape, dtype=bool)
+    for i, msk in enumerate(masks):
+        np.greater(msk, 0.5, out=valid[i])
+    return valid
+
+
+def _fill_luminance_block(frames: List[np.ndarray], y0: int, y1: int, out: np.ndarray) -> None:
+    """Verilen satır aralığı için luminance bloğunu doldur."""
+    if frames[0].ndim == 3:
+        n_ch = frames[0].shape[2]
+        coeffs = (
+            np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
+            if n_ch == 3 else
+            np.full(n_ch, 1.0 / max(n_ch, 1), dtype=np.float32)
+        )
+        scratch = np.empty(out.shape[1:], dtype=np.float32)
+        for i, fr in enumerate(frames):
+            block = fr[y0:y1]
+            np.multiply(block[:, :, 0], coeffs[0], out=out[i], casting="unsafe")
+            for c in range(1, n_ch):
+                np.multiply(block[:, :, c], coeffs[c], out=scratch, casting="unsafe")
+                np.add(out[i], scratch, out=out[i])
+    else:
+        for i, fr in enumerate(frames):
+            np.copyto(out[i], fr[y0:y1], casting="unsafe")
+
+
+def _reject_sigma_clip(frames: List[np.ndarray], valid: np.ndarray,
                        kappa_low: float = 2.5, kappa_high: float = 2.5,
                        iterations: int = 3) -> np.ndarray:
     """Sigma Clipping — PixInsight tarzı, luminance bazlı renk koruyucu.
     Asimetrik: kappa_low (karanlık outlier), kappa_high (parlak outlier — uydu/uçak)."""
-    n = len(frames)
     h, w = frames[0].shape[:2]
-    is_color = frames[0].ndim == 3
-
-    # valid_mask: (n, h, w) boolean — her piksel-kare için geçerli mi
-    valid = np.stack([m > 0.5 for m in masks], axis=0)  # (n, h, w)
+    n = len(frames)
 
     block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
-        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        lum = np.empty((n, y1 - y0, w), dtype=np.float32)
+        _fill_luminance_block(frames, y0, y1, lum)
         v_block = valid[:, y0:y1, :]  # (n, bh, w)
-
-        # Luminance bazlı karar (renk koruyucu)
-        if is_color:
-            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
-        else:
-            lum = block.squeeze(-1) if block.ndim == 4 else block
 
         for _ in range(iterations):
             vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
@@ -522,27 +552,19 @@ def _reject_sigma_clip(frames: List[np.ndarray], masks: List[np.ndarray],
     return valid
 
 
-def _reject_linear_fit(frames: List[np.ndarray], masks: List[np.ndarray],
+def _reject_linear_fit(frames: List[np.ndarray], valid: np.ndarray,
                        kappa_low: float = 3.0, kappa_high: float = 3.0) -> np.ndarray:
     """Linear Fit Clipping — az sayıda kare (5-10) için ideal.
     Her pikselde lineer model fit eder, modelden sapmayı reddeder."""
     n = len(frames)
     h, w = frames[0].shape[:2]
-    is_color = frames[0].ndim == 3
-
-    valid = np.stack([m > 0.5 for m in masks], axis=0)  # (n, h, w)
 
     block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
-        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        lum = np.empty((n, y1 - y0, w), dtype=np.float32)
+        _fill_luminance_block(frames, y0, y1, lum)
         v_block = valid[:, y0:y1, :]
-
-        if is_color:
-            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
-        else:
-            lum = block.squeeze(-1) if block.ndim == 4 else block
 
         # Median baseline
         vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
@@ -563,27 +585,19 @@ def _reject_linear_fit(frames: List[np.ndarray], masks: List[np.ndarray],
     return valid
 
 
-def _reject_percentile(frames: List[np.ndarray], masks: List[np.ndarray],
+def _reject_percentile(frames: List[np.ndarray], valid: np.ndarray,
                        low_pct: float = 10.0, high_pct: float = 90.0) -> np.ndarray:
     """Percentile Clipping — çok az sayıda kare (3-5) için.
     Alt ve üst yüzdelik dilimdeki pikselleri atar."""
     n = len(frames)
     h, w = frames[0].shape[:2]
-    is_color = frames[0].ndim == 3
-
-    valid = np.stack([m > 0.5 for m in masks], axis=0)
 
     block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
-        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        lum = np.empty((n, y1 - y0, w), dtype=np.float32)
+        _fill_luminance_block(frames, y0, y1, lum)
         v_block = valid[:, y0:y1, :]
-
-        if is_color:
-            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
-        else:
-            lum = block.squeeze(-1) if block.ndim == 4 else block
 
         # NaN maskeleme ile percentile hesapla
         masked_lum = np.where(v_block, lum, np.nan)
@@ -600,28 +614,20 @@ def _reject_percentile(frames: List[np.ndarray], masks: List[np.ndarray],
     return valid
 
 
-def _reject_winsorized_sigma(frames: List[np.ndarray], masks: List[np.ndarray],
+def _reject_winsorized_sigma(frames: List[np.ndarray], valid: np.ndarray,
                               kappa_low: float = 2.5, kappa_high: float = 2.5,
                               iterations: int = 3) -> np.ndarray:
     """Winsorized Sigma Clipping — sigma clipping'e benzer ama
     reddedilen değerler sınır değerleriyle değiştirilir (istatistiği bozmaz)."""
     n = len(frames)
     h, w = frames[0].shape[:2]
-    is_color = frames[0].ndim == 3
-
-    valid = np.stack([m > 0.5 for m in masks], axis=0)
 
     block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
-        block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
+        lum = np.empty((n, y1 - y0, w), dtype=np.float32)
+        _fill_luminance_block(frames, y0, y1, lum)
         v_block = valid[:, y0:y1, :]
-
-        if is_color:
-            lum_w = np.array([0.2126, 0.7152, 0.0722], dtype=np.float32)
-            lum = np.sum(block * lum_w[np.newaxis, np.newaxis, np.newaxis, :], axis=-1)
-        else:
-            lum = block.squeeze(-1) if block.ndim == 4 else block
 
         for _ in range(iterations):
             vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
@@ -941,36 +947,31 @@ def stack_aligned(
     # ── Reddetme + Stacking ──
     n_rejected = 0
     if method == "median":
-        # Median — kendi rejection'ı var
         result = _stack_median_weighted(aligned_frames, masks, weights)
     elif method == "mean":
-        # Basit ağırlıklı ortalama — rejection yok
-        all_valid = np.stack([m > 0.5 for m in masks], axis=0)
-        result = _stack_weighted_mean(aligned_frames, masks, all_valid, weights)
+        result = _stack_weighted_mean(aligned_frames, masks, None, weights)
     else:
-        # Rejection-based methods
+        # Rejection aynı bool stack üzerinde çalışır; ikinci büyük maske üretme.
+        valid = _build_valid_mask_stack(masks)
+        base_valid_count = int(np.sum(valid))
         if method == "sigma_clip":
-            valid = _reject_sigma_clip(aligned_frames, masks,
-                                        kappa_low=kappa_low, kappa_high=kappa_high,
-                                        iterations=iterations)
+            _reject_sigma_clip(aligned_frames, valid,
+                               kappa_low=kappa_low, kappa_high=kappa_high,
+                               iterations=iterations)
         elif method == "linear_fit":
-            valid = _reject_linear_fit(aligned_frames, masks,
-                                        kappa_low=kappa_low, kappa_high=kappa_high)
+            _reject_linear_fit(aligned_frames, valid,
+                               kappa_low=kappa_low, kappa_high=kappa_high)
         elif method == "percentile":
-            valid = _reject_percentile(aligned_frames, masks,
-                                        low_pct=10.0, high_pct=90.0)
+            _reject_percentile(aligned_frames, valid,
+                               low_pct=10.0, high_pct=90.0)
         elif method == "winsorized_sigma":
-            valid = _reject_winsorized_sigma(aligned_frames, masks,
-                                              kappa_low=kappa_low, kappa_high=kappa_high,
-                                              iterations=iterations)
-        else:
-            valid = np.stack([m > 0.5 for m in masks], axis=0)
+            _reject_winsorized_sigma(aligned_frames, valid,
+                                     kappa_low=kappa_low, kappa_high=kappa_high,
+                                     iterations=iterations)
 
-        # Reddedilen piksel sayısı
-        base_valid = np.stack([m > 0.5 for m in masks], axis=0)
-        n_rejected = int(np.sum(base_valid) - np.sum(valid))
-
+        n_rejected = int(base_valid_count - int(np.sum(valid)))
         result = _stack_weighted_mean(aligned_frames, masks, valid, weights)
+        del valid
 
     cb(8, f"✅ Stacking tamamlandı — {n} kare, {n_rejected} piksel reddedildi")
 

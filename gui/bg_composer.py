@@ -145,7 +145,14 @@ def generate_composite_background(width=1920, height=1080, use_cache=True):
 
 
 def generate_welcome_overlay(bg: np.ndarray) -> np.ndarray:
-    """Baslik yazisi overlay."""
+    """Baslik yazisi overlay — Metallica-inspired iconic style.
+
+    Cok katmanli elektrik/metal efekt:
+      - Genis parlama halesi (electric blue glow)
+      - Keskin beyaz cekirdek yazi
+      - Yildirim/spark dekorasyon cizgileri
+      - Agresif kalin font + gomme kutu
+    """
     try:
         import cv2
 
@@ -154,56 +161,113 @@ def generate_welcome_overlay(bg: np.ndarray) -> np.ndarray:
 
         title = "ASTRO MAESTRO PRO"
         font = cv2.FONT_HERSHEY_TRIPLEX
-        scale = w / 1180.0
-        thick = max(2, int(scale * 2.6))
+        scale = w / 900.0
+        thick = max(3, int(scale * 3.2))
         (tw, th), _ = cv2.getTextSize(title, font, scale, thick)
         tx = (w - tw) // 2
-        ty = int(h * 0.885)
+        ty = int(h * 0.88)
 
-        pad = max(18, int(scale * 18))
-        ov = out.copy()
+        # ── Koyu kutu arka plan ──────────────────────────────────────
+        pad = max(24, int(scale * 28))
         box_y0 = ty - th - pad
-        box_y1 = ty + pad + int(th * 1.2)
-        cv2.rectangle(ov, (tx - pad, box_y0), (tx + tw + pad, box_y1), (0.01, 0.01, 0.03), -1)
-        out = cv2.addWeighted(ov, 0.42, out, 0.58, 0)
+        box_y1 = ty + pad + int(th * 1.5)
+        ov = out.copy()
+        cv2.rectangle(ov, (tx - pad * 2, box_y0), (tx + tw + pad * 2, box_y1),
+                       (0.0, 0.0, 0.0), -1)
+        out = cv2.addWeighted(ov, 0.55, out, 0.45, 0)
 
-        wing_y = ty - th // 2
-        wing_gap = max(26, int(scale * 26))
-        left_end = tx - wing_gap
-        right_start = tx + tw + wing_gap
-        left_outer = [
-            (max(20, left_end - int(w * 0.12)), wing_y + int(th * 0.42)),
-            (left_end - int(w * 0.03), wing_y - int(th * 0.18)),
-            (left_end, wing_y),
-            (left_end - int(w * 0.03), wing_y + int(th * 0.18)),
-        ]
-        right_outer = [
-            (min(w - 20, right_start + int(w * 0.12)), wing_y + int(th * 0.42)),
-            (right_start + int(w * 0.03), wing_y - int(th * 0.18)),
-            (right_start, wing_y),
-            (right_start + int(w * 0.03), wing_y + int(th * 0.18)),
-        ]
-        cv2.polylines(out, [np.array(left_outer, dtype=np.int32)], False, (0.28, 0.33, 0.42), max(1, thick - 1), cv2.LINE_AA)
-        cv2.polylines(out, [np.array(right_outer, dtype=np.int32)], False, (0.28, 0.33, 0.42), max(1, thick - 1), cv2.LINE_AA)
-        cv2.polylines(out, [np.array(left_outer, dtype=np.int32)], False, (0.72, 0.78, 0.88), max(1, thick - 3), cv2.LINE_AA)
-        cv2.polylines(out, [np.array(right_outer, dtype=np.int32)], False, (0.72, 0.78, 0.88), max(1, thick - 3), cv2.LINE_AA)
+        # ── Yildirim / spark cizgileri (Metallica tarzi angular) ─────
+        cy = ty - th // 2
+        gap = max(30, int(scale * 32))
+        arm_len = int(w * 0.16)
+        spike_h = int(th * 0.7)
 
-        cv2.putText(out, title, (tx + 5, ty + 5), font, scale, (0, 0, 0), thick + 6, cv2.LINE_AA)
-        cv2.putText(out, title, (tx + 2, ty + 2), font, scale, (0.18, 0.22, 0.28), thick + 3, cv2.LINE_AA)
-        cv2.putText(out, title, (tx, ty), font, scale, (0.82, 0.86, 0.92), thick + 1, cv2.LINE_AA)
-        cv2.putText(out, title, (tx, ty - 1), font, scale, (0.54, 0.72, 0.98), max(1, thick - 1), cv2.LINE_AA)
+        # Sol yildirim — zigzag
+        lx = tx - gap
+        pts_l = np.array([
+            [lx, cy],
+            [lx - arm_len // 3, cy - spike_h],
+            [lx - arm_len // 3 - int(scale * 8), cy + int(spike_h * 0.3)],
+            [lx - 2 * arm_len // 3, cy - int(spike_h * 0.6)],
+            [lx - arm_len, cy + int(spike_h * 0.15)],
+        ], dtype=np.int32)
+        # Sag yildirim — zigzag (mirror)
+        rx = tx + tw + gap
+        pts_r = np.array([
+            [rx, cy],
+            [rx + arm_len // 3, cy - spike_h],
+            [rx + arm_len // 3 + int(scale * 8), cy + int(spike_h * 0.3)],
+            [rx + 2 * arm_len // 3, cy - int(spike_h * 0.6)],
+            [rx + arm_len, cy + int(spike_h * 0.15)],
+        ], dtype=np.int32)
 
-        rule_y = ty + int(th * 0.55)
-        cv2.line(out, (tx - pad // 2, rule_y), (tx + tw + pad // 2, rule_y), (0.52, 0.62, 0.76), max(1, thick - 2), cv2.LINE_AA)
+        # Parlama katmani (kalin + blur efekti icin)
+        for offset in range(3, 0, -1):
+            alpha = 0.15 + (3 - offset) * 0.08
+            t = thick + offset * 3
+            color = (0.12 * alpha, 0.25 * alpha, 0.55 * alpha)
+            cv2.polylines(out, [pts_l], False, color, t, cv2.LINE_AA)
+            cv2.polylines(out, [pts_r], False, color, t, cv2.LINE_AA)
+        # Parlak cekirdek
+        cv2.polylines(out, [pts_l], False, (0.45, 0.60, 0.85), max(1, thick - 1), cv2.LINE_AA)
+        cv2.polylines(out, [pts_r], False, (0.45, 0.60, 0.85), max(1, thick - 1), cv2.LINE_AA)
 
+        # ── Ust ve alt keskin cizgiler (metal bant) ──────────────────
+        line_t = max(2, int(scale * 2.2))
+        cv2.line(out, (tx - pad, box_y0 + 2), (tx + tw + pad, box_y0 + 2),
+                 (0.50, 0.60, 0.78), line_t, cv2.LINE_AA)
+        cv2.line(out, (tx - pad, box_y1 - 2), (tx + tw + pad, box_y1 - 2),
+                 (0.50, 0.60, 0.78), line_t, cv2.LINE_AA)
+        # Ince ikinci cizgi
+        cv2.line(out, (tx - pad + 4, box_y0 + 2 + line_t + 1),
+                 (tx + tw + pad - 4, box_y0 + 2 + line_t + 1),
+                 (0.28, 0.35, 0.48), max(1, line_t - 1), cv2.LINE_AA)
+        cv2.line(out, (tx - pad + 4, box_y1 - 2 - line_t - 1),
+                 (tx + tw + pad - 4, box_y1 - 2 - line_t - 1),
+                 (0.28, 0.35, 0.48), max(1, line_t - 1), cv2.LINE_AA)
+
+        # ── Yazi katmanlari — elektrik parlama + metal cekirdek ──────
+        # 1) Genis dis parlama (koyu mavi glow)
+        for dx, dy, t_add, color in [
+            (0, 0, 14, (0.04, 0.08, 0.18)),
+            (0, 0, 10, (0.06, 0.14, 0.32)),
+            (0, 0, 7,  (0.10, 0.20, 0.48)),
+        ]:
+            cv2.putText(out, title, (tx + dx, ty + dy), font, scale,
+                        color, thick + t_add, cv2.LINE_AA)
+
+        # 2) Siyah golge (derinlik)
+        cv2.putText(out, title, (tx + 3, ty + 3), font, scale,
+                    (0, 0, 0), thick + 4, cv2.LINE_AA)
+
+        # 3) Koyu gri kontur
+        cv2.putText(out, title, (tx + 1, ty + 1), font, scale,
+                    (0.15, 0.18, 0.22), thick + 2, cv2.LINE_AA)
+
+        # 4) Ana yazi — parlak beyaz-mavi metalik
+        cv2.putText(out, title, (tx, ty), font, scale,
+                    (0.88, 0.92, 0.98), thick + 1, cv2.LINE_AA)
+
+        # 5) Highlight — ince parlak cekirdek (uzerinden)
+        cv2.putText(out, title, (tx, ty - 1), font, scale,
+                    (0.60, 0.80, 1.0), max(1, thick - 1), cv2.LINE_AA)
+
+        # ── Alt cizgi (separator) ────────────────────────────────────
+        rule_y = ty + int(th * 0.6)
+        cv2.line(out, (tx, rule_y), (tx + tw, rule_y),
+                 (0.55, 0.65, 0.82), max(1, line_t), cv2.LINE_AA)
+
+        # ── Alt yazi ─────────────────────────────────────────────────
         sub = "Drag & Drop or Open File to Start"
-        ss = scale * 0.36
+        ss = scale * 0.34
         st = max(1, int(ss * 2))
-        (sw2, sh2), _ = cv2.getTextSize(sub, font, ss, st)
+        (sw2, _sh2), _ = cv2.getTextSize(sub, font, ss, st)
         sx = (w - sw2) // 2
-        sy = ty + int(th * 2.2)
-        cv2.putText(out, sub, (sx + 1, sy + 1), font, ss, (0, 0, 0), st + 1, cv2.LINE_AA)
-        cv2.putText(out, sub, (sx, sy), font, ss, (0.42, 0.50, 0.62), st, cv2.LINE_AA)
+        sy = ty + int(th * 2.4)
+        cv2.putText(out, sub, (sx + 1, sy + 1), font, ss,
+                    (0, 0, 0), st + 2, cv2.LINE_AA)
+        cv2.putText(out, sub, (sx, sy), font, ss,
+                    (0.48, 0.56, 0.68), st, cv2.LINE_AA)
 
         return np.clip(out, 0, 1).astype(np.float32)
     except ImportError:
