@@ -4024,7 +4024,8 @@ class _FullscreenImageDialog(QDialog):
         self.setWindowTitle(f"Image Viewer — {title}" if title else "Image Viewer")
         self.setMinimumSize(600, 400)
         self.resize(1200, 800)
-        self._img = img_array  # float32 [0,1]
+        self._img = np.clip(np.ascontiguousarray(img_array, dtype=np.float32), 0, 1)
+        self._title = title or "Image"
         self._bg_color = BG
         self._interp = "nearest"
         self._zoom = 1.0
@@ -4045,9 +4046,9 @@ class _FullscreenImageDialog(QDialog):
         bl.setContentsMargins(8, 2, 8, 2)
         bl.setSpacing(8)
 
-        lbl = QLabel(f"  {title}" if title else "  Image")
-        lbl.setStyleSheet(f"color:{HEAD};font-size:12px;font-weight:700;")
-        bl.addWidget(lbl)
+        self._lbl_title = QLabel(f"  {self._title}")
+        self._lbl_title.setStyleSheet(f"color:{HEAD};font-size:12px;font-weight:700;")
+        bl.addWidget(self._lbl_title)
         bl.addStretch()
 
         # Zoom bilgisi
@@ -4116,18 +4117,23 @@ class _FullscreenImageDialog(QDialog):
         info.setStyleSheet(f"background:{BG2};border-top:1px solid {BORDER};")
         il = QHBoxLayout(info)
         il.setContentsMargins(8, 0, 8, 0)
-        h, w = img_array.shape[:2]
-        ch = "RGB" if img_array.ndim == 3 else "Gray"
-        self._lbl_info = QLabel(
-            f"{w} x {h}  |  {ch}  |  min={img_array.min():.3f}  max={img_array.max():.3f}")
+        self._lbl_info = QLabel("")
         self._lbl_info.setStyleSheet(f"color:{MUTED};font-size:10px;")
         il.addWidget(self._lbl_info)
         il.addStretch()
         lay.addWidget(info)
 
+        self._refresh_info()
         self._draw()
 
     def _draw(self):
+        try:
+            xlim = self._ax.get_xlim()
+            ylim = self._ax.get_ylim()
+            had_limits = (xlim != (0.0, 1.0))
+        except Exception:
+            xlim = ylim = None
+            had_limits = False
         self._ax.clear()
         self._ax.set_facecolor(self._bg_color)
         self._ax.set_axis_off()
@@ -4140,8 +4146,29 @@ class _FullscreenImageDialog(QDialog):
         else:
             self._ax.imshow(img, origin="upper", aspect="equal",
                             interpolation=interp_map.get(self._interp, "nearest"))
+        if had_limits and xlim is not None and ylim is not None:
+            self._ax.set_xlim(xlim)
+            self._ax.set_ylim(ylim)
         self._fig.tight_layout(pad=0)
         self._canvas.draw_idle()
+
+    def _refresh_info(self):
+        h, w = self._img.shape[:2]
+        ch = "RGB" if self._img.ndim == 3 else "Gray"
+        self._lbl_info.setText(
+            f"{w} x {h}  |  {ch}  |  min={self._img.min():.3f}  max={self._img.max():.3f}"
+        )
+
+    def update_image(self, img_array, title=None):
+        if img_array is None:
+            return
+        self._img = np.clip(np.ascontiguousarray(img_array, dtype=np.float32), 0, 1)
+        if title:
+            self._title = title
+            self.setWindowTitle(f"Image Viewer â€” {title}")
+            self._lbl_title.setText(f"  {title}")
+        self._refresh_info()
+        self._draw()
 
     def _set_bg(self, text):
         colors = {"Black": "#000000", "Dark Gray": "#1a1a1a",
@@ -4203,6 +4230,7 @@ class ImageViewer(QWidget):
         self._imgs   = [None, None, None, None]
         self._titles = ["", "", "", ""]
         self._active = 0      # which slot is "current"
+        self._fullscreen_dialogs = {}
         self._layout_n = 1    # 1, 2 or 4 panels
         self._pre_stf_slots = [None, None, None, None]  # STF toggle: slot basina orijinal
         self._welcome_visible = False  # arka plan composite gorunuyor mu
@@ -4607,6 +4635,7 @@ class ImageViewer(QWidget):
         self._draw_slot(slot)
         self._hist_editor.set_image(safe)  # safe zaten copy, tekrar kopyalamaya gerek yok
         self._draw_stats(safe)
+        self._sync_fullscreen_slot(slot, safe, title)
         h, w = safe.shape[:2]; ch = "RGB" if safe.ndim==3 else "Gray"
         self.lbl_info.setText(f"Slot {slot+1}  {w}x{h}  {ch}  min={safe.min():.3f}  max={safe.max():.3f}")
         self.tabs.setCurrentIndex(0)
@@ -4685,15 +4714,36 @@ class ImageViewer(QWidget):
             if self._imgs[i] is not None:
                 self._draw_slot(i)
 
+    def _sync_fullscreen_slot(self, slot: int, img: "np.ndarray", title: str = ""):
+        dlg = self._fullscreen_dialogs.get(slot)
+        if dlg is None:
+            return
+        try:
+            dlg.update_image(img, title or self._titles[slot] or f"Slot {slot+1}")
+        except RuntimeError:
+            self._fullscreen_dialogs.pop(slot, None)
+
     def _open_fullscreen(self, slot=0):
         """Cift tikla — resmi tam ekran dialog'da ac."""
         img = self._imgs[slot]
         if img is None:
             return
         title = self._titles[slot] or f"Slot {slot+1}"
+        existing = self._fullscreen_dialogs.get(slot)
+        if existing is not None:
+            try:
+                existing.raise_()
+                existing.activateWindow()
+                existing.update_image(img, title)
+                return
+            except RuntimeError:
+                self._fullscreen_dialogs.pop(slot, None)
         dlg = _FullscreenImageDialog(img.copy(), title, parent=self)
+        self._fullscreen_dialogs[slot] = dlg
+        dlg.finished.connect(lambda _=0, s=slot: self._fullscreen_dialogs.pop(s, None))
         dlg.showMaximized()
         dlg.exec()
+        self._fullscreen_dialogs.pop(slot, None)
 
     # ── Zoom & Pan ────────────────────────────────────────────────────────
     def _qt_wheel(self, event, slot: int):
@@ -4816,12 +4866,14 @@ class ImageViewer(QWidget):
             slot = self._active
             self._preview_img = self._pending_preview
             self._draw_slot_direct(slot, self._preview_img)
+            self._sync_fullscreen_slot(slot, self._preview_img, self._titles[slot])
             self._pending_preview = None
 
     def _preview_slot(self, img: "np.ndarray", title: str = "⏳ işleniyor…"):
         """İşlem sırasında ara sonucu viewer'da göster (history'e gitmez)."""
         slot = self._active
         self._draw_slot_direct(slot, img)
+        self._sync_fullscreen_slot(slot, img, title)
         # Title güncelle
         try:
             ax = self._axes_view[slot]
