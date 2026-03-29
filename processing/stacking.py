@@ -14,6 +14,7 @@ PixInsight ImageIntegration seviyesinde stacking engine.
 """
 
 import os
+import warnings
 import numpy as np
 import cv2
 from typing import List, Optional, Callable, Tuple, Dict
@@ -518,7 +519,8 @@ def _reject_percentile(frames: List[np.ndarray], masks: List[np.ndarray],
 
         # NaN maskeleme ile percentile hesapla
         masked_lum = np.where(v_block, lum, np.nan)
-        with np.errstate(all='ignore'):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=RuntimeWarning)
             lo = np.nanpercentile(masked_lum, low_pct, axis=0, keepdims=True)
             hi = np.nanpercentile(masked_lum, high_pct, axis=0, keepdims=True)
         lo = np.nan_to_num(lo, nan=-1e10)
@@ -558,7 +560,8 @@ def _reject_winsorized_sigma(frames: List[np.ndarray], masks: List[np.ndarray],
             vcount[vcount == 0] = 1
             # Winsorized mean: clip extremes before computing mean
             masked_lum = np.where(v_block, lum, np.nan)
-            with np.errstate(all='ignore'):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
                 lo_bound = np.nanpercentile(masked_lum, 10, axis=0, keepdims=True)
                 hi_bound = np.nanpercentile(masked_lum, 90, axis=0, keepdims=True)
             lo_bound = np.nan_to_num(lo_bound, nan=0.0)
@@ -881,8 +884,6 @@ def stack_aligned(
         result = _stack_median_weighted(aligned_frames, masks, weights)
     elif method == "mean":
         # Basit ağırlıklı ortalama — rejection yok
-        valid = np.ones((n, *frames[0].shape[:2]), dtype=bool) if aligned_frames else np.array([])
-        # dummy valid
         all_valid = np.stack([m > 0.5 for m in masks], axis=0)
         result = _stack_weighted_mean(aligned_frames, masks, all_valid, weights)
     else:
@@ -943,12 +944,14 @@ def _stack_median_weighted(frames: List[np.ndarray], masks: List[np.ndarray],
             for c in range(block.shape[-1]):
                 ch_block = block[..., c]
                 masked = np.where(mask_block > 0.5, ch_block, np.nan)
-                with np.errstate(all='ignore'):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", category=RuntimeWarning)
                     med = np.nanmedian(masked, axis=0)
                 result[y0:y1, :, c] = np.nan_to_num(med, nan=0.0)
         else:
             masked = np.where(mask_block > 0.5, block, np.nan)
-            with np.errstate(all='ignore'):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
                 med = np.nanmedian(masked, axis=0)
             result[y0:y1] = np.nan_to_num(med, nan=0.0)
 
