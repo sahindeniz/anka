@@ -3177,6 +3177,14 @@ class StackingDialog(QDialog):
         self.combo_normalization.addItems(["additive_scaling","multiplicative","none"])
         self.combo_normalization.setStyleSheet(COMBO_CSS); self.combo_normalization.setFixedWidth(160)
         _row("Normalizasyon:", self.combo_normalization)
+        self.chk_low_ram = QCheckBox("Low RAM modu (float16 + fallback)")
+        self.chk_low_ram.setChecked(False)
+        self.chk_low_ram.setStyleSheet(CHECK_CSS)
+        self.chk_low_ram.setToolTip(
+            "Açıkken normalizasyonu float16 ile yapar ve bellek baskısında "
+            "float16 fallback kullanır. Kalite/performans dengesi için düşük RAM sistemlerde önerilir."
+        )
+        lay.addWidget(self.chk_low_ram)
         lay.addStretch(); return w
 
     # ── Tab: Hizalama ─────────────────────────────────────────────────────────
@@ -3513,6 +3521,8 @@ class StackingDialog(QDialog):
                 "quality_threshold": float(self.spin_quality_thr.value()),
                 "drizzle_scale":     drizzle_scale,
                 "frame_scores":      getattr(self, '_frame_infos', None),
+                "work_dtype":        "float16" if self.chk_low_ram.isChecked() else "float32",
+                "allow_float16_fallback": self.chk_low_ram.isChecked(),
             }
             self._worker = StackWorker(params, mode="stack")
         else:
@@ -3550,6 +3560,8 @@ class StackingDialog(QDialog):
                 "dark_optimize":     self.chk_dark_optimize.isChecked(),
                 "drizzle_scale":     drizzle_scale2,
                 "hot_pixel_removal": self.chk_hot_pixel.isChecked(),
+                "work_dtype":        "float16" if self.chk_low_ram.isChecked() else "float32",
+                "allow_float16_fallback": self.chk_low_ram.isChecked(),
             }
             self._worker = StackWorker(params, mode="full")
 

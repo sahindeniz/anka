@@ -254,7 +254,9 @@ def _estimate_background(img: np.ndarray) -> Tuple[float, float]:
 
 
 def _normalize_frames(frames: List[np.ndarray], masks: List[np.ndarray],
-                      mode: str = "additive_scaling") -> List[np.ndarray]:
+                      mode: str = "additive_scaling",
+                      work_dtype: np.dtype = np.float32,
+                      allow_float16_fallback: bool = True) -> List[np.ndarray]:
     """Kareleri normalize et — farklı gökyüzü parlaklıklarını eşitle.
     mode:
       'additive_scaling' — PixInsight varsayılan: location + scale eşitleme
@@ -280,28 +282,46 @@ def _normalize_frames(frames: List[np.ndarray], masks: List[np.ndarray],
 
     ref_med, ref_scale = stats[0]
 
+    target_dtype = np.dtype(work_dtype)
+    if target_dtype not in (np.dtype(np.float32), np.dtype(np.float16)):
+        target_dtype = np.dtype(np.float32)
+
     normalized = []
     for i, (fr, (med, scale)) in enumerate(zip(frames, stats)):
         if i == 0:
             normalized.append(fr)
             continue
 
-        out = fr.astype(np.float64)
+        # Bellek kullanımını düşük tutmak için mümkün olduğunca float32 üzerinde
+        # çalış. copy=False, kaynak zaten float32 ise gereksiz bir kopyayı önler.
+        try:
+            out = fr.astype(target_dtype, copy=False)
+        except MemoryError:
+            if not allow_float16_fallback or target_dtype == np.dtype(np.float16):
+                raise
+            # float32 kopyası için RAM yetmiyorsa geçici olarak float16'ya düş.
+            out = fr.astype(np.float16, copy=False)
+            target_dtype = np.dtype(np.float16)
 
         if mode == "multiplicative":
             # Çarpımsal: img * (ref_med / med)
             if med > 1e-10:
-                factor = ref_med / med
+                factor = target_dtype.type(ref_med / med)
                 out = out * factor
             else:
-                out = out + (ref_med - med)
+                out = out + target_dtype.type(ref_med - med)
         else:
             # Additive with scaling (PI varsayılan)
             # img = (img - med) * (ref_scale / scale) + ref_med
             if scale > 1e-10:
-                out = (out - med) * (ref_scale / scale) + ref_med
+                # Ara çıktıları float32 tutmak için işlemi adım adım uygula.
+                np.subtract(out, target_dtype.type(med), out=out, casting="unsafe")
+                np.multiply(out, target_dtype.type(ref_scale / scale), out=out, casting="unsafe")
+                np.add(out, target_dtype.type(ref_med), out=out, casting="unsafe")
 
-        normalized.append(np.clip(out, 0, None).astype(np.float32))
+        # np.clip(out=...) ile ek bir büyük ara dizi oluşturma.
+        np.clip(out, 0, None, out=out)
+        normalized.append(out)
 
     return normalized
 
@@ -796,6 +816,8 @@ def stack_aligned(
     quality_reject: bool = False,
     quality_threshold: float = 0.3,
     drizzle_scale: int = 0,
+    work_dtype: str = "float32",
+    allow_float16_fallback: bool = True,
     progress_cb: Callable = None,
     frame_scores: Optional[List[dict]] = None,
     **kwargs,
@@ -806,6 +828,7 @@ def stack_aligned(
             'winsorized_sigma', 'median', 'mean'
     normalization: 'additive_scaling', 'multiplicative', 'none'
     weight_mode: 'snr', 'noise', 'fwhm', 'equal'
+    work_dtype: 'float32' (önerilen), 'float16' (daha az RAM)
     """
     if not aligned_frames:
         raise ValueError("Hizalanmış kare yok!")
@@ -829,7 +852,15 @@ def stack_aligned(
 
     # ── Normalizasyon ──
     cb(8, f"Normalizasyon: {normalization}…")
-    aligned_frames = _normalize_frames(aligned_frames, masks, normalization)
+    dtype_map = {"float32": np.float32, "float16": np.float16}
+    norm_dtype = dtype_map.get(str(work_dtype).lower(), np.float32)
+    aligned_frames = _normalize_frames(
+        aligned_frames,
+        masks,
+        normalization,
+        work_dtype=norm_dtype,
+        allow_float16_fallback=allow_float16_fallback,
+    )
 
     # ── Ağırlıklar ──
     cb(8, f"Ağırlıklandırma: {weight_mode}…")
@@ -991,6 +1022,7 @@ def stack_lights(
         drizzle_scale=drizzle_scale,
         progress_cb=progress_cb,
         frame_scores=frame_infos,
+        **kwargs,
     )
 
     result["frame_infos"] = frame_infos

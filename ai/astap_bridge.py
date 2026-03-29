@@ -80,24 +80,41 @@ def solve_image(
             effective_radius = 30.0
             cb(f"  ℹ RA/Dec ipucu verildi, radius {search_radius}° → {effective_radius}° olarak küçültüldü")
 
-        # ── FOV retry stratejisi: verilen FOV başarısızsa 2x ve 4x dene ──
+        # ── FOV retry stratejisi ──
+        # 1) Verilen FOV  2) FOV×1.5  3) FOV×2  4) Auto (FOV=0)
+        # D80 kataloğu ~5° üzeri FOV'da başarısız olur, cap=5°
         fov_attempts = [fov_hint]
         if fov_hint and float(fov_hint) > 0:
-            fov_attempts += [float(fov_hint) * 2, float(fov_hint) * 4]
+            fov_val = float(fov_hint)
+            for mult in [1.5, 2.0]:
+                scaled = fov_val * mult
+                if scaled <= 5.0:
+                    fov_attempts.append(scaled)
+            fov_attempts.append(None)  # son deneme: auto (blind)
         else:
             fov_attempts = [None]  # sadece auto
 
         proc = None
         for attempt_i, fov_try in enumerate(fov_attempts):
+            # Son deneme (fov_try=None) → gerçek blind solve: RA/Dec ipucu kaldır
+            is_blind = (fov_try is None and len(fov_attempts) > 1)
+            _ra  = None if is_blind else ra_hint
+            _dec = None if is_blind else dec_hint
+            _r   = search_radius if is_blind else effective_radius
             cmd = _build_cmd(
                 astap_exe, fits_in, db_path, catalog_id,
-                effective_radius, downsample, min_stars,
-                ra_hint, dec_hint, fov_try
+                _r, downsample, min_stars,
+                _ra, _dec, fov_try
             )
             cmd_str = " ".join(
                 f'"{c}"' if " " in str(c) else str(c) for c in cmd)
-            attempt_label = (f" [deneme {attempt_i+1}/{len(fov_attempts)},"
-                             f" FOV={fov_try:.1f}°]") if fov_try else ""
+            if fov_try:
+                attempt_label = (f" [deneme {attempt_i+1}/{len(fov_attempts)},"
+                                 f" FOV={float(fov_try):.1f}°]")
+            elif len(fov_attempts) > 1:
+                attempt_label = f" [deneme {attempt_i+1}/{len(fov_attempts)}, auto/blind]"
+            else:
+                attempt_label = ""
             cb(f"[2/4] Komut{attempt_label}:\n      {cmd_str}")
 
             try:
@@ -168,6 +185,76 @@ def solve_image(
             cb(f"  Bulunan yıldız: {stars_found}")
             if warning:
                 cb(f"  ASTAP uyarısı: {warning}")
+
+            # ── "Large FOV" uyarısı → farklı katalog ile tekrar dene ──
+            if warning and "use" in warning.lower() and "database" in warning.lower():
+                # ASTAP önerdiği kataloğu parse et (örn: "use G05 database!")
+                import re as _re
+                m = _re.search(r'use\s+(\w+)\s+database', warning, _re.IGNORECASE)
+                if m:
+                    alt_cat = m.group(1).upper()
+                    # Mevcut katalogları ara
+                    exe_dir = os.path.dirname(astap_exe)
+                    alt_db = ""
+                    for sub in [alt_cat.lower(), alt_cat]:
+                        if alt_db:
+                            break
+                        for cand in [
+                            os.path.join(exe_dir, f"{sub}_database.pkg"),
+                            os.path.join(exe_dir, f"{sub}_star_database.pkg"),
+                        ]:
+                            if os.path.isfile(cand):
+                                alt_db = exe_dir
+                                break
+                        if alt_db:
+                            break
+                        # Klasör olarak ara
+                        cand_dir = os.path.join(exe_dir, sub)
+                        if os.path.isdir(cand_dir):
+                            alt_db = cand_dir
+                            break
+                    if not alt_db:
+                        # Tüm .pkg dosyalarından bul
+                        for f in os.listdir(exe_dir):
+                            if f.lower().startswith(alt_cat.lower()) and f.endswith(".pkg"):
+                                alt_db = exe_dir
+                                break
+
+                    if alt_db:
+                        cb(f"\n🔄 ASTAP önerisi: {alt_cat} kataloğu deneniyor…")
+                        alt_cmd = _build_cmd(
+                            astap_exe, fits_in, alt_db, alt_cat,
+                            effective_radius, downsample, min_stars,
+                            ra_hint, dec_hint, fov_hint)
+                        try:
+                            alt_proc = subprocess.run(
+                                alt_cmd, capture_output=True, text=True,
+                                timeout=max(60, timeout), cwd=tmpdir)
+                            if alt_proc.returncode == 0:
+                                # Yeniden parse et
+                                ini2 = os.path.splitext(fits_in)[0] + ".ini"
+                                if os.path.isfile(ini2):
+                                    result = _parse_ini(ini2)
+                                    result["solve_time_s"] = round(time.time() - t_start, 2)
+                                    result["astap_exit_code"] = alt_proc.returncode
+                                    result["catalog_used"] = alt_cat
+                                    ra = result.get("ra")
+                                    dec = result.get("dec")
+                                    if ra is not None and dec is not None:
+                                        cb(f"✅ {alt_cat} kataloğu ile çözüm bulundu!")
+                                        # Başarılı — aşağıdaki hata bloğunu atla
+                                        solution = result.get("solution", "1")
+                            else:
+                                cb(f"  {alt_cat} ile de çözüm bulunamadı")
+                        except Exception as e2:
+                            cb(f"  {alt_cat} denemesi hatası: {e2}")
+                    else:
+                        cb(f"  ⚠ {alt_cat} kataloğu bulunamadı — indirmeniz gerekiyor")
+
+        # Hala çözüm yoksa hata döndür
+        if solution == "0" or ra is None or dec is None:
+            warning     = result.get("warning", "")
+            stars_found = result.get("star_count", 0)
 
             reason_parts = []
             if stars_found and int(stars_found) < min_stars:
@@ -275,8 +362,11 @@ def _build_cmd(exe, fits_in, db_path, catalog_id, radius, downsample, min_stars,
 
     cmd += ["-r", f"{float(radius):.1f}"]
 
-    # -s max yildiz sayisi (varsayilan 500, dusuk deger cozumu zorlastirir)
-    cmd += ["-s", "500"]
+    # -s yıldız sayısı — ASTAP görüntüden bu kadar yıldız çıkarır
+    # Çok düşük = eşleşme başarısız, çok yüksek = yavaş
+    # min_stars=10 → s=200, min_stars=50 → s=500
+    s_val = max(200, min(500, int(min_stars) * 10)) if min_stars else 200
+    cmd += ["-s", str(s_val)]
 
     # ── Downsample — ASTAP: 0=auto, 1=yok, 2=2x, 4=4x ──
     if downsample and int(downsample) > 1:

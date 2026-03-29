@@ -54,49 +54,52 @@ def _auto_stf(img, target=0.25, shadow_clip=-2.8):
         return mtf
 
     def _clean_hot_pixels(data):
-        """Izole renkli hot/cold pixel temizleme.
-        Hedef: tek pikselde RENK ORANI komsularindan cok farkli ise duzelt.
-        Luminance farki hedeflenmez → yildiz ve nebula korunur."""
+        """Izole renkli hot/cold pixel temizleme — OpenCV ile hızlı.
+        Büyük resimlerde downscale ile maske hesaplar."""
         if data.ndim != 3 or data.shape[2] < 3:
             return data
-        from scipy.ndimage import median_filter
+
+        h, w = data.shape[:2]
+        # Büyük resimlerde maske hesabını küçük kopya üzerinde yap
+        max_px = 2000
+        if max(h, w) > max_px:
+            scale = max_px / max(h, w)
+            sh, sw = int(h * scale), int(w * scale)
+            small = cv2.resize(data, (sw, sh), interpolation=cv2.INTER_AREA)
+        else:
+            small = data
+            sh, sw = h, w
+
+        # OpenCV medianBlur — scipy'den 10x+ hızlı
+        # medianBlur uint8 ister veya ksize=3/5 float32 kabul eder
+        med = cv2.medianBlur(small, 3)
+
+        eps = 1e-7
+        lum = small[:, :, 0] + small[:, :, 1] + small[:, :, 2] + eps
+        med_lum = med[:, :, 0] + med[:, :, 1] + med[:, :, 2] + eps
+
+        # Renk fark metrigi
+        color_diff = np.float32(0)
+        for c in range(3):
+            color_diff = color_diff + np.abs(small[:, :, c] / lum - med[:, :, c] / med_lum)
+
+        mask_small = (color_diff > 0.15) & (lum < np.percentile(lum, 99))
+
+        if not np.any(mask_small):
+            return data
+
+        # Maskeyi orijinal boyuta büyüt
+        if max(h, w) > max_px:
+            mask = cv2.resize(mask_small.astype(np.uint8), (w, h),
+                              interpolation=cv2.INTER_NEAREST).astype(bool)
+            med_full = cv2.medianBlur(data, 3)
+        else:
+            mask = mask_small
+            med_full = med
 
         cleaned = data.copy()
-        r, g, b = data[:, :, 0], data[:, :, 1], data[:, :, 2]
-
-        # Lokal medyan (3x3 — minimal, sadece izole noktalar icin)
-        med_r = median_filter(r, size=3)
-        med_g = median_filter(g, size=3)
-        med_b = median_filter(b, size=3)
-
-        # Pikselin renk orani vs komsu renk orani farki
-        # Guvenli oran hesabi (sifira bolunme onleme)
-        eps = 1e-7
-        lum = r + g + b + eps
-        med_lum = med_r + med_g + med_b + eps
-
-        # Normalize renk (kroma): her kanal / toplam
-        cr_r, cr_g, cr_b = r / lum, g / lum, b / lum
-        mcr_r, mcr_g, mcr_b = med_r / med_lum, med_g / med_lum, med_b / med_lum
-
-        # Renk fark metrik — komsularindan renk olarak ne kadar farkli
-        color_diff = (np.abs(cr_r - mcr_r) + np.abs(cr_g - mcr_g)
-                      + np.abs(cr_b - mcr_b))
-
-        # Esik: renk farki > 0.15 → renkli artefakt
-        # (normal nebula/yildiz renk gecisleri bunun altinda kalir)
-        is_color_outlier = color_diff > 0.15
-
-        # Sadece karanlık/orta parlaklıktaki pikseller — parlak yıldız çekirdeği korunur
-        # (yildiz merkezinde zaten renk farki dusuk — beyaza yakın)
-        bright_threshold = np.percentile(lum, 99)
-        is_color_outlier = is_color_outlier & (lum < bright_threshold)
-
-        # Outlier pikselleri lokal medyan ile degistir
         for c in range(3):
-            med_ch = [med_r, med_g, med_b][c]
-            cleaned[:, :, c] = np.where(is_color_outlier, med_ch,
-                                         data[:, :, c])
+            cleaned[:, :, c] = np.where(mask, med_full[:, :, c], data[:, :, c])
         return cleaned
 
     if img.ndim == 2:
@@ -113,35 +116,32 @@ def _auto_stf(img, target=0.25, shadow_clip=-2.8):
 
     n_ch = img.shape[2]
 
-    # ── 1) Per-channel STF (unlinked) — notral arka plan ──────────
-    unlinked = np.empty_like(img, dtype=np.float32)
-    for c in range(n_ch):
-        ch = img[:, :, c]
-        med_ch = float(np.median(ch))
-        diff_ch = np.abs(ch - med_ch)
-        mad_ch = float(np.median(diff_ch)) * 1.4826
-        c0_ch = max(0.0, med_ch + shadow_clip * mad_ch)
-        m_n_ch = max(1e-9, min(1 - 1e-9, (med_ch - c0_ch) / (1.0 - c0_ch)))
-        unlinked[:, :, c] = _mtf_1d(ch, c0_ch, m_n_ch)
-
-    # ── 2) Linked STF — renk koruyucu ─────────────────────────────
+    # ── 1) İstatistikleri topla (tek geçiş) ─────────────────────────
+    # Linked parametreleri (luminance'tan)
     lum = 0.2126 * img[:, :, 0] + 0.7152 * img[:, :, 1] + 0.0722 * img[:, :, 2]
     med = float(np.median(lum))
-    diff = np.abs(lum - med)
-    mad = float(np.median(diff)) * 1.4826
+    mad = float(np.median(np.abs(lum - med))) * 1.4826
     c0 = max(0.0, med + shadow_clip * mad)
     m_n = max(1e-9, min(1 - 1e-9, (med - c0) / (1.0 - c0)))
 
-    linked = np.empty_like(img, dtype=np.float32)
+    # Per-channel parametreleri
+    ch_params = []
     for c in range(n_ch):
-        linked[:, :, c] = _mtf_1d(img[:, :, c], c0, m_n)
+        ch = img[:, :, c]
+        med_ch = float(np.median(ch))
+        mad_ch = float(np.median(np.abs(ch - med_ch))) * 1.4826
+        c0_ch = max(0.0, med_ch + shadow_clip * mad_ch)
+        m_n_ch = max(1e-9, min(1 - 1e-9, (med_ch - c0_ch) / (1.0 - c0_ch)))
+        ch_params.append((c0_ch, m_n_ch))
 
-    # ── 3) Blend: %35 linked + %65 unlinked ───────────────────────
-    #    Linked: renk bilgisi verir (ama arka plan notral olmayabilir)
-    #    Unlinked: notral arka plan (ama renkler azalir)
-    #    Blend: dengeli — gorunur renkler + temiz arka plan
-    alpha = 0.35
-    result = alpha * linked + (1.0 - alpha) * unlinked
+    # ── 2) Tek geçişte blend: %85 linked + %15 unlinked ────────────
+    #   Linked ağırlıklı = renk oranlarını korur, kanal kaymasını önler
+    alpha = 0.85
+    result = np.empty_like(img, dtype=np.float32)
+    for c in range(n_ch):
+        linked_ch   = _mtf_1d(img[:, :, c], c0, m_n)
+        unlinked_ch = _mtf_1d(img[:, :, c], ch_params[c][0], ch_params[c][1])
+        result[:, :, c] = alpha * linked_ch + (1.0 - alpha) * unlinked_ch
 
     # ── 4) Gamut koruma ───────────────────────────────────────────
     max_ch = np.max(result, axis=2)

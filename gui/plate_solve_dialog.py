@@ -273,15 +273,22 @@ class PlateSolveDialog(QDialog):
     """
 
     CATALOGS = [
+        "V50  (Gaia50, ~50M yıldız — hızlı)",
         "G17  (Gaia DR3, ~1.7B yıldız)",
         "H17  (Tycho-2 + UCAC, ~100M)",
         "W08  (UCAC4, ~100M)",
+        "D80  (Gaia EDR3, ~1.5B)",
+        "D50  (Gaia DR3, ~50M)",
+        "D20  (Gaia, ~20M)",
         "D05  (Dwarfs 5, ~5M)",
         "T01  (Tycho-2)",
         "S01  (Stars, ~1M)",
     ]
     CATALOG_CODES = [
+        "V50",  # Gaia50 — hızlı, 50M yıldız
         "D80",  # ASTAP varsayılanı — Gaia EDR3, ~1.5B yıldız
+        "D50",  # Gaia DR3, ~50M
+        "D20",  # Gaia, ~20M
         "G17",  # Gaia DR3, ~1.7B
         "H17",  # Tycho-2 + UCAC, ~100M
         "W08",  # UCAC4, ~113M
@@ -613,6 +620,17 @@ class PlateSolveDialog(QDialog):
         self._lbl_cat_type = QLabel("(local catalogue)")
         self._lbl_cat_type.setStyleSheet(f"color:{SUBTEXT};font-size:9px;")
         r1.addWidget(self._lbl_cat_type)
+
+        b_save_cat = QPushButton("💾")
+        b_save_cat.setFixedSize(26, 22)
+        b_save_cat.setStyleSheet(
+            f"QPushButton{{background:{GREEN};color:#000;border:none;"
+            f"border-radius:3px;font-size:12px;}}"
+            f"QPushButton:hover{{background:#4dd88a;}}")
+        b_save_cat.setToolTip("Katalog ayarlarını varsayılan olarak kaydet")
+        b_save_cat.clicked.connect(self._save_catalog_settings)
+        r1.addWidget(b_save_cat)
+
         r1.addStretch()
         lay.addLayout(r1)
 
@@ -687,6 +705,95 @@ class PlateSolveDialog(QDialog):
         _row("Downsample factor:", self._sp_downsample, "0=auto")
 
         return grp
+
+    def _find_fits_in_dir(self, directory):
+        """Klasörde optik metadata içeren ilk FITS dosyasını bul.
+        AstroMastroPro stacked çıktılarını atlar — orijinal light frame arar."""
+        if not directory or not os.path.isdir(directory):
+            return None
+        fits_exts = (".fits", ".fit", ".fts")
+
+        def _has_optics(path):
+            """FITS dosyasında optik bilgi var mı?"""
+            try:
+                from astropy.io import fits as _fits
+                with _fits.open(path, memmap=False, ignore_missing_simple=True) as h:
+                    hdr = h[0].header
+                    return any(k in hdr for k in (
+                        "FOCALLEN", "FOCAL", "XPIXSZ", "PIXSIZE1",
+                        "APTDIA", "TELESCOP", "INSTRUME",
+                    ))
+            except Exception:
+                return False
+
+        def _first_fits(folder):
+            try:
+                for f in sorted(os.listdir(folder)):
+                    if os.path.splitext(f)[1].lower() in fits_exts:
+                        p = os.path.join(folder, f)
+                        if _has_optics(p):
+                            return p
+                # 2. geçiş: optics yoksa herhangi FITS (AstroMastroPro dışı)
+                for f in sorted(os.listdir(folder)):
+                    if os.path.splitext(f)[1].lower() in fits_exts:
+                        p = os.path.join(folder, f)
+                        try:
+                            from astropy.io import fits as _fits
+                            with _fits.open(p, memmap=False, ignore_missing_simple=True) as h:
+                                if h[0].header.get("SOFTWARE") != "AstroMastroPro":
+                                    return p
+                        except Exception:
+                            return p
+            except Exception:
+                pass
+            return None
+
+        # 1. Ana klasörde optik'li FITS ara
+        result = _first_fits(directory)
+        if result:
+            return result
+
+        # 2. Light/Subs alt klasörlerinde ara (ana klasördeki stacked çıktı değil)
+        for sub in ("Light", "Lights", "lights", "Subs", "subs", "raw", "Raw"):
+            sub_dir = os.path.join(directory, sub)
+            if os.path.isdir(sub_dir):
+                result = _first_fits(sub_dir)
+                if result:
+                    return result
+
+        # 3. Üst klasörde ara
+        parent = os.path.dirname(directory)
+        if parent and parent != directory and os.path.isdir(parent):
+            result = _first_fits(parent)
+            if result:
+                return result
+            for sub in ("Light", "Lights", "lights", "Subs", "subs"):
+                sub_dir = os.path.join(parent, sub)
+                if os.path.isdir(sub_dir):
+                    result = _first_fits(sub_dir)
+                    if result:
+                        return result
+
+        return None
+
+    def _save_catalog_settings(self):
+        """Katalog ayarlarını settings'e kaydet."""
+        self._settings["astap_catalog"] = self._combo_catalog.currentText()
+        self._settings["cat_limit_mag"] = self._sp_lim_mag.value()
+        self._settings["astap_radius"] = self._sp_radius.value()
+        self._settings["astap_min_stars"] = self._sp_min_stars.value()
+        self._settings["astap_timeout"] = self._sp_timeout.value()
+        try:
+            from gui.settings import save as _save
+            _save(self._settings)
+            QMessageBox.information(self, "Kaydedildi",
+                f"Katalog ayarları kaydedildi:\n\n"
+                f"  Katalog: {self._combo_catalog.currentText()}\n"
+                f"  Limit Mag: {self._sp_lim_mag.value()}\n"
+                f"  Radius: {self._sp_radius.value()}°\n"
+                f"  Min Stars: {self._sp_min_stars.value()}")
+        except Exception as e:
+            QMessageBox.warning(self, "Hata", f"Ayarlar kaydedilemedi:\n{e}")
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Katalog yolu — ASTAP exe'nin yanındaki klasörden otomatik bul
@@ -968,65 +1075,237 @@ class PlateSolveDialog(QDialog):
     #  FITS metadata oku
     # ─────────────────────────────────────────────────────────────────────────
     def _get_metadata(self):
-        """FITS header'dan fokal uzunluk ve piksel boyutu oku."""
+        """FITS/EXIF header'dan tüm optik ve çekim verilerini oku.
+        TIFF/PNG ise aynı klasördeki ilk FITS dosyasından metadata alır."""
         last_file = self._settings.get("last_open_file", "")
         if not last_file or not os.path.isfile(last_file):
             path, _ = QFileDialog.getOpenFileName(
-                self, "FITS Dosyası Seç", "",
-                "FITS (*.fits *.fit *.fts);;Tümü (*)")
+                self, "Dosya Seç", "",
+                "Image (*.fits *.fit *.fts *.tif *.tiff *.png *.jpg *.cr2 *.cr3 *.nef *.arw);;Tümü (*)")
             if not path: return
             last_file = path
 
-        try:
-            from astropy.io import fits as _fits
-            with _fits.open(last_file, memmap=False, ignore_missing_simple=True) as hdul:
-                hdr = hdul[0].header
-                focal = (hdr.get("FOCALLEN") or hdr.get("FOCAL") or
-                         hdr.get("FLENGTH") or hdr.get("TELESCOP_FOCALLEN"))
-                pixel = (hdr.get("XPIXSZ") or hdr.get("PIXSCALE") or
-                         hdr.get("PIXSIZE1") or hdr.get("PIXELSIZE"))
-                ra    = hdr.get("RA") or hdr.get("CRVAL1")
-                dec   = hdr.get("DEC") or hdr.get("CRVAL2")
+        ext = os.path.splitext(last_file)[1].lower()
 
-            found = []
-            if focal:
+        # TIFF/PNG gibi FITS-olmayan formatlarda → aynı klasördeki ilk FITS'i ara
+        if ext not in (".fits", ".fit", ".fts"):
+            fits_file = self._find_fits_in_dir(os.path.dirname(last_file))
+            if fits_file:
+                self._log_line(f"📂 FITS bulunamadı, klasördeki FITS'ten okuniyor: {os.path.basename(fits_file)}")
+                last_file = fits_file
+                ext = os.path.splitext(fits_file)[1].lower()
+
+        found = []
+        meta = {}
+
+        # ── FITS header ──
+        if ext in (".fits", ".fit", ".fts"):
+            try:
+                from astropy.io import fits as _fits
+                with _fits.open(last_file, memmap=False, ignore_missing_simple=True) as hdul:
+                    hdr = hdul[0].header
+                    # Tüm ilgili alanları oku
+                    meta["focal"]    = hdr.get("FOCALLEN") or hdr.get("FOCAL") or hdr.get("FLENGTH")
+                    meta["aperture"] = hdr.get("APTDIA") or hdr.get("APERTURE") or hdr.get("DIAMETER")
+                    meta["pixel"]    = hdr.get("XPIXSZ") or hdr.get("PIXSIZE1") or hdr.get("PIXELSIZE")
+                    meta["ra"]       = hdr.get("RA") or hdr.get("CRVAL1") or hdr.get("OBJCTRA")
+                    meta["dec"]      = hdr.get("DEC") or hdr.get("CRVAL2") or hdr.get("OBJCTDEC")
+                    meta["exposure"] = hdr.get("EXPTIME") or hdr.get("EXPOSURE")
+                    meta["gain"]     = hdr.get("GAIN") or hdr.get("EGAIN")
+                    meta["binning"]  = hdr.get("XBINNING") or hdr.get("BINNING")
+                    meta["telescope"]= hdr.get("TELESCOP") or hdr.get("INSTRUME")
+                    meta["camera"]   = hdr.get("CAMERA") or hdr.get("CCD-NAME") or hdr.get("INSTRUME")
+                    meta["filter"]   = hdr.get("FILTER")
+                    meta["temp"]     = hdr.get("CCD-TEMP") or hdr.get("SET-TEMP")
+                    meta["date"]     = hdr.get("DATE-OBS") or hdr.get("DATE")
+                    meta["cdelt1"]   = hdr.get("CDELT1") or hdr.get("SECPIX1")
+            except Exception as e:
+                self._log_line(f"⚠  FITS okuma hatası: {e}")
+                return
+
+        # ── EXIF (RAW / JPG / TIFF) ──
+        elif ext in (".cr2", ".cr3", ".nef", ".arw", ".jpg", ".jpeg", ".tif", ".tiff", ".png"):
+            try:
+                import subprocess
+                # exiftool: önce tools/ klasöründe ara, sonra PATH
+                _app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                _exiftool_paths = [
+                    os.path.join(_app_dir, "tools", "exiftool.exe"),
+                    os.path.join(_app_dir, "tools", "exiftool(-k).exe"),
+                    "exiftool",  # PATH fallback
+                ]
+                _exiftool = next((p for p in _exiftool_paths if os.path.isfile(p)), "exiftool")
+                result = subprocess.run(
+                    [_exiftool, "-j", "-FocalLength", "-ApertureValue",
+                     "-FNumber", "-ExposureTime", "-ISO", "-Model", "-LensModel",
+                     "-ImageWidth", "-ImageHeight", "-Make",
+                     "-LensInfo", "-FocalLengthIn35mmFormat", last_file],
+                    capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    import json
+                    data = json.loads(result.stdout)[0]
+                    self._log_line(f"📋 exiftool: {_exiftool}")
+                    # Focal length
+                    fl = data.get("FocalLength", "")
+                    if fl:
+                        fl_str = str(fl).replace("mm", "").replace(" ", "").strip()
+                        try: meta["focal"] = float(fl_str)
+                        except ValueError: pass
+                    # F-number / Aperture
+                    fnumber = data.get("FNumber") or data.get("ApertureValue")
+                    if fnumber:
+                        try: meta["fratio_exif"] = float(fnumber)
+                        except (ValueError, TypeError): pass
+                    # Exposure
+                    exp = data.get("ExposureTime")
+                    if exp: meta["exposure"] = exp
+                    # ISO / Gain
+                    iso = data.get("ISO")
+                    if iso: meta["gain"] = iso
+                    # Camera & Lens
+                    make = data.get("Make", "")
+                    model = data.get("Model", "")
+                    meta["camera"] = f"{make} {model}".strip() if make else model
+                    meta["telescope"] = data.get("LensModel", "")
+                else:
+                    self._log_line(f"⚠  exiftool hata kodu: {result.returncode}")
+            except FileNotFoundError:
+                # exiftool yok — PIL ile dene
                 try:
-                    focal_val = float(focal)
-                    aperture  = self._sp_aperture.value()
-                    reducer   = self._sp_reducer.value()
-                    if aperture > 0 and reducer > 0:
-                        new_ratio = focal_val / (aperture * reducer)
-                        self._sp_fratio.setValue(round(new_ratio, 1))
-                    found.append(f"FL={focal_val:.1f}mm")
-                except (ValueError, TypeError):
+                    from PIL import Image as _PILImage
+                    from PIL.ExifTags import TAGS
+                    pimg = _PILImage.open(last_file)
+                    exif = pimg._getexif()
+                    if exif:
+                        for tag_id, val in exif.items():
+                            tag = TAGS.get(tag_id, tag_id)
+                            if tag == "FocalLength":
+                                try: meta["focal"] = float(val)
+                                except: pass
+                            elif tag == "FNumber":
+                                try: meta["fratio_exif"] = float(val)
+                                except: pass
+                            elif tag == "ExposureTime":
+                                meta["exposure"] = val
+                            elif tag == "ISOSpeedRatings":
+                                meta["gain"] = val
+                            elif tag == "Model":
+                                meta["camera"] = str(val)
+                except Exception:
                     pass
-            if pixel:
+            except Exception as e:
+                self._log_line(f"⚠  EXIF okuma hatası: {e}")
+                return
+        else:
+            self._log_line(f"⚠  Desteklenmeyen dosya formatı: {ext}")
+            return
+
+        # ── FITS'te optik bilgi yoksa (stacked çıktı) → light frame'den oku ──
+        has_optics = any(meta.get(k) for k in ("focal", "aperture", "pixel"))
+        if not has_optics and ext in (".fits", ".fit", ".fts"):
+            alt_fits = self._find_fits_in_dir(os.path.dirname(last_file))
+            if alt_fits and alt_fits != last_file:
+                self._log_line(f"📂 Stacked dosyada optik bilgi yok → {os.path.basename(alt_fits)}")
                 try:
-                    self._sp_pixel.setValue(float(pixel))
-                    found.append(f"px={float(pixel):.2f}µm")
-                except (ValueError, TypeError):
-                    pass
-            if ra is not None:
-                try:
-                    ra_deg = _parse_coord(ra, is_ra=True)
-                    self._ra_widget.set_from_deg(ra_deg)
-                    found.append(f"RA={ra_deg:.4f}°")
-                except (ValueError, TypeError):
-                    pass
-            if dec is not None:
-                try:
-                    dec_deg = _parse_coord(dec, is_ra=False)
-                    self._dec_widget.set_from_deg(dec_deg)
-                    found.append(f"Dec={dec_deg:+.4f}°")
-                except (ValueError, TypeError):
+                    from astropy.io import fits as _fits
+                    with _fits.open(alt_fits, memmap=False, ignore_missing_simple=True) as hdul:
+                        hdr = hdul[0].header
+                        meta["focal"]    = meta.get("focal") or hdr.get("FOCALLEN") or hdr.get("FOCAL") or hdr.get("FLENGTH")
+                        meta["aperture"] = meta.get("aperture") or hdr.get("APTDIA") or hdr.get("APERTURE") or hdr.get("DIAMETER")
+                        meta["pixel"]    = meta.get("pixel") or hdr.get("XPIXSZ") or hdr.get("PIXSIZE1") or hdr.get("PIXELSIZE")
+                        meta["ra"]       = meta.get("ra") or hdr.get("RA") or hdr.get("CRVAL1") or hdr.get("OBJCTRA")
+                        meta["dec"]      = meta.get("dec") or hdr.get("DEC") or hdr.get("CRVAL2") or hdr.get("OBJCTDEC")
+                        meta["exposure"] = meta.get("exposure") or hdr.get("EXPTIME") or hdr.get("EXPOSURE")
+                        meta["gain"]     = meta.get("gain") or hdr.get("GAIN") or hdr.get("EGAIN")
+                        meta["binning"]  = meta.get("binning") or hdr.get("XBINNING") or hdr.get("BINNING")
+                        meta["telescope"]= meta.get("telescope") or hdr.get("TELESCOP") or hdr.get("INSTRUME")
+                        meta["camera"]   = meta.get("camera") or hdr.get("CAMERA") or hdr.get("CCD-NAME") or hdr.get("INSTRUME")
+                        meta["filter"]   = meta.get("filter") or hdr.get("FILTER")
+                        meta["temp"]     = meta.get("temp") or hdr.get("CCD-TEMP") or hdr.get("SET-TEMP")
+                        meta["cdelt1"]   = meta.get("cdelt1") or hdr.get("CDELT1") or hdr.get("SECPIX1")
+                except Exception:
                     pass
 
-            if found:
-                self._log_line("📋 FITS header: " + "  ".join(found))
-            else:
-                self._log_line("⚠  FITS header'da uygun bilgi bulunamadı.")
-        except Exception as e:
-            self._log_line(f"❌  FITS okuma hatası: {e}")
+        # ── Değerleri GUI'ye uygula ──
+        # Aperture (mm)
+        if meta.get("aperture"):
+            try:
+                ap_val = float(meta["aperture"])
+                self._sp_aperture.setValue(ap_val)
+                found.append(f"Aperture={ap_val:.0f}mm")
+            except (ValueError, TypeError): pass
+
+        # Focal length (mm)
+        if meta.get("focal"):
+            try:
+                focal_val = float(meta["focal"])
+                aperture = self._sp_aperture.value()
+                reducer = self._sp_reducer.value()
+                if aperture > 0 and reducer > 0:
+                    new_ratio = focal_val / (aperture * reducer)
+                    self._sp_fratio.setValue(round(new_ratio, 1))
+                found.append(f"FL={focal_val:.1f}mm")
+            except (ValueError, TypeError): pass
+
+        # F-ratio from EXIF (DSLR)
+        if meta.get("fratio_exif") and not meta.get("focal"):
+            try:
+                self._sp_fratio.setValue(float(meta["fratio_exif"]))
+                found.append(f"f/{float(meta['fratio_exif']):.1f}")
+            except (ValueError, TypeError): pass
+
+        # Pixel size (µm)
+        if meta.get("pixel"):
+            try:
+                px_val = float(meta["pixel"])
+                # Binning düzeltmesi
+                binning = int(meta.get("binning", 1) or 1)
+                if binning > 1:
+                    px_val *= binning
+                    found.append(f"bin={binning}x")
+                self._sp_pixel.setValue(px_val)
+                found.append(f"px={px_val:.2f}µm")
+            except (ValueError, TypeError): pass
+
+        # RA
+        if meta.get("ra") is not None:
+            try:
+                ra_deg = _parse_coord(meta["ra"], is_ra=True)
+                self._ra_widget.set_from_deg(ra_deg)
+                found.append(f"RA={ra_deg:.4f}°")
+            except (ValueError, TypeError): pass
+
+        # Dec
+        if meta.get("dec") is not None:
+            try:
+                dec_deg = _parse_coord(meta["dec"], is_ra=False)
+                self._dec_widget.set_from_deg(dec_deg)
+                found.append(f"Dec={dec_deg:+.4f}°")
+            except (ValueError, TypeError): pass
+
+        # Arcsec/pixel from CDELT1
+        if meta.get("cdelt1"):
+            try:
+                scale = abs(float(meta["cdelt1"])) * 3600  # deg → arcsec
+                found.append(f"scale={scale:.2f}\"/px")
+            except (ValueError, TypeError): pass
+
+        # ── Log bilgileri ──
+        info_parts = []
+        if meta.get("telescope"): info_parts.append(f"🔭 {meta['telescope']}")
+        if meta.get("camera"):    info_parts.append(f"📷 {meta['camera']}")
+        if meta.get("exposure"):  info_parts.append(f"⏱ {meta['exposure']}s")
+        if meta.get("gain"):      info_parts.append(f"Gain={meta['gain']}")
+        if meta.get("filter"):    info_parts.append(f"Filter={meta['filter']}")
+        if meta.get("temp"):      info_parts.append(f"Temp={meta['temp']}°C")
+        if meta.get("date"):      info_parts.append(f"📅 {meta['date']}")
+
+        if info_parts:
+            self._log_line("📋 " + "  ".join(info_parts))
+        if found:
+            self._log_line("✅ Parametreler güncellendi: " + "  ".join(found))
+        else:
+            self._log_line("⚠  Header'da uygun optik bilgi bulunamadı.")
 
     # ─────────────────────────────────────────────────────────────────────────
     #  Solve başlat
@@ -1311,7 +1590,7 @@ def _scan_available_catalogs(exe_dir: str) -> dict:
     ASTAP exe klasöründe bulunan tüm katalogları tarar.
     Dönüş: {"D80": "/path/to/D80", "G17": "", ...}
     """
-    all_cats = ["D80", "G17", "H17", "W08", "D05", "T01", "S01", "V01"]
+    all_cats = ["V50", "D80", "D50", "D20", "G17", "H17", "W08", "D05", "T01", "S01", "V01"]
     found = {}
     for cat in all_cats:
         path = _find_catalog(exe_dir, cat)
@@ -1326,7 +1605,7 @@ def _auto_detect_catalog(exe_dir: str) -> str:
     Öncelik: D80 > G17 > H17 > W08 > D05
     .pkg formatı dahil tüm katalog türlerini tanır.
     """
-    priority = ["D80", "G17", "H17", "W08", "D05", "T01", "S01", "V01"]
+    priority = ["V50", "D80", "D50", "D20", "G17", "H17", "W08", "D05", "T01", "S01", "V01"]
     for cat in priority:
         if _find_catalog(exe_dir, cat):
             return cat
