@@ -47,6 +47,12 @@ Turkish manual: [KULLANIM_KILAVUZU.md](./KULLANIM_KILAVUZU.md)
    python main.py
    ```
 
+### ZIP Download
+
+- Fastest option: click `Code > Download ZIP` on GitHub.
+- Automatic package ZIP: open the `Actions` tab and download the latest `astro-maestro-pro-zip` artifact from the `Build ZIP package` workflow.
+- Versioned ZIPs: when a `v*` tag is pushed, the same ZIP is attached to the matching GitHub `Release`.
+
 ### Manual Install (Windows / macOS / Linux)
 
 1. **Prerequisites:** Python 3.9 or later
