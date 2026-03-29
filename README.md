@@ -3,6 +3,8 @@
 **Astrophotography image processing application** built with Python & PyQt6.
 
 Process deep-sky images with professional-grade tools — background extraction, star reduction, deconvolution, noise reduction, histogram stretching, color calibration, and more.
+ 
+Turkish manual: [KULLANIM_KILAVUZU.md](./KULLANIM_KILAVUZU.md)
 
 ---
 
