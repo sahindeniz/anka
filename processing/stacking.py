@@ -457,7 +457,9 @@ def _compute_weights(frames: List[np.ndarray], masks: List[np.ndarray],
 
 def _stack_weighted_mean(frames: List[np.ndarray], masks: List[np.ndarray],
                          valid_mask: Optional[np.ndarray],
-                         weights: np.ndarray) -> np.ndarray:
+                         weights: np.ndarray,
+                         progress_cb: Optional[Callable] = None,
+                         progress_label: str = "Ağırlıklı ortalama") -> np.ndarray:
     """Ağırlıklı ortalama — in-place ops ile minimum RAM."""
     is_color = frames[0].ndim == 3
     accumulator = np.zeros_like(frames[0], dtype=np.float32)
@@ -465,11 +467,12 @@ def _stack_weighted_mean(frames: List[np.ndarray], masks: List[np.ndarray],
     # Tek bir temp buffer — her iterasyonda yeniden kullan
     tmp = np.empty_like(frames[0], dtype=np.float32)
 
-    for i, (fr, msk) in enumerate(zip(frames, masks)):
+    total_frames = len(frames)
+    for i, (fr, msk) in enumerate(zip(frames, masks), start=1):
         combined = msk > 0.5
         if valid_mask is not None:
-            combined = combined & valid_mask[i]
-        w = np.float32(weights[i])
+            combined = combined & valid_mask[i - 1]
+        w = np.float32(weights[i - 1])
         if is_color:
             # tmp = fr * w  (in-place)
             np.multiply(fr, w, out=tmp, casting="unsafe")
@@ -482,6 +485,7 @@ def _stack_weighted_mean(frames: List[np.ndarray], masks: List[np.ndarray],
             np.multiply(tmp, combined, out=tmp)
             accumulator += tmp
         weight_sum += combined * w
+        _report_progress(progress_cb, 8, progress_label, i, total_frames)
 
     del tmp
     weight_sum[weight_sum == 0] = 1
@@ -498,6 +502,19 @@ def _build_valid_mask_stack(masks: List[np.ndarray]) -> np.ndarray:
     for i, msk in enumerate(masks):
         np.greater(msk, 0.5, out=valid[i])
     return valid
+
+
+def _report_progress(progress_cb: Optional[Callable], step: int,
+                     label: str, current: int, total: int,
+                     updates: int = 24) -> None:
+    """Uzun işlemlerde throttled ilerleme mesajı gönder."""
+    if progress_cb is None or total <= 0:
+        return
+    current = max(1, min(int(current), int(total)))
+    stride = max(1, total // max(1, updates))
+    if current < total and current != 1 and current % stride != 0:
+        return
+    progress_cb(step, f"{label} ({current}/{total})")
 
 
 def _fill_luminance_block(frames: List[np.ndarray], y0: int, y1: int, out: np.ndarray) -> None:
@@ -522,6 +539,8 @@ def _fill_luminance_block(frames: List[np.ndarray], y0: int, y1: int, out: np.nd
 
 
 def _reject_sigma_clip(frames: List[np.ndarray], valid: np.ndarray,
+                       progress_cb: Optional[Callable] = None,
+                       progress_label: str = "Sigma clip rejection",
                        kappa_low: float = 2.5, kappa_high: float = 2.5,
                        iterations: int = 3) -> np.ndarray:
     """Sigma Clipping — PixInsight tarzı, luminance bazlı renk koruyucu.
@@ -530,7 +549,8 @@ def _reject_sigma_clip(frames: List[np.ndarray], valid: np.ndarray,
     n = len(frames)
 
     block_size = max(1, min(64, h))
-    for y0 in range(0, h, block_size):
+    total_blocks = max(1, (h + block_size - 1) // block_size)
+    for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
         lum = np.empty((n, y1 - y0, w), dtype=np.float32)
         _fill_luminance_block(frames, y0, y1, lum)
@@ -548,11 +568,14 @@ def _reject_sigma_clip(frames: List[np.ndarray], valid: np.ndarray,
             v_block = v_block & (diff >= -kappa_low * std) & (diff <= kappa_high * std)
 
         valid[:, y0:y1, :] = v_block
+        _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
 
     return valid
 
 
 def _reject_linear_fit(frames: List[np.ndarray], valid: np.ndarray,
+                       progress_cb: Optional[Callable] = None,
+                       progress_label: str = "Linear fit rejection",
                        kappa_low: float = 3.0, kappa_high: float = 3.0) -> np.ndarray:
     """Linear Fit Clipping — az sayıda kare (5-10) için ideal.
     Her pikselde lineer model fit eder, modelden sapmayı reddeder."""
@@ -560,7 +583,8 @@ def _reject_linear_fit(frames: List[np.ndarray], valid: np.ndarray,
     h, w = frames[0].shape[:2]
 
     block_size = max(1, min(64, h))
-    for y0 in range(0, h, block_size):
+    total_blocks = max(1, (h + block_size - 1) // block_size)
+    for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
         lum = np.empty((n, y1 - y0, w), dtype=np.float32)
         _fill_luminance_block(frames, y0, y1, lum)
@@ -581,11 +605,14 @@ def _reject_linear_fit(frames: List[np.ndarray], valid: np.ndarray,
         v_block = v_block & (residual >= -kappa_low * res_std) & (residual <= kappa_high * res_std)
 
         valid[:, y0:y1, :] = v_block
+        _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
 
     return valid
 
 
 def _reject_percentile(frames: List[np.ndarray], valid: np.ndarray,
+                       progress_cb: Optional[Callable] = None,
+                       progress_label: str = "Percentile rejection",
                        low_pct: float = 10.0, high_pct: float = 90.0) -> np.ndarray:
     """Percentile Clipping — çok az sayıda kare (3-5) için.
     Alt ve üst yüzdelik dilimdeki pikselleri atar."""
@@ -593,7 +620,8 @@ def _reject_percentile(frames: List[np.ndarray], valid: np.ndarray,
     h, w = frames[0].shape[:2]
 
     block_size = max(1, min(64, h))
-    for y0 in range(0, h, block_size):
+    total_blocks = max(1, (h + block_size - 1) // block_size)
+    for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
         lum = np.empty((n, y1 - y0, w), dtype=np.float32)
         _fill_luminance_block(frames, y0, y1, lum)
@@ -610,11 +638,14 @@ def _reject_percentile(frames: List[np.ndarray], valid: np.ndarray,
 
         v_block = v_block & (lum >= lo) & (lum <= hi)
         valid[:, y0:y1, :] = v_block
+        _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
 
     return valid
 
 
 def _reject_winsorized_sigma(frames: List[np.ndarray], valid: np.ndarray,
+                              progress_cb: Optional[Callable] = None,
+                              progress_label: str = "Winsorized sigma rejection",
                               kappa_low: float = 2.5, kappa_high: float = 2.5,
                               iterations: int = 3) -> np.ndarray:
     """Winsorized Sigma Clipping — sigma clipping'e benzer ama
@@ -623,7 +654,8 @@ def _reject_winsorized_sigma(frames: List[np.ndarray], valid: np.ndarray,
     h, w = frames[0].shape[:2]
 
     block_size = max(1, min(64, h))
-    for y0 in range(0, h, block_size):
+    total_blocks = max(1, (h + block_size - 1) // block_size)
+    for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
         lum = np.empty((n, y1 - y0, w), dtype=np.float32)
         _fill_luminance_block(frames, y0, y1, lum)
@@ -649,6 +681,7 @@ def _reject_winsorized_sigma(frames: List[np.ndarray], valid: np.ndarray,
             v_block = v_block & (diff >= -kappa_low * std) & (diff <= kappa_high * std)
 
         valid[:, y0:y1, :] = v_block
+        _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
 
     return valid
 
@@ -947,30 +980,40 @@ def stack_aligned(
     # ── Reddetme + Stacking ──
     n_rejected = 0
     if method == "median":
-        result = _stack_median_weighted(aligned_frames, masks, weights)
+        result = _stack_median_weighted(
+            aligned_frames, masks, weights,
+            progress_cb=cb, progress_label="Median stacking")
     elif method == "mean":
-        result = _stack_weighted_mean(aligned_frames, masks, None, weights)
+        result = _stack_weighted_mean(
+            aligned_frames, masks, None, weights,
+            progress_cb=cb, progress_label="Ağırlıklı ortalama")
     else:
         # Rejection aynı bool stack üzerinde çalışır; ikinci büyük maske üretme.
         valid = _build_valid_mask_stack(masks)
         base_valid_count = int(np.sum(valid))
         if method == "sigma_clip":
             _reject_sigma_clip(aligned_frames, valid,
+                               progress_cb=cb, progress_label="Sigma clip rejection",
                                kappa_low=kappa_low, kappa_high=kappa_high,
                                iterations=iterations)
         elif method == "linear_fit":
             _reject_linear_fit(aligned_frames, valid,
+                               progress_cb=cb, progress_label="Linear fit rejection",
                                kappa_low=kappa_low, kappa_high=kappa_high)
         elif method == "percentile":
             _reject_percentile(aligned_frames, valid,
+                               progress_cb=cb, progress_label="Percentile rejection",
                                low_pct=10.0, high_pct=90.0)
         elif method == "winsorized_sigma":
             _reject_winsorized_sigma(aligned_frames, valid,
+                                     progress_cb=cb, progress_label="Winsorized sigma rejection",
                                      kappa_low=kappa_low, kappa_high=kappa_high,
                                      iterations=iterations)
 
         n_rejected = int(base_valid_count - int(np.sum(valid)))
-        result = _stack_weighted_mean(aligned_frames, masks, valid, weights)
+        result = _stack_weighted_mean(
+            aligned_frames, masks, valid, weights,
+            progress_cb=cb, progress_label="Ağırlıklı ortalama")
         del valid
 
     cb(8, f"✅ Stacking tamamlandı — {n} kare, {n_rejected} piksel reddedildi")
@@ -988,7 +1031,9 @@ def stack_aligned(
 
 
 def _stack_median_weighted(frames: List[np.ndarray], masks: List[np.ndarray],
-                           weights: np.ndarray) -> np.ndarray:
+                           weights: np.ndarray,
+                           progress_cb: Optional[Callable] = None,
+                           progress_label: str = "Median stacking") -> np.ndarray:
     """Ağırlıklı median — basit median (ağırlık 1 ise standard median)."""
     # Weighted median karmaşık, burada standard median + weight != 0 filtre
     n = len(frames)
@@ -997,7 +1042,8 @@ def _stack_median_weighted(frames: List[np.ndarray], masks: List[np.ndarray],
     result = np.zeros_like(frames[0], dtype=np.float32)
 
     block_size = max(1, min(64, h))
-    for y0 in range(0, h, block_size):
+    total_blocks = max(1, (h + block_size - 1) // block_size)
+    for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
         mask_block = np.stack([m[y0:y1] for m in masks], axis=0)
@@ -1016,6 +1062,7 @@ def _stack_median_weighted(frames: List[np.ndarray], masks: List[np.ndarray],
                 warnings.simplefilter("ignore", category=RuntimeWarning)
                 med = np.nanmedian(masked, axis=0)
             result[y0:y1] = np.nan_to_num(med, nan=0.0)
+        _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
 
     return result
 

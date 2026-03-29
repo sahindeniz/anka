@@ -3646,17 +3646,37 @@ class StackingDialog(QDialog):
         """Progress sinyali — log + progress bar güncelle."""
         self._log(msg)
         self._stack_step_count += 1
-        # Step numarasından ilerleme tahmin et
-        # [1] Bias → [2] Dark → [3] DarkFlat → [4] Flat → [5] Kalibrasyon
-        # [6] Kalite → [7] Hizalama → [8] Stack
         import re
         m = re.match(r'\[(\d+)\]', msg)
         if m:
             step = int(m.group(1))
-            pct = min(95, int(step * 12))
-            self._stack_pbar.setValue(pct)
-            self._stack_pbar.setFormat(f"Adım {step}/8 — %p%")
-            self._pbar_lbl.setText(f"{pct}%")
+            frac = re.search(r'\((\d+)/(\d+)\)', msg)
+            if step == 8:
+                if "Normalizasyon:" in msg:
+                    pct = 82
+                    label = "Normalizasyon"
+                elif "Ağırlıklandırma:" in msg:
+                    pct = 86
+                    label = "Ağırlıklandırma"
+                elif "Auto rejection:" in msg:
+                    pct = 88
+                    label = "Rejection seçimi"
+                elif frac:
+                    cur = max(1, int(frac.group(1)))
+                    total = max(cur, int(frac.group(2)))
+                    pct = min(99, 88 + int(11 * (cur / total)))
+                    label = msg.split('] ', 1)[-1]
+                else:
+                    pct = 89
+                    label = "Stacking"
+                self._stack_pbar.setValue(pct)
+                self._stack_pbar.setFormat(f"{label} — %p%")
+                self._pbar_lbl.setText(f"{pct}%")
+            else:
+                pct = min(80, int(step * 10))
+                self._stack_pbar.setValue(pct)
+                self._stack_pbar.setFormat(f"Adım {step}/8 — %p%")
+                self._pbar_lbl.setText(f"{pct}%")
 
     def _on_done(self, result):
         self._result = result
