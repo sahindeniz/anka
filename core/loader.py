@@ -3,6 +3,10 @@ Universal image loader — FITS, PNG, TIFF, JPEG, BMP, CR2/NEF raw, XISF, etc.
 Returns a normalised float32 numpy array, always 2-D (grayscale) or 3-D (H,W,3) RGB.
 """
 import os, numpy as np
+import cv2 as _cv2
+
+
+_CV2_IMREAD_ORIG = _cv2.imread
 
 
 def _fix_hot_pixels_bayer(raw, sigma=5.0):
@@ -52,6 +56,36 @@ FILE_FILTER = (
     "RAW (*.cr2 *.cr3 *.nef *.arw *.dng *.orf *.rw2 *.raf *.pef *.srw *.x3f *.raw *.iiq);;"
     "All Files (*)"
 )
+
+
+def read_image_file(path: str, flags: int):
+    """Read images with Windows-safe Unicode path handling for OpenCV."""
+    data = _CV2_IMREAD_ORIG(path, flags)
+    if data is not None:
+        return data
+
+    try:
+        raw = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+
+    if raw.size == 0:
+        return None
+    return _cv2.imdecode(raw, flags)
+
+
+def _install_unicode_safe_imread():
+    """Patch cv2.imread once so legacy call sites also handle Unicode paths."""
+    if getattr(_cv2.imread, "__name__", "") == "_unicode_safe_imread":
+        return
+
+    def _unicode_safe_imread(path, flags=_cv2.IMREAD_COLOR):
+        return read_image_file(path, flags)
+
+    _cv2.imread = _unicode_safe_imread
+
+
+_install_unicode_safe_imread()
 
 
 def load_image(path: str) -> np.ndarray:
@@ -152,7 +186,7 @@ def load_image(path: str) -> np.ndarray:
         except ImportError:
             raise ImportError("XISF format icin: pip install xisf")
 
-    # ── RAW (rawpy) ───────────────────────────────────────────────────────
+    # ── RAW (rawpy) ──────────────────────────────────────────────────────
     elif ext in _RAW_EXTS:
         try:
             import rawpy
@@ -167,9 +201,9 @@ def load_image(path: str) -> np.ndarray:
     else:
         import cv2
         if ext in (".hdr", ".exr"):
-            data = cv2.imread(path, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
+            data = read_image_file(path, cv2.IMREAD_ANYDEPTH | cv2.IMREAD_ANYCOLOR)
         else:
-            data = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+            data = read_image_file(path, cv2.IMREAD_UNCHANGED)
         if data is None:
             raise ValueError(f"Goruntu okunamadi: {path}")
         orig_dtype = data.dtype
