@@ -5588,6 +5588,7 @@ class AstroApp(QMainWindow):
         # ── Yardım ─────────────────────────────────────────────────────────
         hm = mb.addMenu("❓  Yardım")
         self._act(hm, "🌌  Workflow Rehberi", None,     self._show_workflow)
+        self._act(hm, "📘  Kullanım Kılavuzu", None,    self._open_user_guide)
         hm.addSeparator()
         self._act(hm, "🔄  Güncelleme Kontrolü…", None, self._open_update_dialog)
         hm.addSeparator()
@@ -5760,7 +5761,69 @@ class AstroApp(QMainWindow):
             "  • ASTAP Plate Solving\n"
             "  • DSS-style stacking\n"
             "  • Photoshop-style histogram\n"
-            "  • Python script editörü")
+            "  • Python script editörü\n\n"
+            "Kullanım kılavuzu: Yardım > Kullanım Kılavuzu")
+
+    def _open_user_guide(self):
+        guide_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "KULLANIM_KILAVUZU.md"))
+        if not os.path.isfile(guide_path):
+            QMessageBox.warning(
+                self,
+                "Kullanım Kılavuzu",
+                f"Kılavuz dosyası bulunamadı:\n{guide_path}",
+            )
+            return
+
+        try:
+            with open(guide_path, "r", encoding="utf-8") as fh:
+                guide_text = fh.read()
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "Kullanım Kılavuzu",
+                f"Kılavuz okunamadı:\n{e}",
+            )
+            return
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("📘  Kullanım Kılavuzu")
+        dlg.resize(980, 760)
+        dlg.setStyleSheet(f"background:{BG2};color:{TEXT};")
+
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(12, 12, 12, 12)
+        lay.setSpacing(8)
+
+        title = QLabel("📘  Astro Maestro Pro Kullanım Kılavuzu")
+        title.setStyleSheet(f"color:{HEAD};font-size:15px;font-weight:700;")
+        lay.addWidget(title)
+
+        subtitle = QLabel("Kurulum, workflow, stacking, AutoSTF ve sık sorunlar")
+        subtitle.setStyleSheet(f"color:{MUTED};font-size:10px;")
+        lay.addWidget(subtitle)
+
+        viewer = QTextEdit()
+        viewer.setReadOnly(True)
+        viewer.setStyleSheet(
+            f"QTextEdit{{background:{BG};color:{TEXT};border:1px solid {BORDER};"
+            f"border-radius:6px;padding:8px;font-size:11px;}}"
+        )
+        try:
+            viewer.setMarkdown(guide_text)
+        except Exception:
+            viewer.setPlainText(guide_text)
+        lay.addWidget(viewer, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_close = QPushButton("Kapat")
+        btn_close.setFixedHeight(30)
+        btn_close.setStyleSheet(_btn(h=30))
+        btn_close.clicked.connect(dlg.accept)
+        btn_row.addWidget(btn_close)
+        lay.addLayout(btn_row)
+
+        dlg.exec()
 
     # ── Plate Solve ──────────────────────────────────────────────────────
     def _open_plate_solve(self):
