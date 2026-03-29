@@ -11,9 +11,9 @@ _SETTINGS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "setti
 _DEFAULTS = {
     "pipeline_enabled": True,
     "stretch_type": "arcsinh",
-    "arcsinh_factor": 4.0,
-    "color_saturation_boost": 1.30,
-    "sharpen_amount": 1.15,
+    "arcsinh_factor": 3.2,
+    "color_saturation_boost": 1.18,
+    "sharpen_amount": 0.65,
 }
 
 
@@ -49,7 +49,7 @@ def run_auto_pipeline(input_path: str, *, custom_settings: dict | None = None) -
 
     stretch_type = settings.get("stretch_type", "arcsinh")
     if stretch_type == "arcsinh":
-        factor = float(settings.get("arcsinh_factor", 4.0))
+        factor = float(settings.get("arcsinh_factor", 3.2))
         img_f = np.arcsinh(img_f * factor) / np.arcsinh(np.float32(factor))
     elif stretch_type == "clahe":
         gray = (img_f * 255).astype(np.uint8)
@@ -65,7 +65,7 @@ def run_auto_pipeline(input_path: str, *, custom_settings: dict | None = None) -
     # percentile: no-op (already 0-1)
 
     # --- Color saturation boost ---
-    sat_boost = float(settings.get("color_saturation_boost", 1.30))
+    sat_boost = float(settings.get("color_saturation_boost", 1.18))
     if img_f.ndim == 3 and sat_boost != 1.0:
         img_u8 = (img_f * 255).astype(np.uint8)
         hsv = cv2.cvtColor(img_u8, cv2.COLOR_BGR2HSV)
@@ -73,7 +73,7 @@ def run_auto_pipeline(input_path: str, *, custom_settings: dict | None = None) -
         img_f = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).astype(np.float32) / 255.0
 
     # --- Sharpen ---
-    sharpen_amt = float(settings.get("sharpen_amount", 1.15))
+    sharpen_amt = float(settings.get("sharpen_amount", 0.65))
     if sharpen_amt > 0:
         blurred = cv2.GaussianBlur(img_f, (0, 0), 2.0)
         img_f = cv2.addWeighted(img_f, 1.0 + sharpen_amt, blurred, -sharpen_amt, 0)

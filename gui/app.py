@@ -1254,15 +1254,26 @@ class SettingsDialog(QDialog):
             r.addWidget(l); r.addWidget(widget); r.addStretch()
             return r
 
+        stretch_defaults = ["auto_stf","veralux","linear","hyperbolic","asinh","statistical"]
+        stretch_default = self._s.get("default_stretch", "auto_stf")
+        if stretch_default not in stretch_defaults:
+            stretch_default = "auto_stf"
         self.combo_def_stretch = QComboBox()
-        self.combo_def_stretch.addItems(["auto_stf","linear","hyperbolic","asinh","statistical"])
-        self.combo_def_stretch.setCurrentText(self._s.get("default_stretch","auto_stf"))
+        self.combo_def_stretch.addItems(stretch_defaults)
+        self.combo_def_stretch.setCurrentText(stretch_default)
         self.combo_def_stretch.setStyleSheet(COMBO_CSS); self.combo_def_stretch.setFixedWidth(130)
         glayout.addLayout(row("Default Stretch Method:", self.combo_def_stretch))
 
+        bg_defaults = ["graxpert","nox","dbe_spline","polynomial","ai_gradient","gaussian_sub"]
+        bg_default = self._s.get(
+            "default_bg",
+            "graxpert" if self._s.get("graxpert_exe", "") else "nox",
+        )
+        if bg_default not in bg_defaults:
+            bg_default = "graxpert" if self._s.get("graxpert_exe", "") else "nox"
         self.combo_def_bg = QComboBox()
-        self.combo_def_bg.addItems(["dbe_spline","polynomial","ai_gradient","gaussian_sub"])
-        self.combo_def_bg.setCurrentText(self._s.get("default_bg","dbe_spline"))
+        self.combo_def_bg.addItems(bg_defaults)
+        self.combo_def_bg.setCurrentText(bg_default)
         self.combo_def_bg.setStyleSheet(COMBO_CSS); self.combo_def_bg.setFixedWidth(130)
         glayout.addLayout(row("Default BG Method:", self.combo_def_bg))
 
@@ -2082,6 +2093,60 @@ class WorkflowPanel(QFrame):
          "Tekrarlanabilir işlemler için kaydet ve tekrar çalıştır."),
     ]
 
+    _RECOMMENDED_STEP_ORDER = [0, 1, 2, 3, 7, 5, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+
+    @classmethod
+    def _recommended_steps(cls):
+        steps = [list(step) for step in cls.STEPS]
+        overrides = {
+            4: {
+                "title": "7. Deconvolution",
+                "desc": "Optik bulaniklik ve yildiz PSF duzeltme. Blind, Richardson-Lucy, Wiener\n"
+                        "veya Blur Exterminator. Lineer veride PSF modeli en dogru calisir.\n"
+                        "Gurultu azaltmadan once hafif-orta gucte uygulamak en dogal detayi verir.",
+            },
+            5: {
+                "title": "6. Aberasyon Duzeltme",
+                "desc": "Kromatik aberasyon, koma ve spike duzeltme.\n"
+                        "Renk kalibrasyonu sonrasi ve deconvolution oncesi duzeltmek en temiz sonucu verir.",
+            },
+            6: {
+                "title": "8. Gurultu Azaltma (Lineer)",
+                "desc": "Lineer fazda gurultu karakteri uniform - en etkili nokta burasi.\n"
+                        "Oneri: tek pas, hafif guc. Ana temizligi burada, son rotusu stretch sonrasi yap.\n"
+                        "Agresif denoise yerine detay koruyan orta seviye ayarlar en iyi sonucu verir.",
+            },
+            7: {
+                "title": "5. Renk Kalibrasyon",
+                "desc": "Onerilen sira: gradient ve arka plan notralizasyonundan hemen sonra uygula.\n"
+                        "Plate solve varsa PCC Solve, yoksa Average Spiral veya SPCC ile guvenli kalibrasyon.\n"
+                        "Stretch oncesi dogru beyaz dengesi tum sonraki islemlerin temelini olusturur.",
+            },
+            9: {
+                "title": "10. Yildiz Kontrolu (Ilk Pas)",
+                "desc": "Ilk pas icin hafif yildiz kucultme veya yildiz baskisini kontrol et.\n"
+                        "Amac yildizlarin nebula detayini bogmasini engellemek, goruntuyu plastiklestirmek degil.\n"
+                        "Final shrink adimini sona sakla; burada nazik bir on denge kur.",
+            },
+            13: {
+                "title": "14. Yildiz Kucultme (Final)",
+                "desc": "Yildiz boyutunu kucult - cekirdek/halo ayrimi ile orantili shrink.\n"
+                        "Halo fill ile dogal gorunum. Renk ve keskinlik oturduktan sonra son yildiz duzeltmesi.\n"
+                        "Oneri: tek, hafif final pas; kucuk degerler daha dogal sonuc verir.",
+            },
+            15: {
+                "title": "16. Yildiz Birlestirme / Blend",
+                "desc": "Starless ve yildiz katmanlariyla calisiyorsan islenmis katmanlari burada blend et.\n"
+                        "Screen/Lighten modlari, yildiz renk ve boyut kontrolu.\n"
+                        "Ayri katman kullanilmiyorsa bu adim opsiyoneldir.",
+            },
+        }
+        for idx, values in overrides.items():
+            if 0 <= idx < len(steps):
+                steps[idx][2] = values["title"]
+                steps[idx][5] = values["desc"]
+        return [tuple(steps[i]) for i in cls._RECOMMENDED_STEP_ORDER]
+
     def __init__(self, anchor_btn, parent=None):
         super().__init__(parent, Qt.WindowType.Popup)
         self._anchor = anchor_btn
@@ -2141,7 +2206,7 @@ class WorkflowPanel(QFrame):
         cl.setContentsMargins(0,4,0,4); cl.setSpacing(2)
 
         prev_phase = None
-        for i, (key, icon, title_t, phase_color, phase_lbl, desc) in enumerate(self.STEPS):
+        for i, (key, icon, title_t, phase_color, phase_lbl, desc) in enumerate(self._recommended_steps()):
             # Faz ayırıcı
             if phase_lbl != prev_phase:
                 sep_w = QWidget(); sep_w.setStyleSheet(
@@ -6641,9 +6706,17 @@ class AstroApp(QMainWindow):
 
         # Background Extraction — GraXpert Siril tarzı
         p = _make("🌌","Background Extraction","bg")
+        bg_methods = ["graxpert","nox","dbe_spline","polynomial","ai_gradient","median_grid","gaussian_sub"]
+        bg_default = str(self._settings.get("default_bg", "")).strip() or (
+            "graxpert" if self._settings.get("graxpert_exe","") else "nox"
+        )
+        if bg_default not in bg_methods:
+            bg_default = "graxpert" if self._settings.get("graxpert_exe","") else "nox"
+        if bg_default == "graxpert" and not self._settings.get("graxpert_exe",""):
+            bg_default = "nox"
         p.add_combo("method","Method",
-                    ["graxpert","nox","dbe_spline","polynomial","ai_gradient","median_grid","gaussian_sub"],
-                    "graxpert" if self._settings.get("graxpert_exe","") else "nox",
+                    bg_methods,
+                    bg_default,
                     "graxpert   — GraXpert AI (en iyi kalite)\n"
                     "nox        — Veralux Nox (membran)\n"
                     "dbe_spline — RBF spline\n"
@@ -6654,11 +6727,26 @@ class AstroApp(QMainWindow):
         gx_hdr.setStyleSheet(f"color:#7af0a0;font-size:10px;font-weight:700;")
         gx_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         p._bl.addWidget(gx_hdr)
-        self._gx_model  = p.add_combo("gx_model","Select Model",
-                                       ["1.0.0","2.0.0","3.0.0","latest"],"1.0.0")
-        self._gx_smooth = p.add_slider("gx_smoothing","Smoothing",0.0,1.0,0.5,2)
-        self._gx_corr   = p.add_combo("gx_correction","Correction Type",
-                                       ["Subtraction","Division"],"Subtraction")
+        self._gx_model  = p.add_combo(
+            "gx_model",
+            "Select Model",
+            ["1.0.0","2.0.0","3.0.0","latest"],
+            str(self._settings.get("graxpert_ai_version", "latest") or "latest"),
+        )
+        self._gx_smooth = p.add_slider(
+            "gx_smoothing",
+            "Smoothing",
+            0.0,
+            1.0,
+            float(self._settings.get("graxpert_smoothing", 0.35)),
+            2,
+        )
+        self._gx_corr   = p.add_combo(
+            "gx_correction",
+            "Correction Type",
+            ["Subtraction","Division"],
+            str(self._settings.get("graxpert_correction", "Subtraction") or "Subtraction"),
+        )
         self._gx_keep   = p.add_check("gx_keep_bg","Keep background")
         self._gx_keep.setChecked(False)
         # Advanced grubu
@@ -6668,7 +6756,7 @@ class AstroApp(QMainWindow):
             f"border:1px solid {BORDER};border-radius:3px;padding:2px 6px;"
             f"background:{BG3};margin-top:4px;")
         p._bl.addWidget(adv_hdr)
-        self._gx_batch = p.add_slider("gx_batch","Batch Size",1,8,4,0)
+        self._gx_batch = p.add_slider("gx_batch","Batch Size",1,8,2,0)
         self._gx_gpu   = p.add_check("gx_gpu","Use GPU acceleration (if available)")
         self._gx_gpu.setChecked(True)
         # Klasik metodlar
@@ -6676,9 +6764,9 @@ class AstroApp(QMainWindow):
         cls_hdr.setStyleSheet(f"color:{SUBTEXT};font-size:9px;font-weight:600;margin-top:4px;")
         cls_hdr.setAlignment(Qt.AlignmentFlag.AlignCenter)
         p._bl.addWidget(cls_hdr)
-        p.add_slider("grid_size","Grid Size",8,32,16,0)
+        p.add_slider("grid_size","Grid Size",8,32,24,0)
         p.add_slider("poly_degree","Poly Degree",2,6,4,0)
-        p.add_slider("clip_low","Clip Low (%)",0,10,0,1)
+        p.add_slider("clip_low","Clip Low (%)",0,10,0.5,1)
         self._gx_widgets = [gx_hdr, self._gx_model, self._gx_smooth,
                             self._gx_corr, self._gx_keep, adv_hdr,
                             self._gx_batch, self._gx_gpu]
@@ -6690,7 +6778,7 @@ class AstroApp(QMainWindow):
         # p._params["method"][0] = PC widget (combo)
         p._params["method"][0].cb.currentTextChanged.connect(_bg_method_changed)
         # Baslangicta goster/gizle
-        cur_method = "graxpert" if self._settings.get("graxpert_exe","") else "nox"
+        cur_method = bg_default
         _bg_method_changed(cur_method)
         p.run_requested.connect(lambda s,k="bg": self._run_key(k,s))
 
@@ -6698,7 +6786,7 @@ class AstroApp(QMainWindow):
         p = _make("🌑","BG Siyah","bg_neutralize")
         p.add_combo("method","Yöntem",
                     ["percentile","sigma_clip","grid"],
-                    "percentile",
+                    "sigma_clip",
                     "percentile  — Alt yüzdelik arka plan tahmini (hızlı)\n"
                     "sigma_clip  — Sigma-kırpmalı istatistik (hassas)\n"
                     "grid        — Grid tabanlı yerel çıkarma (gradient)")
@@ -6713,6 +6801,11 @@ class AstroApp(QMainWindow):
         p.add_slider("protect_signal","Sinyal Koruma",0.0,1.0,0.3,2,
                      "Parlak sinyal bölgelerini koruma eşiği")
         p.add_check("per_channel","Kanal Bağımsız",True)
+        p._params["strength"][0].sp.setValue(0.85)
+        p._params["bg_percentile"][0].sp.setValue(7.0)
+        p._params["sigma"][0].sp.setValue(2.8)
+        p._params["grid_size"][0].sp.setValue(10)
+        p._params["protect_signal"][0].sp.setValue(0.45)
         p.run_requested.connect(lambda s,k="bg_neutralize": self._run_key(k,s))
 
         # Noise Reduction
@@ -6735,6 +6828,9 @@ class AstroApp(QMainWindow):
         p.add_slider("modulation","Modulation",0,1,1.0,2,
                      "Mastro Noise blend (0=orijinal, 1=tam denoise)")
         p.add_slider("iterations","Iterations",1,5,1,0)
+        p._params["strength"][0].sp.setValue(0.45)
+        p._params["detail"][0].sp.setValue(0.65)
+        p._params["modulation"][0].sp.setValue(0.65)
         p.run_requested.connect(lambda s,k="noise": self._run_key(k,s))
 
         # Deconvolution
@@ -6751,6 +6847,11 @@ class AstroApp(QMainWindow):
         p.add_slider("tv_weight","TV Weight",0.01,1.0,0.1,2)
         p.add_slider("strength","BE Strength",0,1,1.0,2,"Blur Exterminator blend")
         p.add_slider("noise_level","BE Noise",0.001,0.1,0.01,3,"Blur Exterminator noise level")
+        p._params["method"][0].cb.setCurrentText("blind")
+        p._params["iterations"][0].sp.setValue(15)
+        p._params["tv_weight"][0].sp.setValue(0.08)
+        p._params["strength"][0].sp.setValue(0.65)
+        p._params["noise_level"][0].sp.setValue(0.015)
         p.run_requested.connect(lambda s,k="deconv": self._run_key(k,s))
 
         # Star Smaller (Deconv panelinin altinda)
@@ -6769,6 +6870,11 @@ class AstroApp(QMainWindow):
                      "DoG filtre min sigma")
         p.add_slider("threshold","Threshold",0.001,0.3,0.03,3,
                      "Yıldız tespit eşiği")
+        p._params["strength"][0].sp.setValue(0.45)
+        p._params["sensitivity"][0].sp.setValue(0.55)
+        p._params["feather"][0].sp.setValue(4)
+        p._params["max_sigma"][0].sp.setValue(7)
+        p._params["threshold"][0].sp.setValue(0.025)
         p.run_requested.connect(lambda s,k="stars": self._run_key(k,s))
 
         # Star Shrink (dedicated panel)
@@ -6807,6 +6913,18 @@ class AstroApp(QMainWindow):
                      "Keskinlik gaussian sigma")
         p.add_slider("denoise_strength","Gürültü Azaltma",0,20,5,0,
                      "Bilateral filter gücü — 0=kapalı")
+        p._params["shrink_factor"][0].sp.setValue(0.75)
+        p._params["halo_fill_ratio"][0].sp.setValue(0.55)
+        p._params["star_noise_level"][0].sp.setValue(2.0)
+        p._params["star_density_threshold"][0].sp.setValue(2.3)
+        p._params["stretch_strength"][0].sp.setValue(0.18)
+        p._params["bg_grid"][0].sp.setValue(10)
+        p._params["saturation"][0].sp.setValue(1.2)
+        p._params["vibrance"][0].sp.setValue(0.15)
+        p._params["local_contrast"][0].sp.setValue(1.2)
+        p._params["sharpen_amount"][0].sp.setValue(0.45)
+        p._params["sharpen_radius"][0].sp.setValue(1.2)
+        p._params["denoise_strength"][0].sp.setValue(3)
         p.run_requested.connect(lambda s,k="star_shrink": self._run_key(k,s))
 
         # GraXpert Gradient Extraction (dedicated panel)
@@ -6854,6 +6972,9 @@ class AstroApp(QMainWindow):
         p.add_slider("gx_poly_degree","Polinom Derecesi",1,6,4,0)
         p.add_sep()
         p.add_check("gx_keep_bg","Arka plani goster (cikartilmis degil)",False)
+        p._params["gx_smoothing"][0].sp.setValue(0.35)
+        p._params["gx_grid_pts"][0].sp.setValue(10)
+        p._params["gx_tolerance"][0].sp.setValue(0.8)
         p.run_requested.connect(lambda s,k="graxpert": self._run_key(k,s))
 
         # Sharpening
@@ -6871,6 +6992,8 @@ class AstroApp(QMainWindow):
         p.add_slider("threshold","Threshold",0,0.5,0.0,3)
         p.add_slider("scale_levels","Scale Levels",2,6,4,0,"Multiscale VLC levels")
         p.add_slider("iterations","Iterations",1,5,1,0)
+        p._params["radius"][0].sp.setValue(1.6)
+        p._params["amount"][0].sp.setValue(0.7)
         p.run_requested.connect(lambda s,k="sharp": self._run_key(k,s))
 
         # Nebula Enhancement
@@ -6881,6 +7004,10 @@ class AstroApp(QMainWindow):
         p.add_slider("blur_kernel","Blur Kernel (px)",11,101,51,0)
         p.add_slider("blend","Blend (0–1)",0,1,1.0,2)
         p.add_slider("clahe_clip","CLAHE Clip",1.0,10.0,3.0,1)
+        p._params["strength"][0].sp.setValue(1.6)
+        p._params["blur_kernel"][0].sp.setValue(45)
+        p._params["blend"][0].sp.setValue(0.75)
+        p._params["clahe_clip"][0].sp.setValue(2.5)
         p.run_requested.connect(lambda s,k="nebula": self._run_key(k,s))
 
         # Color Calibration
@@ -6898,6 +7025,12 @@ class AstroApp(QMainWindow):
                     "photometric— Basit fotometri\n"
                     "white_balance — Yuzdelik beyaz nokta")
         p.add_slider("neutral_percentile","Neutral %ile",10,90,50,0,"AI neutral: background percentile")
+        has_recent_solve = (
+            self._settings.get("last_platesolve_ra") is not None and
+            self._settings.get("last_platesolve_dec") is not None
+        )
+        p._params["method"][0].cb.setCurrentText("pcc_solve" if has_recent_solve else "avg_spiral")
+        p._params["neutral_percentile"][0].sp.setValue(40)
         p.run_requested.connect(lambda s,k="color": self._run_key(k,s))
 
         # Morphology
@@ -6930,6 +7063,10 @@ class AstroApp(QMainWindow):
         p.add_slider("sensitivity","Hassasiyet",0.1,1.0,0.5,1,
                      "Yıldız tespiti hassasiyeti — düşük=sadece parlak")
         p.add_check("protect_nebula","Nebula Koru",True)
+        p._params["chromatic_strength"][0].sp.setValue(0.6)
+        p._params["coma_strength"][0].sp.setValue(0.45)
+        p._params["roundness_strength"][0].sp.setValue(0.35)
+        p._params["sensitivity"][0].sp.setValue(0.45)
         p.run_requested.connect(lambda s,k="aberration": self._run_key(k,s))
 
         # Histogram Stretch
@@ -6944,6 +7081,10 @@ class AstroApp(QMainWindow):
             "asinh     — Arcsinh\n"
             "statistical—mean±k·σ\n"
             "power     — x^α")
+        stretch_default = str(self._settings.get("default_stretch", "auto_stf")).strip() or "auto_stf"
+        self._st_method.cb.setCurrentText(
+            stretch_default if stretch_default in {"veralux","auto_stf","linear","hyperbolic","asinh","log","midtone","statistical","power"} else "auto_stf"
+        )
         p.add_slider("low","Clip Low (%)",0,20,2.0,1)
         p.add_slider("high","Clip High (%)",80,100,98.0,1)
         p.add_slider("gamma","Gamma",0.1,3.0,1.0,2)
@@ -6995,6 +7136,10 @@ class AstroApp(QMainWindow):
         self._stf_target=p.add_slider("stf_target","Target Background",0.05,0.5,0.25,2,"STF target median")
         self._stf_clip=p.add_slider("stf_clip","Shadow Clip",-5.0,0.0,-2.8,1)
         self._stf_widgets=[stf_t,self._stf_target,self._stf_clip]
+        self._vl_tb.sp.setValue(0.18)
+        self._vl_scr.sp.setValue(0.65)
+        self._vl_sha.sp.setValue(0.08)
+        self._stf_target.sp.setValue(0.22)
         self._update_stretch_vis()
         self._st_method.cb.currentTextChanged.connect(lambda _: self._update_stretch_vis())
         p.run_requested.connect(lambda s,k="stretch": self._run_key(k,s))
@@ -7188,6 +7333,7 @@ class AstroApp(QMainWindow):
     def _load_settings(self):
         from gui.settings import load as _load_cfg
         self._settings = _load_cfg()
+        self._apply_process_defaults_from_settings()
         # Onceki calisma klasorunu geri yukle
         saved_dir = self._settings.get("last_open_dir", "")
         if saved_dir and os.path.isdir(saved_dir):
@@ -7212,11 +7358,53 @@ class AstroApp(QMainWindow):
         dlg = SettingsDialog(self._settings, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._settings = dlg.get_settings()
+            self._apply_process_defaults_from_settings()
             from gui.settings import save as _save_cfg
             _save_cfg(self._settings)
             QMessageBox.information(
                 self, "Settings Saved",
                 "Settings saved.\nSome changes (font size, theme) take effect on next launch.")
+
+    def _apply_process_defaults_from_settings(self):
+        if not getattr(self, "_panels", None):
+            return
+
+        bg_panel = self._panels.get("bg")
+        if bg_panel:
+            bg_method = str(self._settings.get("default_bg", "")).strip() or (
+                "graxpert" if self._settings.get("graxpert_exe", "") else "nox"
+            )
+            if bg_method not in {"graxpert", "nox", "dbe_spline", "polynomial", "ai_gradient", "median_grid", "gaussian_sub"}:
+                bg_method = "graxpert" if self._settings.get("graxpert_exe", "") else "nox"
+            if bg_method == "graxpert" and not self._settings.get("graxpert_exe", ""):
+                bg_method = "nox"
+            bg_panel._params["method"][0].cb.setCurrentText(bg_method)
+            bg_panel._params["gx_model"][0].cb.setCurrentText(
+                str(self._settings.get("graxpert_ai_version", "latest") or "latest")
+            )
+            bg_panel._params["gx_smoothing"][0].sp.setValue(
+                float(self._settings.get("graxpert_smoothing", 0.35))
+            )
+            bg_panel._params["gx_correction"][0].cb.setCurrentText(
+                str(self._settings.get("graxpert_correction", "Subtraction") or "Subtraction")
+            )
+
+        color_panel = self._panels.get("color")
+        if color_panel:
+            has_recent_solve = (
+                self._settings.get("last_platesolve_ra") is not None and
+                self._settings.get("last_platesolve_dec") is not None
+            )
+            color_panel._params["method"][0].cb.setCurrentText(
+                "pcc_solve" if has_recent_solve else "avg_spiral"
+            )
+
+        stretch_panel = self._panels.get("stretch")
+        if stretch_panel:
+            stretch_default = str(self._settings.get("default_stretch", "auto_stf")).strip() or "auto_stf"
+            if stretch_default not in {"veralux", "auto_stf", "linear", "hyperbolic", "asinh", "log", "midtone", "statistical", "power"}:
+                stretch_default = "auto_stf"
+            stretch_panel._params["method"][0].cb.setCurrentText(stretch_default)
 
     def _show_workflow(self):
         """Workflow rehber panelini göster/gizle."""

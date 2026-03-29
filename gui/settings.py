@@ -12,7 +12,7 @@ _DEFAULT = {
 
     # GraXpert
     "graxpert_exe": "",
-    "graxpert_smoothing": 0.5,
+    "graxpert_smoothing": 0.35,
     "graxpert_ai_version": "latest",
     "graxpert_correction": "Subtraction",
     "graxpert_denoise_strength": 0.8,
@@ -34,7 +34,7 @@ _DEFAULT = {
 
     # Processing defaults
     "default_stretch": "auto_stf",
-    "default_bg": "dbe_spline",
+    "default_bg": "graxpert",
     "num_threads": 4,
 
     # Paths & recent
