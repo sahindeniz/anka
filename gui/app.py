@@ -3153,7 +3153,7 @@ class StackingDialog(QDialog):
         cnt = QLabel("0"); cnt.setStyleSheet(f"color:{MUTED};font-size:8px;")
         self._lists[key+"_cnt"] = cnt
         b_add.clicked.connect(lambda _, k=key: self._add_calib(k))
-        b_clr.clicked.connect(lambda _, k=key: (self._lists[k].clear(), self._update_cnt(k)))
+        b_clr.clicked.connect(lambda _, k=key: self._clear_calib(k))
         row.addWidget(b_add); row.addWidget(b_clr); row.addStretch(); row.addWidget(cnt)
         lay.addLayout(row)
         return g
@@ -3172,9 +3172,16 @@ class StackingDialog(QDialog):
             item.setToolTip(p); lst.addItem(item)
         self._update_cnt(key)
 
+    def _clear_calib(self, key):
+        self._lists[key].clear()
+        self._update_cnt(key)
+
     def _update_cnt(self, key):
         c = self._lists.get(key+"_cnt")
-        if c: c.setText(str(self._lists[key].count()))
+        if c:
+            c.setText(str(self._lists[key].count()))
+        if hasattr(self, "_lbl_summary"):
+            self._update_summary()
 
     def _update_summary(self):
         n = self._frame_table.count()
