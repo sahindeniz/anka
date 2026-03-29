@@ -10,7 +10,7 @@ import numpy as np
 try:
     import torch as _torch
     _torch_available = True
-except ImportError:
+except (ImportError, OSError):
     _torch_available = False
 
 from core.loader import FILE_FILTER as _FILE_FILTER

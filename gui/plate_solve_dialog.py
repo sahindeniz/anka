@@ -1132,7 +1132,6 @@ class PlateSolveDialog(QDialog):
                 _exiftool_paths = [
                     os.path.join(_app_dir, "tools", "exiftool.exe"),
                     os.path.join(_app_dir, "tools", "exiftool(-k).exe"),
-                    "exiftool",  # PATH fallback
                 ]
                 _exiftool = next((p for p in _exiftool_paths if os.path.isfile(p)), "exiftool")
                 result = subprocess.run(
@@ -1169,8 +1168,8 @@ class PlateSolveDialog(QDialog):
                     meta["telescope"] = data.get("LensModel", "")
                 else:
                     self._log_line(f"⚠  exiftool hata kodu: {result.returncode}")
-            except FileNotFoundError:
-                # exiftool yok — PIL ile dene
+            except (FileNotFoundError, OSError, PermissionError):
+                # exiftool yoksa veya Windows'ta çalıştırılamıyorsa — PIL ile dene
                 try:
                     from PIL import Image as _PILImage
                     from PIL.ExifTags import TAGS
