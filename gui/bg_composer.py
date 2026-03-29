@@ -152,21 +152,49 @@ def generate_welcome_overlay(bg: np.ndarray) -> np.ndarray:
         out = bg.copy()
         h, w = out.shape[:2]
 
-        title = "Astro Maestro Pro"
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        scale = w / 850.0
-        thick = max(2, int(scale * 2.5))
+        title = "ASTRO MAESTRO PRO"
+        font = cv2.FONT_HERSHEY_TRIPLEX
+        scale = w / 1180.0
+        thick = max(2, int(scale * 2.6))
         (tw, th), _ = cv2.getTextSize(title, font, scale, thick)
         tx = (w - tw) // 2
-        ty = int(h * 0.91)
+        ty = int(h * 0.885)
 
-        pad = 18
+        pad = max(18, int(scale * 18))
         ov = out.copy()
-        cv2.rectangle(ov, (tx - pad, ty - th - pad), (tx + tw + pad, ty + pad + 30), (0.01, 0.01, 0.03), -1)
-        out = cv2.addWeighted(ov, 0.5, out, 0.5, 0)
+        box_y0 = ty - th - pad
+        box_y1 = ty + pad + int(th * 1.2)
+        cv2.rectangle(ov, (tx - pad, box_y0), (tx + tw + pad, box_y1), (0.01, 0.01, 0.03), -1)
+        out = cv2.addWeighted(ov, 0.42, out, 0.58, 0)
 
-        cv2.putText(out, title, (tx + 2, ty + 2), font, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
-        cv2.putText(out, title, (tx, ty), font, scale, (0.62, 0.78, 0.98), thick, cv2.LINE_AA)
+        wing_y = ty - th // 2
+        wing_gap = max(26, int(scale * 26))
+        left_end = tx - wing_gap
+        right_start = tx + tw + wing_gap
+        left_outer = [
+            (max(20, left_end - int(w * 0.12)), wing_y + int(th * 0.42)),
+            (left_end - int(w * 0.03), wing_y - int(th * 0.18)),
+            (left_end, wing_y),
+            (left_end - int(w * 0.03), wing_y + int(th * 0.18)),
+        ]
+        right_outer = [
+            (min(w - 20, right_start + int(w * 0.12)), wing_y + int(th * 0.42)),
+            (right_start + int(w * 0.03), wing_y - int(th * 0.18)),
+            (right_start, wing_y),
+            (right_start + int(w * 0.03), wing_y + int(th * 0.18)),
+        ]
+        cv2.polylines(out, [np.array(left_outer, dtype=np.int32)], False, (0.28, 0.33, 0.42), max(1, thick - 1), cv2.LINE_AA)
+        cv2.polylines(out, [np.array(right_outer, dtype=np.int32)], False, (0.28, 0.33, 0.42), max(1, thick - 1), cv2.LINE_AA)
+        cv2.polylines(out, [np.array(left_outer, dtype=np.int32)], False, (0.72, 0.78, 0.88), max(1, thick - 3), cv2.LINE_AA)
+        cv2.polylines(out, [np.array(right_outer, dtype=np.int32)], False, (0.72, 0.78, 0.88), max(1, thick - 3), cv2.LINE_AA)
+
+        cv2.putText(out, title, (tx + 5, ty + 5), font, scale, (0, 0, 0), thick + 6, cv2.LINE_AA)
+        cv2.putText(out, title, (tx + 2, ty + 2), font, scale, (0.18, 0.22, 0.28), thick + 3, cv2.LINE_AA)
+        cv2.putText(out, title, (tx, ty), font, scale, (0.82, 0.86, 0.92), thick + 1, cv2.LINE_AA)
+        cv2.putText(out, title, (tx, ty - 1), font, scale, (0.54, 0.72, 0.98), max(1, thick - 1), cv2.LINE_AA)
+
+        rule_y = ty + int(th * 0.55)
+        cv2.line(out, (tx - pad // 2, rule_y), (tx + tw + pad // 2, rule_y), (0.52, 0.62, 0.76), max(1, thick - 2), cv2.LINE_AA)
 
         sub = "Drag & Drop or Open File to Start"
         ss = scale * 0.36
