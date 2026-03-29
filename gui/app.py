@@ -4235,6 +4235,7 @@ class ImageViewer(QWidget):
         self._layout_n = 1    # 1, 2 or 4 panels
         self._welcome_visible = False  # arka plan composite gorunuyor mu
         self._channel_mode = "RGB"    # kanal görünümü: RGB/R/G/B/L
+        self._display_filter_cb = None
 
         # Histogram per-channel state
         # Each channel: [black, midtone, white]
@@ -4650,7 +4651,7 @@ class ImageViewer(QWidget):
             had_limits = False
 
         ax.clear(); self._sax_style(ax)
-        display = self._apply_hist_points(img)
+        display = self._apply_display_filter(self._apply_hist_points(img), slot)
 
         # ── Kanal filtresi + Colormap ─────────────────────────────
         ch_mode = getattr(self, '_channel_mode', 'RGB')
@@ -4694,6 +4695,18 @@ class ImageViewer(QWidget):
         rng = max(wp - bp, 1e-9)
         return np.clip((img.astype(np.float32) - bp) / rng, 0, 1)
 
+    def _apply_display_filter(self, img: np.ndarray, slot: int) -> np.ndarray:
+        cb = getattr(self, "_display_filter_cb", None)
+        if cb is None or img is None:
+            return img
+        try:
+            filtered = cb(img.copy(), slot)
+            if isinstance(filtered, np.ndarray) and filtered.shape == img.shape:
+                return np.clip(filtered, 0, 1).astype(np.float32)
+        except Exception:
+            pass
+        return img
+
     def _redraw_all(self):
         for i in range(self._layout_n):
             if self._imgs[i] is not None:
@@ -4704,7 +4717,10 @@ class ImageViewer(QWidget):
         if dlg is None or self._fullscreen_slot != slot:
             return
         try:
-            dlg.update_image(img, title or self._titles[slot] or f"Slot {slot+1}")
+            dlg.update_image(
+                self._apply_display_filter(np.clip(img, 0, 1).astype(np.float32), slot),
+                title or self._titles[slot] or f"Slot {slot+1}",
+            )
         except RuntimeError:
             self._clear_fullscreen_dialog()
 
@@ -4720,11 +4736,18 @@ class ImageViewer(QWidget):
                 existing.raise_()
                 existing.activateWindow()
                 self._fullscreen_slot = slot
-                existing.update_image(img, title)
+                existing.update_image(
+                    self._apply_display_filter(np.clip(img, 0, 1).astype(np.float32), slot),
+                    title,
+                )
                 return
             except RuntimeError:
                 self._clear_fullscreen_dialog()
-        dlg = _FullscreenImageDialog(img.copy(), title, parent=self)
+        dlg = _FullscreenImageDialog(
+            self._apply_display_filter(np.clip(img, 0, 1).astype(np.float32), slot),
+            title,
+            parent=self,
+        )
         self._fullscreen_dialog = dlg
         self._fullscreen_slot = slot
         dlg.finished.connect(self._clear_fullscreen_dialog)
@@ -4884,8 +4907,9 @@ class ImageViewer(QWidget):
             had_limits = False
         ax.clear(); self._sax_style(ax)
         ax.set_axis_off()
-        cmap = None if img.ndim == 3 else self.cmap_cb.currentText()
-        ax.imshow(np.clip(img,0,1), aspect="equal", interpolation="bilinear",
+        display = self._apply_display_filter(np.clip(img,0,1).astype(np.float32), slot)
+        cmap = None if display.ndim == 3 else self.cmap_cb.currentText()
+        ax.imshow(display, aspect="equal", interpolation="bilinear",
                   origin="upper", cmap=cmap)
         if had_limits:
             ax.set_xlim(xlim); ax.set_ylim(ylim)
@@ -5408,7 +5432,8 @@ class AstroApp(QMainWindow):
         self._crop_src    = None
         self._starnet_fn  = None  # holds last StarNet++ result accessor
         self._settings    = {}    # loaded at startup
-        self._pre_stf_image = None  # toggle: STF oncesi orijinal (None = STF aktif degil)
+        self._auto_stf_preview_enabled = False
+        self._current_label = ""
         self._last_solve_result = None  # plate solve sonucu (color calibration icin)
         self._channel_mode = "RGB"     # kanal görünümü: RGB/R/G/B/L
         self._working_dir  = ""        # dosya acilinca tum dialog'lar bu klasoru kullanir
@@ -5867,8 +5892,12 @@ class AstroApp(QMainWindow):
             self._on_img_tab_changed(new_idx)
         else:
             self._current = None
+            self._current_label = ""
+            self._auto_stf_preview_enabled = False
             self._history = []
             self._redo_stack = []
+            if hasattr(self, "_tb_autostr"):
+                self._tb_autostr.setChecked(False)
             if hasattr(self, "hist_panel"):
                 self.hist_panel.lst.clear()
             self.viewer.clear_all()
@@ -6068,9 +6097,9 @@ class AstroApp(QMainWindow):
         self._tb_zfit.clicked.connect(lambda: self.viewer._zoom_fit())
         self._tb_autostr.setCheckable(True)
         self._tb_autostr.setToolTip(
-            "Auto Stretch (STF) — Toggle\n"
-            "Tikla: stretch uygula\n"
-            "Tekrar tikla: orijinale don")
+            "Auto Stretch (STF) preview\n"
+            "Tikla: ekranda auto stretch goster\n"
+            "Tekrar tikla: lineer goruntuye don")
         self._tb_autostr.clicked.connect(self._auto_stretch_current)
         lay.addWidget(_make_group("VIEW", [self._tb_orig, self._tb_zfit, self._tb_autostr]))
 
@@ -6314,6 +6343,7 @@ class AstroApp(QMainWindow):
         # Liste sırası her zaman tab bar sırasıyla eşleşir
         self._img_tab_data = []
         self.viewer=ImageViewer(); self.viewer._parent_app = self; lay.addWidget(self.viewer,1)
+        self.viewer._display_filter_cb = self._viewer_display_filter
         # Wire histogram Apply button → create new history step
         self.viewer._hist_apply_cb = lambda img: self._hist_apply(img)
         # Crop modu olmadan dogrudan crop uygulama callback'i
@@ -7456,7 +7486,34 @@ class AstroApp(QMainWindow):
         self.viewer.show_image(self._orig,"Original")
         self.status.showMessage("🖼  Showing original")
 
-    def _auto_stretch_current(self):
+    def _get_auto_stf_preview_params(self, img: np.ndarray):
+        med = float(np.median(img))
+        try:
+            target = float(self._stf_target.v())
+            shadow_clip = float(self._stf_clip.v())
+        except Exception:
+            target = 0.20 if med < 0.15 else 0.25
+            shadow_clip = -2.8
+        return target, shadow_clip, med
+
+    def _apply_auto_stf_preview(self, img: np.ndarray) -> np.ndarray:
+        from processing.stretch import _auto_stf
+        target, shadow_clip, _ = self._get_auto_stf_preview_params(img)
+        return _auto_stf(img.copy(), target=target, shadow_clip=shadow_clip)
+
+    def _viewer_display_filter(self, img: np.ndarray, slot: int) -> np.ndarray:
+        if not getattr(self, "_auto_stf_preview_enabled", False):
+            return img
+        return self._apply_auto_stf_preview(img)
+
+    def _refresh_current_display(self):
+        if self._current is None:
+            return
+        slot = int(self._slot_combo.currentIndex()) if hasattr(self, "_slot_combo") else 0
+        label = self._current_label or (self._history[-1][0] if self._history else "Image")
+        self.viewer.show_image(self._current, label, slot=slot)
+
+    def _auto_stretch_current_legacy_unused(self):
         """Auto STF stretch toggle — ilk tikla: stretch, tekrar tikla: geri al."""
         if self._current is None:
             self.status.showMessage("Resim yok — once bir goruntu acin")
@@ -7500,6 +7557,33 @@ class AstroApp(QMainWindow):
 
 
     # ── StarNet++ one-click run & save ──────────────────────────────────
+    def _auto_stretch_current(self):
+        """Auto STF preview toggle for the current linear image."""
+        if self._current is None:
+            self.status.showMessage("Resim yok â€” once bir goruntu acin")
+            return
+
+        if self._auto_stf_preview_enabled:
+            self._auto_stf_preview_enabled = False
+            self._tb_autostr.setChecked(False)
+            self._refresh_current_display()
+            self.status.showMessage("ğŸ’¡ Auto STF kapandi â€” lineer goruntu gosteriliyor")
+            return
+
+        try:
+            target, shadow_clip, med = self._get_auto_stf_preview_params(self._current)
+            preview = self._apply_auto_stf_preview(self._current)
+            self._auto_stf_preview_enabled = True
+            self._tb_autostr.setChecked(True)
+            self._refresh_current_display()
+            self.status.showMessage(
+                f"ğŸ’¡ Auto STF preview acik (median: {med:.3f} â†’ {float(np.median(preview)):.3f}, "
+                f"target={target:.2f}, clip={shadow_clip:.1f})")
+        except Exception as e:
+            self._auto_stf_preview_enabled = False
+            self._tb_autostr.setChecked(False)
+            self.status.showMessage(f"Auto STF hatasi: {e}")
+
     def _run_starnet_and_save(self):
         """\n        One-click StarNet++:\n          1. Checks settings for exe path\n          2. Asks user for output folder\n          3. Runs StarNet++ in background thread\n          4. Saves  <name>_starless.tif  and  <name>_stars_only.tif\n          5. Shows starless in viewer\n        """
         if self._current is None:
@@ -7553,6 +7637,7 @@ class AstroApp(QMainWindow):
             self, "Run StarNet++",
             f"Engine:  {exe_name}\n"
             f"Stride:  {stride}\n"
+            "Source:  Current linear image (AutoSTF preview only)\n"
             f"Output folder: {out_dir}\n\n"
             f"Will save:\n"
             f"  • {os.path.basename(starless_path)}\n"
@@ -7664,6 +7749,7 @@ class AstroApp(QMainWindow):
             self, "Mastro Starless",
             f"Engine:  NAFNet (Zenith)\n"
             f"Model:   zenith.pt\n"
+            "Source:  Current linear image (AutoSTF preview only)\n"
             f"Output:  {out_dir}\n\n"
             f"Kaydedilecek:\n"
             f"  • {os.path.basename(starless_path)}\n"
@@ -7811,6 +7897,7 @@ class AstroApp(QMainWindow):
             self._redo_stack.append(popped)
             lbl, img = self._history[-1]
             self._current = img  # History snapshot'i paylas, show_image kendi copy'sini yapar
+            self._current_label = lbl
             idx = len(self._history) - 1
             self.viewer.show_image(img, lbl)
             self.lbl_step.setText(f"Step: {lbl}")
@@ -7823,6 +7910,7 @@ class AstroApp(QMainWindow):
             lbl, img = self._redo_stack.pop()
             self._history.append((lbl, img))
             self._current = img
+            self._current_label = lbl
             idx = len(self._history) - 1
             self.viewer.show_image(img, lbl)
             self.lbl_step.setText(f"Step: {lbl}")
@@ -7869,6 +7957,7 @@ class AstroApp(QMainWindow):
     def _jump_to(self, index):
         if 0<=index<len(self._history):
             lbl,img=self._history[index]; self._current=img.copy()
+            self._current_label = lbl
             self._history=self._history[:index+1]
             self.hist_panel.truncate_to(index)
             self.viewer.show_image(img,lbl)
@@ -7878,9 +7967,14 @@ class AstroApp(QMainWindow):
     def _set_image(self, img, label, reset=False):
         if img is None:
             self._current = None
+            self._current_label = ""
+            self._auto_stf_preview_enabled = False
+            if hasattr(self, "_tb_autostr"):
+                self._tb_autostr.setChecked(False)
             return
         snapshot = img.copy()  # Tek copy — hem current hem history icin
         self._current = snapshot
+        self._current_label = label
         # Yeni işlem → redo stack temizle
         self._redo_stack.clear()
         if reset:
