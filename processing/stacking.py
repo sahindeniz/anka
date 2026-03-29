@@ -393,24 +393,24 @@ def _stack_weighted_mean(frames: List[np.ndarray], masks: List[np.ndarray],
     """Ağırlıklı ortalama — valid_mask ile reddetme uygulanmış."""
     n = len(frames)
     is_color = frames[0].ndim == 3
-    accumulator = np.zeros_like(frames[0], dtype=np.float64)
-    weight_sum = np.zeros(frames[0].shape[:2], dtype=np.float64)
+    accumulator = np.zeros_like(frames[0], dtype=np.float32)
+    weight_sum = np.zeros(frames[0].shape[:2], dtype=np.float32)
 
     for i, (fr, msk) in enumerate(zip(frames, masks)):
         # valid_mask[i] ve msk ikisi de geçerli olmalı
         combined = (msk > 0.5) & valid_mask[i]
         w = float(weights[i])
         if is_color:
-            m3 = combined[:, :, np.newaxis].astype(np.float64)
-            accumulator += fr.astype(np.float64) * m3 * w
+            m3 = combined[:, :, np.newaxis].astype(np.float32)
+            accumulator += fr.astype(np.float32, copy=False) * m3 * w
         else:
-            accumulator += fr.astype(np.float64) * combined.astype(np.float64) * w
-        weight_sum += combined.astype(np.float64) * w
+            accumulator += fr.astype(np.float32, copy=False) * combined.astype(np.float32) * w
+        weight_sum += combined.astype(np.float32) * w
 
     weight_sum[weight_sum == 0] = 1
     if is_color:
-        return (accumulator / weight_sum[:, :, np.newaxis]).astype(np.float32)
-    return (accumulator / weight_sum).astype(np.float32)
+        return accumulator / weight_sum[:, :, np.newaxis]
+    return accumulator / weight_sum
 
 
 def _reject_sigma_clip(frames: List[np.ndarray], masks: List[np.ndarray],
@@ -425,7 +425,7 @@ def _reject_sigma_clip(frames: List[np.ndarray], masks: List[np.ndarray],
     # valid_mask: (n, h, w) boolean — her piksel-kare için geçerli mi
     valid = np.stack([m > 0.5 for m in masks], axis=0)  # (n, h, w)
 
-    block_size = max(1, min(32, h))
+    block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
@@ -464,7 +464,7 @@ def _reject_linear_fit(frames: List[np.ndarray], masks: List[np.ndarray],
 
     valid = np.stack([m > 0.5 for m in masks], axis=0)  # (n, h, w)
 
-    block_size = max(1, min(32, h))
+    block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
@@ -505,7 +505,7 @@ def _reject_percentile(frames: List[np.ndarray], masks: List[np.ndarray],
 
     valid = np.stack([m > 0.5 for m in masks], axis=0)
 
-    block_size = max(1, min(32, h))
+    block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
@@ -543,7 +543,7 @@ def _reject_winsorized_sigma(frames: List[np.ndarray], masks: List[np.ndarray],
 
     valid = np.stack([m > 0.5 for m in masks], axis=0)
 
-    block_size = max(1, min(32, h))
+    block_size = max(1, min(64, h))
     for y0 in range(0, h, block_size):
         y1 = min(y0 + block_size, h)
         block = np.stack([fr[y0:y1] for fr in frames], axis=0).astype(np.float32)
@@ -585,7 +585,7 @@ def _auto_select_rejection(n_frames: int) -> str:
         return "percentile"
     elif n_frames <= 7:
         return "linear_fit"
-    elif n_frames <= 15:
+    elif n_frames <= 32:
         return "sigma_clip"
     else:
         return "winsorized_sigma"
