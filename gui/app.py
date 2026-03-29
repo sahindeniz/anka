@@ -5236,12 +5236,30 @@ class StarfieldBg(QWidget):
         p=QPainter(self); p.setRenderHint(QPainter.RenderHint.Antialiasing)
         W,H=self.width(),self.height()
         grad=QLinearGradient(0,0,0,H)
-        grad.setColorAt(0.0,QColor("#020810")); grad.setColorAt(0.4,QColor("#04101e"))
-        grad.setColorAt(1.0,QColor("#020810")); p.fillRect(0,0,W,H,QBrush(grad))
-        for cx,cy,r,cr,cg,cb in [(0.15,0.3,0.18,20,40,80),(0.75,0.65,0.22,10,25,55),(0.5,0.15,0.12,30,15,60)]:
-            ng=QLinearGradient(int(cx*W-r*W),int(cy*H),int(cx*W+r*W),int(cy*H))
-            ng.setColorAt(0.0,QColor(0,0,0,0)); ng.setColorAt(0.5,QColor(cr,cg,cb,35))
-            ng.setColorAt(1.0,QColor(0,0,0,0)); p.fillRect(0,0,W,H,QBrush(ng))
+        grad.setColorAt(0.0,QColor("#040912")); grad.setColorAt(0.45,QColor("#081325"))
+        grad.setColorAt(1.0,QColor("#03070f")); p.fillRect(0,0,W,H,QBrush(grad))
+
+        cx, cy = int(W * 0.54), int(H * 0.50)
+        p.setPen(Qt.PenStyle.NoPen)
+        for rx, ry, a in [(int(W*0.09), int(H*0.07), 130),
+                          (int(W*0.16), int(H*0.11), 70),
+                          (int(W*0.24), int(H*0.15), 32)]:
+            p.setBrush(QColor(255, 214, 150, a))
+            p.drawEllipse(cx-rx, cy-ry, rx*2, ry*2)
+
+        arm_colors = [QColor(105, 155, 255, 44), QColor(126, 180, 255, 34), QColor(86, 120, 220, 24)]
+        for i in range(24):
+            t = i / 23.0
+            sweep = 1200
+            base = int(t * 760)
+            w = int(W * (0.10 + t * 0.32))
+            h = int(H * (0.06 + t * 0.20))
+            rect = (cx - w // 2, cy - h // 2, w, h)
+            for sign in (-1, 1):
+                start = int((base * sign + (220 if sign > 0 else 950)) * 16)
+                p.setPen(arm_colors[min(i // 8, 2)])
+                p.drawArc(*rect, start, sweep)
+
         for sx,sy,sb in self._stars:
             bri=int(sb*255); sz=0.6+sb*1.2
             p.setPen(QColor(bri,bri,min(255,int(bri*1.1)),int(sb*220)))
@@ -5569,8 +5587,8 @@ class AstroApp(QMainWindow):
             paths.extend(_glob.glob(os.path.join(bg_dir, ext)))
         paths = sorted(set(paths))
 
-        # Varsayılan (composite)
-        act = menu.addAction("🌌  Varsayılan (Composite)")
+        # Varsayılan spiral galaksi teması
+        act = menu.addAction("🌌  Varsayılan (Spiral Galaxy)")
         act.triggered.connect(lambda: self._set_bg_theme(None))
         menu.addSeparator()
 
