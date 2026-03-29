@@ -4233,7 +4233,6 @@ class ImageViewer(QWidget):
         self._fullscreen_dialog = None
         self._fullscreen_slot = None
         self._layout_n = 1    # 1, 2 or 4 panels
-        self._pre_stf_slots = [None, None, None, None]  # STF toggle: slot basina orijinal
         self._welcome_visible = False  # arka plan composite gorunuyor mu
         self._channel_mode = "RGB"    # kanal görünümü: RGB/R/G/B/L
 
@@ -4317,21 +4316,6 @@ class ImageViewer(QWidget):
         grp_zoom.add(b_zi); grp_zoom.add(b_zo); grp_zoom.add(b_fit)
         self._drag_bar.add_group(grp_zoom)
 
-        # -- GROUP: STF --
-        grp_stf = _DragGroup("stf")
-        b_stf = QPushButton("STF"); b_stf.setFixedSize(52, _TB_H)
-        b_stf.setCheckable(True)
-        b_stf.setStyleSheet(
-            f"QPushButton{{background:{BG3};color:{MUTED};border:1px solid {BORDER};"
-            f"border-radius:4px;font-size:13px;font-weight:700;}}"
-            f"QPushButton:checked{{background:#1a3a1a;color:#44ddff;"
-            f"border:1px solid #44ddff;}}"
-            f"QPushButton:hover{{color:{TEXT};background:{BG4};}}")
-        b_stf.setToolTip("Auto Stretch (STF) — Toggle\nTikla: stretch / Tekrar tikla: geri al")
-        b_stf.clicked.connect(self._auto_stf_preview)
-        self._b_stf = b_stf
-        grp_stf.add(b_stf)
-        self._drag_bar.add_group(grp_stf)
 
         # -- GROUP: Colormap --
         grp_cmap = _DragGroup("colormap")
@@ -4919,41 +4903,6 @@ class ImageViewer(QWidget):
         self._channel_mode = ch
         self._redraw_all()
 
-    def _auto_stf_preview(self):
-        """Auto STF toggle — ilk tikla: stretch, tekrar tikla: geri al."""
-        slot = self._active
-        img = self._imgs[slot]
-        if img is None:
-            return
-
-        # ── Toggle OFF: orijinale don ──
-        if self._pre_stf_slots[slot] is not None:
-            restored = self._pre_stf_slots[slot]
-            self._pre_stf_slots[slot] = None
-            self._imgs[slot] = restored
-            self._draw_slot(slot)
-            self._hist_editor.set_image(restored)
-            self._b_stf.setChecked(False)
-            if self._hist_apply_cb is not None:
-                self._hist_apply_cb(restored)
-            return
-
-        # ── Toggle ON: stretch uygula ──
-        try:
-            from processing.stretch import _auto_stf
-            self._pre_stf_slots[slot] = img.copy()  # orijinali sakla
-            med = float(np.median(img))
-            target = 0.20 if med < 0.15 else 0.25
-            stretched = _auto_stf(img.copy(), target=target, shadow_clip=-2.8)
-            self._imgs[slot] = stretched
-            self._draw_slot(slot)
-            self._hist_editor.set_image(stretched)
-            self._b_stf.setChecked(True)
-            if self._hist_apply_cb is not None:
-                self._hist_apply_cb(stretched)
-        except Exception:
-            self._pre_stf_slots[slot] = None
-            self._b_stf.setChecked(False)
 
     def _on_hist_apply(self, result):
         """User clicked Apply — bake to history and reset editor to new baseline."""
