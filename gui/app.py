@@ -4230,7 +4230,8 @@ class ImageViewer(QWidget):
         self._imgs   = [None, None, None, None]
         self._titles = ["", "", "", ""]
         self._active = 0      # which slot is "current"
-        self._fullscreen_dialogs = {}
+        self._fullscreen_dialog = None
+        self._fullscreen_slot = None
         self._layout_n = 1    # 1, 2 or 4 panels
         self._pre_stf_slots = [None, None, None, None]  # STF toggle: slot basina orijinal
         self._welcome_visible = False  # arka plan composite gorunuyor mu
@@ -4715,13 +4716,13 @@ class ImageViewer(QWidget):
                 self._draw_slot(i)
 
     def _sync_fullscreen_slot(self, slot: int, img: "np.ndarray", title: str = ""):
-        dlg = self._fullscreen_dialogs.get(slot)
-        if dlg is None:
+        dlg = self._fullscreen_dialog
+        if dlg is None or self._fullscreen_slot != slot:
             return
         try:
             dlg.update_image(img, title or self._titles[slot] or f"Slot {slot+1}")
         except RuntimeError:
-            self._fullscreen_dialogs.pop(slot, None)
+            self._clear_fullscreen_dialog()
 
     def _open_fullscreen(self, slot=0):
         """Cift tikla — resmi tam ekran dialog'da ac."""
@@ -4729,21 +4730,27 @@ class ImageViewer(QWidget):
         if img is None:
             return
         title = self._titles[slot] or f"Slot {slot+1}"
-        existing = self._fullscreen_dialogs.get(slot)
+        existing = self._fullscreen_dialog
         if existing is not None:
             try:
                 existing.raise_()
                 existing.activateWindow()
+                self._fullscreen_slot = slot
                 existing.update_image(img, title)
                 return
             except RuntimeError:
-                self._fullscreen_dialogs.pop(slot, None)
+                self._clear_fullscreen_dialog()
         dlg = _FullscreenImageDialog(img.copy(), title, parent=self)
-        self._fullscreen_dialogs[slot] = dlg
-        dlg.finished.connect(lambda _=0, s=slot: self._fullscreen_dialogs.pop(s, None))
+        self._fullscreen_dialog = dlg
+        self._fullscreen_slot = slot
+        dlg.finished.connect(self._clear_fullscreen_dialog)
         dlg.showMaximized()
         dlg.exec()
-        self._fullscreen_dialogs.pop(slot, None)
+        self._clear_fullscreen_dialog()
+
+    def _clear_fullscreen_dialog(self, *_args):
+        self._fullscreen_dialog = None
+        self._fullscreen_slot = None
 
     # ── Zoom & Pan ────────────────────────────────────────────────────────
     def _qt_wheel(self, event, slot: int):
