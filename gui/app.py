@@ -4432,11 +4432,11 @@ class ImageViewer(QWidget):
         Settings'te bg_theme_path varsa o resmi kullan."""
         try:
             import os, cv2
-            from gui.bg_composer import generate_composite_background, generate_welcome_overlay, _resize_fill
+            from gui.bg_composer import generate_composite_background, generate_welcome_overlay, _resize_fill, find_default_background_path
 
             # Kaydedilmiş tema var mı?
             settings = getattr(getattr(self, '_parent_app', None), '_settings', None) or {}
-            theme_path = settings.get("bg_theme_path", "")
+            theme_path = settings.get("bg_theme_path", "") or find_default_background_path()
 
             if theme_path and os.path.isfile(theme_path):
                 img = cv2.imread(theme_path, cv2.IMREAD_COLOR)
@@ -5587,8 +5587,8 @@ class AstroApp(QMainWindow):
             paths.extend(_glob.glob(os.path.join(bg_dir, ext)))
         paths = sorted(set(paths))
 
-        # Varsayılan spiral galaksi teması
-        act = menu.addAction("🌌  Varsayılan (Spiral Galaxy)")
+        # Varsayılan backgrounds klasörü teması
+        act = menu.addAction("🌌  Varsayılan (Backgrounds Default)")
         act.triggered.connect(lambda: self._set_bg_theme(None))
         menu.addSeparator()
 
@@ -5611,7 +5611,7 @@ class AstroApp(QMainWindow):
             from gui.settings import save as _save
             _save(self._settings)
             self.viewer._show_welcome_bg()
-            self.status.showMessage("🌌  Varsayılan arka plan teması")
+            self.status.showMessage("🌌  Varsayılan arka plan teması (backgrounds klasöründen)")
             return
 
         try:

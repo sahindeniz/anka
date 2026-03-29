@@ -1,12 +1,14 @@
 """
 Astro Maestro Pro - Background Composer
-Varsayilan olarak spiral galaksi temali arka plan uretir.
+Varsayilan olarak gui/backgrounds icindeki uygun galaksi gorselini kullanir.
 """
+import glob
 import os
 import numpy as np
 
 _CACHE_DIR = os.path.join(os.path.dirname(__file__), ".cache")
 _CACHE_FILE = os.path.join(_CACHE_DIR, "bg_comp_v5.npy")
+_BG_DIR = os.path.join(os.path.dirname(__file__), "backgrounds")
 
 
 def _resize_fill(img, tw, th):
@@ -20,6 +22,33 @@ def _resize_fill(img, tw, th):
     y0 = (nh - th) // 2
     x0 = (nw - tw) // 2
     return resized[y0:y0 + th, x0:x0 + tw]
+
+
+def _list_background_paths():
+    exts = ("*.jpg", "*.jpeg", "*.png", "*.tif", "*.tiff", "*.bmp")
+    paths = []
+    for ext in exts:
+        paths.extend(glob.glob(os.path.join(_BG_DIR, ext)))
+    return sorted(set(paths))
+
+
+def find_default_background_path():
+    """backgrounds klasorunden varsayilan resmi sec."""
+    paths = _list_background_paths()
+    if not paths:
+        return ""
+
+    priorities = (
+        ("spiral", "galaxy"),
+        ("galaxy",),
+        ("nebula",),
+    )
+    lowered = [(p, os.path.basename(p).lower()) for p in paths]
+    for keys in priorities:
+        for path, name in lowered:
+            if all(k in name for k in keys):
+                return path
+    return paths[0]
 
 
 def generate_spiral_galaxy_background(width=1920, height=1080):
@@ -77,7 +106,7 @@ def generate_spiral_galaxy_background(width=1920, height=1080):
 
 
 def generate_composite_background(width=1920, height=1080, use_cache=True):
-    """Varsayilan spiral galaksi arka planini uret."""
+    """Varsayilan arka planini backgrounds klasorunden uret."""
     if use_cache and os.path.exists(_CACHE_FILE):
         try:
             cached = np.load(_CACHE_FILE)
@@ -86,7 +115,25 @@ def generate_composite_background(width=1920, height=1080, use_cache=True):
         except Exception:
             pass
 
-    canvas = generate_spiral_galaxy_background(width, height)
+    default_path = find_default_background_path()
+    if default_path:
+        try:
+            import cv2
+            img = cv2.imread(default_path, cv2.IMREAD_COLOR)
+            if img is not None:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+                canvas = _resize_fill(img, width, height) * 0.55
+                yy, xx = np.ogrid[0:height, 0:width]
+                vdist = np.sqrt(((xx - width / 2) / (width * 0.60)) ** 2 + ((yy - height / 2) / (height * 0.58)) ** 2)
+                vignette = np.clip(1.0 - 0.30 * vdist ** 1.5, 0, 1).astype(np.float32)
+                canvas *= vignette[:, :, np.newaxis]
+                canvas = np.clip(canvas, 0, 1).astype(np.float32)
+            else:
+                canvas = generate_spiral_galaxy_background(width, height)
+        except Exception:
+            canvas = generate_spiral_galaxy_background(width, height)
+    else:
+        canvas = generate_spiral_galaxy_background(width, height)
 
     try:
         os.makedirs(_CACHE_DIR, exist_ok=True)
