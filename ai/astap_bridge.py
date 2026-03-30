@@ -21,6 +21,7 @@ import tempfile
 import shutil
 import glob
 import time
+import re
 import numpy as np
 
 
@@ -174,6 +175,10 @@ def solve_image(
         result = _parse_ini(ini_path)
         result["solve_time_s"] = round(solve_time, 2)
         result["astap_exit_code"] = proc.returncode
+        if not result.get("star_count"):
+            parsed_star_count = _parse_star_count_from_output(proc.stdout, proc.stderr)
+            if parsed_star_count is not None:
+                result["star_count"] = parsed_star_count
 
         solution = result.get("solution", "")
         ra  = result.get("ra")
@@ -438,6 +443,13 @@ def _parse_ini(path: str) -> dict:
             if kl == "SOLUTION":
                 result["solution"] = val
 
+            elif kl == "PLTSOLVD":
+                normalized = val.strip().upper()
+                if normalized in ("T", "TRUE", "1", "Y", "YES"):
+                    result["solution"] = "1"
+                elif normalized in ("F", "FALSE", "0", "N", "NO"):
+                    result["solution"] = "0"
+
             elif kl == "RA":
                 # ASTAP RA'yı DERECE olarak yazar (HMS değil)
                 result["ra"] = float(val)
@@ -477,6 +489,26 @@ def _parse_ini(path: str) -> dict:
             pass
 
     return result
+
+
+def _parse_star_count_from_output(*chunks: str) -> int | None:
+    combined = "\n".join(chunk for chunk in chunks if chunk).strip()
+    if not combined:
+        return None
+
+    lowered = combined.lower()
+    for pattern in (
+        r"(\d+)\s+stars\s+found",
+        r"found\s+(\d+)\s+stars",
+        r"nstars\s*=\s*(\d+)",
+    ):
+        match = re.search(pattern, lowered, re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _err(msg: str, extra: dict = None) -> dict:
