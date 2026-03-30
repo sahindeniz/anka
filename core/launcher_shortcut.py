@@ -1,4 +1,4 @@
-"""Windows launcher shortcut helpers for the AstroMestro desktop entry."""
+"""Windows launcher shortcut helpers for the Astromastro desktop entry."""
 
 from __future__ import annotations
 
@@ -8,10 +8,10 @@ import sys
 from pathlib import Path
 
 
-SHORTCUT_NAME = "AstroMestro"
+SHORTCUT_NAME = "Astromastro"
 SHORTCUT_FILENAME = f"{SHORTCUT_NAME}.lnk"
 SHORTCUT_DESCRIPTION = SHORTCUT_NAME
-LEGACY_SHORTCUTS = ("Astro Maestro Pro.lnk",)
+LEGACY_SHORTCUTS = ("Astro Maestro Pro.lnk", "AstroMestro.lnk")
 ICON_RELATIVE_PATH = Path("gui") / "icons" / "astromestro_space.ico"
 LAUNCHER_RELATIVE_PATH = Path("setup_and_run.bat")
 
@@ -68,16 +68,16 @@ def build_shortcut_command(
     ]
 
 
-def ensure_desktop_shortcut(
+def ensure_shortcut_in_dir(
     app_root: str | os.PathLike[str] | None = None,
-    desktop_dir: str | os.PathLike[str] | None = None,
+    target_dir: str | os.PathLike[str] | None = None,
 ) -> Path | None:
     if os.name != "nt":
         return None
 
     root = Path(app_root or get_app_root()).resolve()
-    desktop = Path(desktop_dir or get_desktop_dir()).expanduser()
-    if not desktop.is_dir():
+    target = Path(target_dir or root).expanduser().resolve()
+    if not target.is_dir():
         return None
 
     launcher = get_launcher_path(root)
@@ -87,9 +87,9 @@ def ensure_desktop_shortcut(
     if not icon.is_file():
         raise FileNotFoundError(f"Could not find icon at {icon}")
 
-    shortcut = desktop / SHORTCUT_FILENAME
+    shortcut = target / SHORTCUT_FILENAME
     for legacy_name in LEGACY_SHORTCUTS:
-        legacy = desktop / legacy_name
+        legacy = target / legacy_name
         if legacy != shortcut and legacy.exists():
             legacy.unlink()
 
@@ -102,12 +102,32 @@ def ensure_desktop_shortcut(
     return shortcut
 
 
+def ensure_local_shortcut(
+    app_root: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    root = Path(app_root or get_app_root()).resolve()
+    return ensure_shortcut_in_dir(root, root)
+
+
+def ensure_desktop_shortcut(
+    app_root: str | os.PathLike[str] | None = None,
+    desktop_dir: str | os.PathLike[str] | None = None,
+) -> Path | None:
+    return ensure_shortcut_in_dir(app_root, desktop_dir or get_desktop_dir())
+
+
 def main() -> int:
-    try:
-        shortcut = ensure_desktop_shortcut()
-    except Exception:
+    created = []
+    for creator in (ensure_local_shortcut, ensure_desktop_shortcut):
+        try:
+            shortcut = creator()
+        except Exception:
+            shortcut = None
+        if shortcut is not None:
+            created.append(shortcut)
+    if not created:
         return 1
-    if shortcut is not None:
+    for shortcut in created:
         print(shortcut)
     return 0
 

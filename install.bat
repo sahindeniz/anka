@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
-title AstroMestro - Kurulum
+title Astromastro - Kurulum
 
 color 0B
 echo.
 echo  ================================================================
-echo    ASTROMESTRO - Kurulum Sihirbazi
+echo    ASTROMASTRO - Kurulum Sihirbazi
 echo    by Deniz
 echo  ================================================================
 echo.
@@ -100,7 +100,7 @@ if not exist "%INSTALL_DIR%\settings.json" (
 echo.
 echo  [5/5] Masaustu kisayolu olusturuluyor...
 
-set "SHORTCUT_PATH=%USERPROFILE%\Desktop\AstroMestro.lnk"
+set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Astromastro.lnk"
 set "LAUNCHER=%INSTALL_DIR%\setup_and_run.bat"
 
 python -m core.launcher_shortcut >nul 2>&1
@@ -118,7 +118,7 @@ echo    KURULUM TAMAMLANDI!
 echo  ================================================================
 echo.
 echo    Programi baslatmak icin:
-echo      * Masaustundeki "AstroMestro" kisayoluna cift tiklayin
+echo      * Masaustundeki "Astromastro" kisayoluna cift tiklayin
 echo      * Ya da: setup_and_run.bat dosyasina cift tiklayin
 echo.
 echo    Ilk acilista gecmis ayarlar yoksa program otomatik baslayacak.

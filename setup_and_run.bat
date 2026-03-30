@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-title AstroMestro
+title Astromastro
 
 :: ── Klasör ───────────────────────────────────────────────────────────────
 set "APP_DIR=%~dp0"
