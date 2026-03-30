@@ -381,10 +381,8 @@ def _build_cmd(exe, fits_in, db_path, catalog_id, radius, downsample, min_stars,
         cmd += ["-z", "0"]
 
     if ra_hint is not None:
-        ra_val = float(ra_hint)
-        if ra_val != 0.0 or dec_hint is not None:
-            hours = ra_val / 15.0
-            cmd += ["-ra", f"{hours:.6f}"]
+        hours = float(ra_hint) / 15.0
+        cmd += ["-ra", f"{hours:.6f}"]
 
     if dec_hint is not None:
         spd = float(dec_hint) + 90.0
@@ -452,15 +450,20 @@ def _parse_ini(path: str) -> dict:
 
             elif kl == "RA":
                 # ASTAP RA'yı DERECE olarak yazar (HMS değil)
-                result["ra"] = float(val)
+                ra_val = float(val) % 360.0
+                result["ra"] = ra_val
 
             elif kl == "SPDT":
                 # SPD = Dec + 90 → Dec = SPD - 90
-                result["dec"] = float(val) - 90.0
+                dec_val = float(val) - 90.0
+                if -90.0 <= dec_val <= 90.0:
+                    result["dec"] = dec_val
 
             elif kl == "DEC":
                 # Bazı versiyonlar direkt DEC yazar
-                result["dec"] = float(val)
+                dec_val = float(val)
+                if -90.0 <= dec_val <= 90.0:
+                    result["dec"] = dec_val
 
             elif kl in ("CRVAL1",):
                 if result.get("ra") is None:
