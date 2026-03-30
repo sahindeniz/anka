@@ -35,6 +35,16 @@ from matplotlib.figure import Figure
 from gui.histogram_editor import HistogramEditorPanel
 from gui.script_editor import ScriptEditorDialog
 
+_APP_ICON_PATH = os.path.join(os.path.dirname(__file__), "icons", "astromestro_space.ico")
+
+
+def _load_app_icon():
+    if os.path.isfile(_APP_ICON_PATH):
+        icon = QIcon(_APP_ICON_PATH)
+        if not icon.isNull():
+            return icon
+    return QIcon()
+
 # ═══════════════════════════════ THEME (SC2 — Light Accents + Red Details) ══
 BG      = "#0c1018"      # Koyu arka plan (biraz acik)
 BG2     = "#141e2c"      # Panel arka plan
@@ -760,6 +770,9 @@ class SettingsDialog(QDialog):
     def __init__(self, current_settings: dict, parent=None):
         super().__init__(parent)
         self.setWindowTitle("⚙  Settings — Astro Maestro Pro")
+        icon = _load_app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         self.setMinimumSize(620, 560)
         self.setStyleSheet(f"background:{BG};color:{TEXT};font-size:11px;")
         self._s = dict(current_settings)
@@ -5440,6 +5453,9 @@ class AstroApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🔭  Astro Maestro Pro")
+        icon = _load_app_icon()
+        if not icon.isNull():
+            self.setWindowIcon(icon)
         # Ekran boyutuna uyumlu pencere — overflow uyarısını önle
         from PyQt6.QtWidgets import QApplication
         _screen = QApplication.primaryScreen()
@@ -8710,7 +8726,7 @@ class AstroApp(QMainWindow):
         self._preview_only = False
 
         if is_preview:
-            self.viewer.show_image(result, f"👁 {label}")
+            self.viewer.show_image(result, f"[Preview] {label}")
             self.status.showMessage(f"👁  {label} önizleme")
         else:
             if layer_payload is not None and key == "halo":
@@ -8886,6 +8902,9 @@ def start_app():
 
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    icon = _load_app_icon()
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     QToolTip.setFont(QFont("Segoe UI", 10))
     w = AstroApp()
     w.show()

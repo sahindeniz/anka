@@ -12,6 +12,8 @@ import time
 import zipfile
 from pathlib import Path
 
+from core.launcher_shortcut import ensure_desktop_shortcut
+
 
 _SKIP_COPY_NAMES = {".git", "__pycache__", "settings.json"}
 
@@ -187,6 +189,11 @@ def wait_for_process_exit(pid: int, timeout: float = 120.0, poll_interval: float
 
 def restart_application(target_root: str | os.PathLike[str]) -> None:
     target = Path(target_root)
+    try:
+        ensure_desktop_shortcut(target)
+    except Exception:
+        pass
+
     launcher = target / "setup_and_run.bat"
     if os.name == "nt" and launcher.is_file() and hasattr(os, "startfile"):
         os.startfile(str(launcher))

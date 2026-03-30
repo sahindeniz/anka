@@ -1,6 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
-title Astro Maestro Pro
+title AstroMestro
 
 :: ── Klasör ───────────────────────────────────────────────────────────────
 set "APP_DIR=%~dp0"
@@ -17,6 +17,9 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+
+:: Launcher kisayolunu guncel tut
+python -m core.launcher_shortcut >nul 2>&1
 
 :: ── Hızlı paket kontrolü ─────────────────────────────────────────────────
 python -c "import PyQt6, numpy, cv2, astropy" >nul 2>&1

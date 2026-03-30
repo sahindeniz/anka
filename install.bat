@@ -1,11 +1,11 @@
 @echo off
 setlocal enabledelayedexpansion
-title Astro Maestro Pro — Kurulum
+title AstroMestro - Kurulum
 
 color 0B
 echo.
 echo  ================================================================
-echo    ASTRO MAESTRO PRO — Kurulum Sihirbazi
+echo    ASTROMESTRO - Kurulum Sihirbazi
 echo    by Deniz
 echo  ================================================================
 echo.
@@ -100,17 +100,10 @@ if not exist "%INSTALL_DIR%\settings.json" (
 echo.
 echo  [5/5] Masaustu kisayolu olusturuluyor...
 
-set "SHORTCUT_PATH=%USERPROFILE%\Desktop\Astro Maestro Pro.lnk"
+set "SHORTCUT_PATH=%USERPROFILE%\Desktop\AstroMestro.lnk"
 set "LAUNCHER=%INSTALL_DIR%\setup_and_run.bat"
 
-:: PowerShell ile kısayol oluştur
-powershell -Command ^
-  "$ws = New-Object -ComObject WScript.Shell; " ^
-  "$sc = $ws.CreateShortcut('%SHORTCUT_PATH%'); " ^
-  "$sc.TargetPath = '%LAUNCHER%'; " ^
-  "$sc.WorkingDirectory = '%INSTALL_DIR%'; " ^
-  "$sc.Description = 'Astro Maestro Pro'; " ^
-  "$sc.Save()" >nul 2>&1
+python -m core.launcher_shortcut >nul 2>&1
 
 if exist "%SHORTCUT_PATH%" (
     echo  [OK] Masaustu kisayolu olusturuldu.
@@ -125,8 +118,8 @@ echo    KURULUM TAMAMLANDI!
 echo  ================================================================
 echo.
 echo    Programi baslatmak icin:
-echo      • Masaustundeki "Astro Maestro Pro" kisayoluna cift tiklayin
-echo      • Ya da: setup_and_run.bat dosyasina cift tiklayin
+echo      * Masaustundeki "AstroMestro" kisayoluna cift tiklayin
+echo      * Ya da: setup_and_run.bat dosyasina cift tiklayin
 echo.
 echo    Ilk acilista gecmis ayarlar yoksa program otomatik baslayacak.
 echo.

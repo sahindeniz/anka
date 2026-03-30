@@ -1,10 +1,10 @@
 @echo off
 setlocal enabledelayedexpansion
-title Astro Maestro Pro — Kaldirma
+title AstroMestro - Kaldirma
 
 echo.
 echo  ================================================================
-echo    ASTRO MAESTRO PRO — Program Kaldirma
+echo    ASTROMESTRO - Program Kaldirma
 echo  ================================================================
 echo.
 echo  Bu islem sadece masaustu kisayolunu ve ayarlari kaldirir.
@@ -19,9 +19,12 @@ if /i not "!CONFIRM!" == "E" (
 )
 
 :: Masaüstü kısayolu
+if exist "%USERPROFILE%\Desktop\AstroMestro.lnk" (
+    del "%USERPROFILE%\Desktop\AstroMestro.lnk"
+    echo  [OK] Masaustu kisayolu silindi.
+)
 if exist "%USERPROFILE%\Desktop\Astro Maestro Pro.lnk" (
     del "%USERPROFILE%\Desktop\Astro Maestro Pro.lnk"
-    echo  [OK] Masaustu kisayolu silindi.
 )
 
 :: Ayarlar (opsiyonel)
