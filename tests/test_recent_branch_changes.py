@@ -12,6 +12,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gui.bg_composer import generate_welcome_overlay
+from processing.halo_reduction import reduce_halos
 from processing.mastro_noise import process_denoise
 from processing.mastro_starless import process_starless
 from processing.noise_reduction import reduce_noise
@@ -211,6 +212,56 @@ class MastroSelfContainedTests(unittest.TestCase):
         self.assertEqual(mask.dtype, np.float32)
         self.assertEqual(progress[-1], 100)
         self.assertLess(float(starless[48, 48, 0]), float(img[48, 48, 0]))
+
+
+class HaloReductionTests(unittest.TestCase):
+    @staticmethod
+    def _make_star_field():
+        h = w = 128
+        yy, xx = np.mgrid[:h, :w]
+        img = np.full((h, w, 3), 0.015, dtype=np.float32)
+
+        def add_star(cx, cy, core_amp, halo_amp, core_sigma, halo_sigma, color):
+            r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+            core = core_amp * np.exp(-r2 / (2.0 * core_sigma ** 2))
+            halo = halo_amp * np.exp(-r2 / (2.0 * halo_sigma ** 2))
+            profile = core + halo
+            for ch, gain in enumerate(color):
+                img[:, :, ch] += profile * gain
+
+        add_star(64, 64, 0.95, 0.35, 1.2, 4.6, (1.0, 0.98, 0.96))
+        add_star(34, 92, 0.72, 0.18, 1.0, 3.2, (0.95, 1.0, 1.05))
+        add_star(94, 28, 0.58, 0.12, 0.9, 2.7, (1.05, 0.98, 0.95))
+        return np.clip(img, 0.0, 1.0).astype(np.float32)
+
+    def test_halo_reduction_lowers_outer_glow_but_keeps_core(self):
+        img = self._make_star_field()
+        yy, xx = np.mgrid[:img.shape[0], :img.shape[1]]
+        rr = np.sqrt((xx - 64) ** 2 + (yy - 64) ** 2)
+        annulus = (rr >= 4.0) & (rr <= 8.0)
+        core = rr <= 1.5
+
+        result = reduce_halos(
+            img,
+            denoise_strength=0.0,
+            halo_strength=0.35,
+            chroma_cleanup=0.0,
+            core_protect=0.85,
+            recompose_opacity=1.0,
+        )
+
+        self.assertEqual(result["result"].shape, img.shape)
+        self.assertEqual(result["starless"].shape, img.shape)
+        self.assertEqual(result["stars"].shape, img.shape)
+        self.assertEqual(result["result"].dtype, np.float32)
+        self.assertLess(
+            float(result["result"][annulus].mean()),
+            float(img[annulus].mean()),
+        )
+        self.assertGreater(
+            float(result["result"][core].mean()),
+            float(img[core].mean()) * 0.60,
+        )
 
 
 class NoiseDispatchTests(unittest.TestCase):

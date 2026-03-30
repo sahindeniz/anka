@@ -2088,9 +2088,15 @@ class WorkflowPanel(QFrame):
          "#557799", "FİNAL",
          "Python script ile özel işlem. Galaxy Enhance, CLAHE, custom pipeline.\n"
          "Tekrarlanabilir işlemler için kaydet ve tekrar çalıştır."),
+
+        ("halo",       "◌", "14b. Halo Azaltma",
+         "#884488", "NON-LINEER",
+         "Yildizlari ayir, sadece dis haloyu kis ve Screen ile geri birlestir.\n"
+         "Arka plan denoise ve renk fringe temizligi ayni panelde hafif uygulanir.\n"
+         "Amac plastik shrink degil, daha dogal bir yildiz omzu birakmaktir."),
     ]
 
-    _RECOMMENDED_STEP_ORDER = [0, 1, 2, 3, 7, 5, 4, 6, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18]
+    _RECOMMENDED_STEP_ORDER = [0, 1, 2, 3, 7, 5, 4, 6, 8, 9, 10, 11, 12, 13, 19, 14, 15, 16, 17, 18]
 
     @classmethod
     def _recommended_steps(cls):
@@ -2540,6 +2546,7 @@ class PanelCustomizeFlyout(QFrame):
         "bg":      "🌌  Background Extraction",
         "noise":   "✨  Noise Reduction",
         "stars":   "⭐  Star Smaller",
+        "halo":    "◌  Halo Reduction",
         "deconv":  "🔭  Deconvolution",
         "sharp":   "🔪  Sharpening",
         "nebula":  "🌠  Nebula Enhancement",
@@ -6232,6 +6239,7 @@ class AstroApp(QMainWindow):
             ("noise",   "✨","Noise"),
             ("deconv",  "🔭","Deconv"),
             ("stars",   "⭐","Stars"),
+            ("halo",    "◌","Halo"),
             ("sharp",   "🔪","Sharpen"),
             ("nebula",  "🌠","Nebula"),
             ("color",   "🎨","Color"),
@@ -6999,6 +7007,25 @@ class AstroApp(QMainWindow):
         p._params["max_sigma"][0].sp.setValue(7)
         p._params["threshold"][0].sp.setValue(0.025)
         p.run_requested.connect(lambda s,k="stars": self._run_key(k,s))
+
+        # Halo Reduction
+        p = _make("◌","Halo Reduction","halo")
+        p.add_slider("denoise_strength","BG Denoise",0,1,0.25,2,
+                     "Starless/background katmanina hafif denoise uygular")
+        p.add_slider("halo_strength","Halo Reduction",0,1,0.15,2,
+                     "Sadece dis halo omzunu kisar, cekirdegi tam silmez")
+        p.add_slider("core_protect","Core Protect",0,1,0.70,2,
+                     "Parlak yildiz cekirdeklerini orijinale daha yakin tutar")
+        p.add_slider("chroma_cleanup","Color Halo",0,1,0.35,2,
+                     "Mor/yesil renk fringe temizligi")
+        p.add_slider("recompose_opacity","Screen Opacity",0.5,1.0,0.90,2,
+                     "Tam sifir halo yerine hafif dogal glow birakmak icin dusur")
+        p._params["denoise_strength"][0].sp.setValue(0.25)
+        p._params["halo_strength"][0].sp.setValue(0.15)
+        p._params["core_protect"][0].sp.setValue(0.72)
+        p._params["chroma_cleanup"][0].sp.setValue(0.35)
+        p._params["recompose_opacity"][0].sp.setValue(0.90)
+        p.run_requested.connect(lambda s,k="halo": self._run_key(k,s))
 
         # Star Shrink (dedicated panel)
         p = _make("✦↓","Star Shrink","star_shrink")
@@ -8095,6 +8122,7 @@ class AstroApp(QMainWindow):
             "bg_neutralize": ("processing.bg_neutralize", "neutralize_background"),
             "noise":   ("processing.noise_reduction",   "reduce_noise"),
             "stars":   ("processing.starsmaller",        "reduce_stars"),
+            "halo":    ("processing.halo_reduction",    "reduce_halos"),
             "deconv":  ("processing.deconvolution", "deconvolve_dispatch"),
             "sharp":   ("processing.sharpening",        "sharpen"),
             "nebula":  ("ai.nebula_enhancer",           "enhance_nebula"),
@@ -8647,11 +8675,17 @@ class AstroApp(QMainWindow):
 
     def _on_done(self, img, key, panel):
         import numpy as _np
-        result = _np.clip(img, 0, 1).astype(_np.float32) if isinstance(img, _np.ndarray) else img
+        layer_payload = img if isinstance(img, dict) and "result" in img else None
+        if layer_payload is not None:
+            result = _np.clip(layer_payload["result"], 0, 1).astype(_np.float32)
+        elif isinstance(img, _np.ndarray):
+            result = _np.clip(img, 0, 1).astype(_np.float32)
+        else:
+            result = img
         # Label oluştur
         method_names = {
             "bg":"BG Extract","bg_neutralize":"BG Siyah","noise":"Noise Reduce","deconv":"Deconvolve",
-            "stars":"Star Smaller","star_shrink":"Star Shrink",
+            "stars":"Star Smaller","halo":"Halo Reduction","star_shrink":"Star Shrink",
             "sharp":"Sharpen","color":"Color Cal",
             "stretch":"Stretch","nebula":"Nebula","morph":"Morph",
             "aberration":"Aberr Fix","crop":"Crop",
@@ -8666,6 +8700,13 @@ class AstroApp(QMainWindow):
             self.viewer.show_image(result, f"👁 {label}")
             self.status.showMessage(f"👁  {label} önizleme")
         else:
+            if layer_payload is not None and key == "halo":
+                starless = layer_payload.get("starless")
+                stars = layer_payload.get("stars")
+                if isinstance(starless, _np.ndarray):
+                    self._starless_img = _np.clip(starless, 0, 1).astype(_np.float32)
+                if isinstance(stars, _np.ndarray):
+                    self._stars_img = _np.clip(stars, 0, 1).astype(_np.float32)
             self._set_image(result, label)
             h, w = result.shape[:2] if hasattr(result,"shape") else (0,0)
             self.status.showMessage(f"✅  {label} tamamlandı  —  {w}×{h}px")
