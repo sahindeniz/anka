@@ -656,6 +656,8 @@ class MainWindow(QMainWindow):
 
     def _on_hist_preview(self, image: np.ndarray):
         """Histogram editor'dan gelen canlı önizleme — geçmişe eklenmez."""
+        if isinstance(image, dict):
+            image = image.get("image")
         if image is None:
             return
         self._canvas.set_image(image)

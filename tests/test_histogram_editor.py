@@ -14,6 +14,7 @@ if str(ROOT) not in sys.path:
 from PyQt6.QtWidgets import QApplication
 
 from gui.histogram_editor import (
+    DEFAULT_PREVIEW_MAX_SIDE,
     HistogramEditorPanel,
     apply_camera_raw_adjustments,
     build_preview_proxy,
@@ -109,6 +110,34 @@ class HistogramEditorRawAdjustmentsTests(unittest.TestCase):
         np.testing.assert_allclose(out[:, :, 0], out[:, :, 1], atol=1e-6)
         np.testing.assert_allclose(out[:, :, 1], out[:, :, 2], atol=1e-6)
 
+    def test_camera_raw_adjustments_make_color_balance_shift_visible(self):
+        img = np.full((2, 2, 3), 0.12, dtype=np.float32)
+
+        out = apply_camera_raw_adjustments(
+            img,
+            {
+                "profile": "Renk",
+                "exposure": 0.0,
+                "contrast": 0.0,
+                "highlights": 0.0,
+                "shadows": 0.0,
+                "whites": 0.0,
+                "blacks": 0.0,
+                "temp": 60.0,
+                "tint": 35.0,
+                "texture": 0.0,
+                "sharpen": 0.0,
+                "clarity": 0.0,
+                "dehaze": 0.0,
+                "vibrance": 45.0,
+                "saturation": 30.0,
+            },
+        )
+
+        self.assertGreater(float(out[:, :, 0].mean()), float(out[:, :, 1].mean()))
+        self.assertGreater(float(out[:, :, 1].mean()), float(out[:, :, 2].mean()))
+        self.assertGreater(float(out[:, :, 0].mean() - out[:, :, 2].mean()), 0.05)
+
 
 class HistogramEditorPanelTests(unittest.TestCase):
     def setUp(self):
@@ -148,6 +177,7 @@ class HistogramEditorPanelTests(unittest.TestCase):
         self.panel._chk_link.setChecked(False)
         self.panel._set_channel("G")
         self.panel._curves_wgt._pts["G"] = [(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)]
+        self.panel._curves_wgt._mark_dirty("G")
 
         out = self.panel._apply(emit=False, preview=False)
 
@@ -171,6 +201,28 @@ class HistogramEditorPanelTests(unittest.TestCase):
         self.assertGreater(float(out[0, 0, 0]), 0.35)
         self.assertGreater(float(out[0, 0, 1]), 0.60)
         self.assertGreater(float(out[0, 0, 2]), 0.80)
+
+    def test_live_preview_emits_proxy_payload_instead_of_full_resolution_image(self):
+        panel = HistogramEditorPanel()
+        large = np.zeros((2400, 3600, 3), dtype=np.float32)
+        large[:, :, 1] = 0.2
+        panel.set_image(large, reset=True)
+        panel._chk_link.setChecked(False)
+        panel._set_channel("G")
+        panel._curves_wgt._pts["G"] = [(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)]
+        panel._curves_wgt._mark_dirty("G")
+
+        payloads = []
+        panel.preview_changed.connect(payloads.append)
+        panel._emit_preview()
+
+        self.assertEqual(len(payloads), 1)
+        payload = payloads[0]
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(tuple(payload["display_shape"]), (2400, 3600))
+        self.assertLessEqual(max(payload["image"].shape[:2]), DEFAULT_PREVIEW_MAX_SIDE)
+        self.assertLess(payload["image"].shape[0], large.shape[0])
+        self.assertLess(payload["image"].shape[1], large.shape[1])
 
 
 if __name__ == "__main__":

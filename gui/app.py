@@ -4894,12 +4894,23 @@ class ImageViewer(QWidget):
 
     def _on_hist_preview(self, result):
         """Live preview — throttled to avoid excessive redraws."""
-        self._pending_preview = np.clip(result, 0, 1).astype(np.float32)
+        if isinstance(result, dict):
+            image = result.get("image")
+            display_shape = tuple(result.get("display_shape") or ())
+        else:
+            image = result
+            display_shape = tuple(image.shape[:2]) if isinstance(image, np.ndarray) else ()
+        if image is None:
+            return
+        self._pending_preview = {
+            "image": np.clip(image, 0, 1).astype(np.float32, copy=False),
+            "display_shape": display_shape,
+        }
         if not hasattr(self, '_hist_preview_timer'):
             from PyQt6.QtCore import QTimer
             self._hist_preview_timer = QTimer()
             self._hist_preview_timer.setSingleShot(True)
-            self._hist_preview_timer.setInterval(24)  # tighter throttle for live RAW preview
+            self._hist_preview_timer.setInterval(32)
             self._hist_preview_timer.timeout.connect(self._flush_hist_preview)
         if not self._hist_preview_timer.isActive():
             self._hist_preview_timer.start()
@@ -4908,8 +4919,9 @@ class ImageViewer(QWidget):
         """Throttled histogram preview flush."""
         if hasattr(self, '_pending_preview') and self._pending_preview is not None:
             slot = self._active
-            self._preview_img = self._pending_preview
-            self._draw_slot_direct(slot, self._preview_img)
+            payload = self._pending_preview
+            self._preview_img = payload["image"]
+            self._draw_slot_direct(slot, self._preview_img, display_shape=payload.get("display_shape"))
             self._sync_fullscreen_slot(slot, self._preview_img, self._titles[slot])
             self._pending_preview = None
 
@@ -4926,7 +4938,7 @@ class ImageViewer(QWidget):
         except Exception:
             pass
 
-    def _draw_slot_direct(self, slot, img):
+    def _draw_slot_direct(self, slot, img, display_shape=None):
         """Draw img to slot without updating self._imgs (used for live preview)."""
         ax  = self._axes_view[slot]
         fig = self._figs_view[slot]
@@ -4939,8 +4951,12 @@ class ImageViewer(QWidget):
         ax.set_axis_off()
         display = self._apply_display_filter(np.clip(img,0,1).astype(np.float32), slot)
         display, cmap = self._apply_view_channel_mode(display)
+        extent = None
+        if display_shape and tuple(display.shape[:2]) != tuple(display_shape):
+            target_h, target_w = display_shape[:2]
+            extent = [0, target_w, target_h, 0]
         ax.imshow(display, aspect="equal", interpolation="bilinear",
-                  origin="upper", cmap=cmap)
+                  origin="upper", cmap=cmap, extent=extent)
         if had_limits:
             ax.set_xlim(xlim); ax.set_ylim(ylim)
         fig.tight_layout(pad=0)

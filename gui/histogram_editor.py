@@ -41,6 +41,9 @@ HEAD    = "#c0e0ff"
 SUBTEXT = "#506880"
 
 CH_COLORS = {"L": ACCENT2, "R": RED, "G": GREEN, "B": "#6699ff", "ALL": ACCENT}
+LUT_XS = np.linspace(0.0, 1.0, 256, dtype=np.float32)
+DEFAULT_PREVIEW_MAX_SIDE = 768
+LIVE_PREVIEW_DEBOUNCE_MS = 32
 
 SPIN_CSS = (
     f"QDoubleSpinBox,QSpinBox{{background:{BG};color:{TEXT};"
@@ -369,6 +372,8 @@ class CurvesWidget(QWidget):
         self.setMouseTracking(True)
 
         self._pts  = {ch: [(0.0,0.0),(1.0,1.0)] for ch in ("L","R","G","B")}
+        self._lut_cache = {ch: LUT_XS.copy() for ch in ("L", "R", "G", "B")}
+        self._lut_dirty = set(("L", "R", "G", "B"))
         self._ch   = "L"
         self._drag_idx = None
         self._hdata    = {}
@@ -398,27 +403,38 @@ class CurvesWidget(QWidget):
         self._ch = ch; self.update()
 
     def get_lut(self, ch=None):
-        pts = sorted(self._pts[ch or self._ch], key=lambda p:p[0])
-        return self._pts_to_lut(pts)
+        target = ch or self._ch
+        if target in self._lut_dirty:
+            pts = sorted(self._pts[target], key=lambda p:p[0])
+            self._lut_cache[target] = self._pts_to_lut(pts)
+            self._lut_dirty.discard(target)
+        return self._lut_cache[target]
 
     def reset_channel(self, ch=None):
         for c in (self._pts if ch is None else [ch]):
             self._pts[c] = [(0.0,0.0),(1.0,1.0)]
+            self._lut_cache[c] = LUT_XS.copy()
+            self._lut_dirty.discard(c)
         self.update()
         self._emit()
 
+    def _mark_dirty(self, ch=None):
+        if ch is None:
+            self._lut_dirty.update(self._pts.keys())
+            return
+        self._lut_dirty.add(ch)
+
     def _pts_to_lut(self, pts):
         if len(pts) < 2:
-            return np.linspace(0,1,256)
+            return LUT_XS.copy()
         xs = np.array([p[0] for p in pts])
         ys = np.array([p[1] for p in pts])
-        x_in = np.linspace(0,1,256)
         from scipy.interpolate import PchipInterpolator
         try:
-            lut = PchipInterpolator(xs, ys)(x_in)
+            lut = PchipInterpolator(xs, ys)(LUT_XS)
         except Exception:
-            lut = np.interp(x_in, xs, ys)
-        return np.clip(lut, 0, 1)
+            lut = np.interp(LUT_XS, xs, ys)
+        return np.clip(lut, 0, 1).astype(np.float32)
 
     def _emit(self):
         lut = self.get_lut(self._ch)
@@ -630,6 +646,7 @@ class CurvesWidget(QWidget):
         if idx is not None:
             if ev.button() == Qt.MouseButton.RightButton and len(self._pts[self._ch]) > 2:
                 self._pts[self._ch].pop(idx)
+                self._mark_dirty(self._ch)
                 self._coord_label = None
                 self.update(); self._emit(); return
             self._drag_idx = idx
@@ -642,6 +659,7 @@ class CurvesWidget(QWidget):
                 x, y = self._from_widget(px, py)
                 self._pts[self._ch].append((x,y))
                 self._pts[self._ch].sort(key=lambda q:q[0])
+                self._mark_dirty(self._ch)
                 self._drag_idx = next(
                     (i for i,pt in enumerate(self._pts[self._ch])
                      if abs(pt[0]-x)<0.001), None)
@@ -659,6 +677,7 @@ class CurvesWidget(QWidget):
             x  = float(np.clip(x, lo, hi))
             y  = float(np.clip(y, 0, 1))
             pts[self._drag_idx] = (x, y)
+            self._mark_dirty(self._ch)
             wp = self._to_widget(x, y)
             self._coord_label = (wp.x(), wp.y(), f"({x:.3f}, {y:.3f})")
             self.update(); self._emit()
@@ -1245,7 +1264,10 @@ class HistogramEditorPanel(QWidget):
     def set_image(self, img: np.ndarray, reset: bool = False):
         self._img = np.clip(img, 0, 1).astype(np.float32) if img is not None else None
         self._orig_img = self._img.copy() if self._img is not None else None
-        self._preview_img, self._preview_scale = build_preview_proxy(self._img)
+        self._preview_img, self._preview_scale = build_preview_proxy(
+            self._img,
+            max_side=DEFAULT_PREVIEW_MAX_SIDE,
+        )
         self._preview_orig = self._preview_img.copy() if self._preview_img is not None else None
         hist_src = self._preview_img if self._preview_img is not None else self._img
         self._hist_wgt.set_image(hist_src)
@@ -1299,6 +1321,7 @@ class HistogramEditorPanel(QWidget):
         if len(channels) > 1:
             for c in channels:
                 self._curves_wgt._pts[c] = list(self._curves_wgt._pts[ch])
+                self._curves_wgt._mark_dirty(c)
         self._schedule_preview()
 
     def _on_adjustment(self, _):
@@ -1363,16 +1386,20 @@ class HistogramEditorPanel(QWidget):
 
     def _schedule_preview(self):
         if self._chk_live.isChecked():
-            self._debounce.start(24)
+            self._debounce.start(LIVE_PREVIEW_DEBOUNCE_MS)
 
     def _emit_preview(self):
         if self._img is None:
             return
         result = self._apply(emit=False, preview=True)
         if result is not None:
-            if self._orig_img is not None and result.shape != self._orig_img.shape:
-                result = resize_to_shape(result, self._orig_img.shape)
-            self.preview_changed.emit(result)
+            display_shape = self._orig_img.shape[:2] if self._orig_img is not None else result.shape[:2]
+            self.preview_changed.emit(
+                {
+                    "image": np.clip(result, 0.0, 1.0).astype(np.float32, copy=False),
+                    "display_shape": display_shape,
+                }
+            )
 
     def _auto_levels(self):
         base = self._preview_orig if self._preview_orig is not None else self._img
@@ -1469,6 +1496,8 @@ class HistogramEditorPanel(QWidget):
             self._hist_wgt._state[c] = [0.0, 0.5, 1.0, 0.0, 1.0]
         for c in list(self._curves_wgt._pts.keys()):
             self._curves_wgt._pts[c] = [(0.0, 0.0), (1.0, 1.0)]
+            self._curves_wgt._lut_cache[c] = LUT_XS.copy()
+        self._curves_wgt._lut_dirty.clear()
         self._hist_wgt.blockSignals(False)
         self._curves_wgt.blockSignals(False)
         self._reset_adjustments()
@@ -1542,22 +1571,21 @@ class HistogramEditorPanel(QWidget):
 
         pts_l = self._curves_wgt._pts.get("L", [(0, 0), (1, 1)])
         is_flat_l = len(pts_l) == 2 and pts_l[0] == (0, 0) and pts_l[1] == (1, 1)
-        xs = np.linspace(0.0, 1.0, 256, dtype=np.float32)
         if img.ndim == 2:
             if not is_flat_l:
                 lut = self._curves_wgt.get_lut("L")
-                img = np.clip(np.interp(img, xs, lut), 0, 1)
+                img = np.clip(np.interp(img, LUT_XS, lut), 0, 1)
         else:
             if not is_flat_l:
                 lut_l = self._curves_wgt.get_lut("L")
                 for i in range(3):
-                    img[:, :, i] = np.interp(img[:, :, i], xs, lut_l)
+                    img[:, :, i] = np.interp(img[:, :, i], LUT_XS, lut_l)
             for i, ch in enumerate(("R", "G", "B")):
                 pts = self._curves_wgt._pts.get(ch, [(0, 0), (1, 1)])
                 is_flat = len(pts) == 2 and pts[0] == (0, 0) and pts[1] == (1, 1)
                 if not is_flat:
                     lut = self._curves_wgt.get_lut(ch)
-                    img[:, :, i] = np.interp(img[:, :, i], xs, lut)
+                    img[:, :, i] = np.interp(img[:, :, i], LUT_XS, lut)
 
         img = np.clip(img, 0, 1).astype(np.float32)
         img = self._apply_adjustments(img)
@@ -1567,7 +1595,10 @@ class HistogramEditorPanel(QWidget):
             self.apply_requested.emit(img)
             self._img = img.copy()
             self._orig_img = img.copy()
-            self._preview_img, self._preview_scale = build_preview_proxy(self._img)
+            self._preview_img, self._preview_scale = build_preview_proxy(
+                self._img,
+                max_side=DEFAULT_PREVIEW_MAX_SIDE,
+            )
             self._preview_orig = self._preview_img.copy() if self._preview_img is not None else None
             hist_src = self._preview_img if self._preview_img is not None else self._img
             self._hist_wgt.set_image(hist_src)
@@ -1614,7 +1645,7 @@ def smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
     return t * t * (3.0 - 2.0 * t)
 
 
-def build_preview_proxy(img: np.ndarray, max_side: int = 1440):
+def build_preview_proxy(img: np.ndarray, max_side: int = DEFAULT_PREVIEW_MAX_SIDE):
     if img is None:
         return None, 1.0
     h, w = img.shape[:2]
@@ -1649,25 +1680,64 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
     img = np.clip(img.astype(np.float32, copy=True), 0.0, 1.0)
 
     exposure = float(params.get("exposure", 0.0))
+    contrast = float(params.get("contrast", 0.0))
+    highlights = float(params.get("highlights", 0.0))
+    shadows = float(params.get("shadows", 0.0))
+    whites = float(params.get("whites", 0.0))
+    blacks = float(params.get("blacks", 0.0))
+    temp = float(params.get("temp", 0.0))
+    tint = float(params.get("tint", 0.0))
+    texture = float(params.get("texture", 0.0))
+    sharpen = float(params.get("sharpen", 0.0))
+    clarity = float(params.get("clarity", 0.0))
+    dehaze = float(params.get("dehaze", 0.0))
+    vibrance = float(params.get("vibrance", 0.0))
+    saturation = float(params.get("saturation", 0.0))
+    profile = str(params.get("profile", "Renk"))
+
+    if (
+        profile == "Renk"
+        and abs(exposure) <= 1e-4
+        and abs(contrast) <= 1e-4
+        and abs(highlights) <= 1e-4
+        and abs(shadows) <= 1e-4
+        and abs(whites) <= 1e-4
+        and abs(blacks) <= 1e-4
+        and abs(temp) <= 1e-4
+        and abs(tint) <= 1e-4
+        and abs(texture) <= 1e-4
+        and abs(sharpen) <= 1e-4
+        and abs(clarity) <= 1e-4
+        and abs(dehaze) <= 1e-4
+        and abs(vibrance) <= 1e-4
+        and abs(saturation) <= 1e-4
+    ):
+        return img
+
     if abs(exposure) > 1e-4:
         img = np.clip(img * (2.0 ** exposure), 0.0, 1.0)
 
-    contrast = float(params.get("contrast", 0.0)) / 100.0
+    contrast /= 100.0
     if abs(contrast) > 1e-4:
         img = np.clip(0.5 + (img - 0.5) * (1.0 + contrast * 1.65), 0.0, 1.0)
 
-    luma = image_luma(img)
-    shadow_mask = 1.0 - smoothstep(0.16, 0.58, luma)
-    highlight_mask = smoothstep(0.42, 0.90, luma)
-    white_mask = smoothstep(0.72, 0.98, luma)
-    black_mask = 1.0 - smoothstep(0.02, 0.28, luma)
-    if img.ndim == 3:
-        shadow_mask = shadow_mask[:, :, None]
-        highlight_mask = highlight_mask[:, :, None]
-        white_mask = white_mask[:, :, None]
-        black_mask = black_mask[:, :, None]
+    shadows /= 100.0
+    highlights /= 100.0
+    whites /= 100.0
+    blacks /= 100.0
+    need_tone_masks = any(abs(v) > 1e-4 for v in (shadows, highlights, whites, blacks))
+    if need_tone_masks:
+        luma = image_luma(img)
+        shadow_mask = 1.0 - smoothstep(0.16, 0.58, luma)
+        highlight_mask = smoothstep(0.42, 0.90, luma)
+        white_mask = smoothstep(0.72, 0.98, luma)
+        black_mask = 1.0 - smoothstep(0.02, 0.28, luma)
+        if img.ndim == 3:
+            shadow_mask = shadow_mask[:, :, None]
+            highlight_mask = highlight_mask[:, :, None]
+            white_mask = white_mask[:, :, None]
+            black_mask = black_mask[:, :, None]
 
-    shadows = float(params.get("shadows", 0.0)) / 100.0
     if abs(shadows) > 1e-4:
         if shadows >= 0.0:
             img = img + shadows * shadow_mask * (1.0 - img) * 0.78
@@ -1675,7 +1745,6 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
             img = img + shadows * shadow_mask * img * 0.72
         img = np.clip(img, 0.0, 1.0)
 
-    highlights = float(params.get("highlights", 0.0)) / 100.0
     if abs(highlights) > 1e-4:
         if highlights >= 0.0:
             img = img + highlights * highlight_mask * (1.0 - img) * 0.52
@@ -1683,7 +1752,6 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
             img = img + highlights * highlight_mask * img * 0.82
         img = np.clip(img, 0.0, 1.0)
 
-    whites = float(params.get("whites", 0.0)) / 100.0
     if abs(whites) > 1e-4:
         if whites >= 0.0:
             img = img + whites * white_mask * (1.0 - img) * 0.95
@@ -1691,7 +1759,6 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
             img = img + whites * white_mask * img * 0.96
         img = np.clip(img, 0.0, 1.0)
 
-    blacks = float(params.get("blacks", 0.0)) / 100.0
     if abs(blacks) > 1e-4:
         if blacks >= 0.0:
             img = img + blacks * black_mask * np.maximum(0.30 - img, 0.0) * 1.15
@@ -1700,16 +1767,15 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
         img = np.clip(img, 0.0, 1.0)
 
     if img.ndim == 3:
-        profile = str(params.get("profile", "Renk"))
         if profile != "Siyah Beyaz":
-            temp = float(params.get("temp", 0.0)) / 100.0
-            tint = float(params.get("tint", 0.0)) / 100.0
+            temp /= 100.0
+            tint /= 100.0
             if abs(temp) > 1e-4 or abs(tint) > 1e-4:
                 gains = np.array(
                     [
-                        1.0 + temp * 0.20 + tint * 0.07,
-                        1.0 + temp * 0.05 - tint * 0.12,
-                        1.0 - temp * 0.24 + tint * 0.05,
+                        1.0 + temp * 0.34 + tint * 0.14,
+                        1.0 + temp * 0.08 - tint * 0.18,
+                        1.0 - temp * 0.38 + tint * 0.10,
                     ],
                     dtype=np.float32,
                 )
@@ -1717,10 +1783,10 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
 
             gray = image_luma(img)[:, :, None]
             chroma = img - gray
-            saturation = float(params.get("saturation", 0.0)) / 100.0
-            vibrance = float(params.get("vibrance", 0.0)) / 100.0
+            saturation /= 100.0
+            vibrance /= 100.0
             if abs(saturation) > 1e-4:
-                img = np.clip(gray + chroma * (1.0 + saturation * 1.35), 0.0, 1.0)
+                img = np.clip(gray + chroma * (1.0 + saturation * 1.8), 0.0, 1.0)
                 chroma = img - image_luma(img)[:, :, None]
             if abs(vibrance) > 1e-4:
                 sat_map = np.clip(
@@ -1729,23 +1795,23 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
                     0.0,
                     1.0,
                 )
-                protect = 1.0 - sat_map * 0.8
-                img = np.clip(img + vibrance * chroma * protect * 1.25, 0.0, 1.0)
+                protect = 1.0 - sat_map * 0.75
+                img = np.clip(img + vibrance * chroma * protect * 1.7, 0.0, 1.0)
         else:
             gray = image_luma(img)
             img = np.repeat(gray[:, :, None], 3, axis=2)
 
-    texture = float(params.get("texture", 0.0)) / 100.0
+    texture /= 100.0
     if abs(texture) > 1e-4:
         fine = img - cv2.GaussianBlur(img, (0, 0), 1.1)
         img = np.clip(img + texture * fine * 0.90, 0.0, 1.0)
 
-    sharpen = float(params.get("sharpen", 0.0)) / 100.0
+    sharpen /= 100.0
     if abs(sharpen) > 1e-4:
         sharp_base = cv2.GaussianBlur(img, (0, 0), 0.75)
         img = np.clip(img + sharpen * (img - sharp_base) * 1.18, 0.0, 1.0)
 
-    clarity = float(params.get("clarity", 0.0)) / 100.0
+    clarity /= 100.0
     if abs(clarity) > 1e-4:
         local = cv2.GaussianBlur(img, (0, 0), 7.5)
         luma = image_luma(img)
@@ -1754,7 +1820,7 @@ def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
             mid_mask = mid_mask[:, :, None]
         img = np.clip(img + clarity * (img - local) * (0.6 + mid_mask * 0.9), 0.0, 1.0)
 
-    dehaze = float(params.get("dehaze", 0.0)) / 100.0
+    dehaze /= 100.0
     if abs(dehaze) > 1e-4:
         haze = cv2.GaussianBlur(img, (0, 0), 28.0)
         img = np.clip(img + dehaze * (img - haze) * 1.35, 0.0, 1.0)
