@@ -10,6 +10,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from gui.bg_composer import generate_welcome_overlay
+from processing.mastro_noise import process_denoise
+from processing.mastro_starless import process_starless
 from processing.stacking import _normalize_frames, _stack_weighted_mean, stack_aligned
 
 
@@ -103,6 +105,47 @@ class WelcomeOverlayTests(unittest.TestCase):
         self.assertFalse(np.allclose(out, bg))
         self.assertGreaterEqual(float(np.min(out)), 0.0)
         self.assertLessEqual(float(np.max(out)), 1.0)
+
+
+class MastroSelfContainedTests(unittest.TestCase):
+    def test_mastro_noise_runs_without_external_model_files(self):
+        base = np.linspace(0.0, 1.0, 64 * 64, dtype=np.float32).reshape(64, 64)
+        noisy = np.stack([base, np.flipud(base), base], axis=2)
+        rng = np.random.default_rng(7)
+        noisy = np.clip(noisy + rng.normal(0.0, 0.04, noisy.shape).astype(np.float32), 0, 1)
+        progress = []
+
+        result = process_denoise(
+            noisy,
+            modulation=0.7,
+            progress_callback=lambda v: progress.append(v),
+        )
+
+        self.assertEqual(result.shape, noisy.shape)
+        self.assertEqual(result.dtype, np.float32)
+        self.assertGreaterEqual(min(progress), 0)
+        self.assertEqual(progress[-1], 100)
+        self.assertFalse(np.allclose(result, noisy))
+
+    def test_mastro_starless_runs_without_siril(self):
+        img = np.zeros((96, 96, 3), dtype=np.float32)
+        img[48, 48] = 1.0
+        img[24, 70] = 0.8
+        img[70, 20] = 0.7
+        progress = []
+
+        starless, mask = process_starless(
+            img,
+            progress_callback=lambda v: progress.append(v),
+        )
+
+        self.assertEqual(starless.shape, img.shape)
+        self.assertEqual(starless.dtype, np.float32)
+        self.assertIsNotNone(mask)
+        self.assertEqual(mask.shape, img.shape[:2])
+        self.assertEqual(mask.dtype, np.float32)
+        self.assertEqual(progress[-1], 100)
+        self.assertLess(float(starless[48, 48, 0]), float(img[48, 48, 0]))
 
 
 if __name__ == "__main__":

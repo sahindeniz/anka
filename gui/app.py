@@ -627,7 +627,7 @@ class ProcessPanel(QWidget):
 
 
 class _MastroStarlessWorker(QThread):
-    """Background thread for Mastro Starless NAFNet star removal."""
+    """Background thread for self-contained Mastro Starless processing."""
     finished_sig = pyqtSignal(object)
     progress_sig = pyqtSignal(int)
 
@@ -2007,7 +2007,7 @@ class WorkflowPanel(QFrame):
         ("noise",      "✨", "7. Gürültü Azaltma (Lineer)",
          "#22aa55", "LİNEER",
          "Lineer fazda gürültü karakteri uniform — en etkili nokta burası.\n"
-         "Mastro AI (NAFNet) veya Silentium (fiziksel model).\n"
+         "Mastro Noise (dahili motor) veya Silentium (fiziksel model).\n"
          "Güçlü uygulamayın — stretch sonrası ikinci tur daha iyi."),
 
         ("color",      "🎨", "8. Renk Kalibrasyon",
@@ -2031,7 +2031,7 @@ class WorkflowPanel(QFrame):
         # ══════════════════════════════════════════════════════════════
         ("stars",      "⭐", "10. Yıldız Ayırma",
          "#884488", "NON-LİNEER",
-         "StarNet++ veya Mastro Starless (NAFNet AI) ile yıldızları ayır.\n"
+         "StarNet++ veya Mastro Starless (dahili motor) ile yıldızları ayır.\n"
          "Starless katmanda nebula kontrastını bağımsız olarak işle.\n"
          "Yıldızları korumak için ayır → işle → birleştir stratejisi."),
 
@@ -6159,9 +6159,9 @@ class AstroApp(QMainWindow):
         self._tb_star_shrink.clicked.connect(lambda: self._show_process_flyout("star_shrink", self._tb_star_shrink))
         self._tb_recomp.clicked.connect(self._open_recomposition)
         self._tb_mastro_starless.setToolTip(
-            "Mastro Starless — NAFNet AI yıldız silme\n"
-            "zenith.pt modeli kullanır (Siril syqon)\n"
-            "GPU destekli, tile-based inference")
+            "Mastro Starless — dahili yıldız ayırma\n"
+            "Siril veya harici model gerektirmez\n"
+            "GPU zorunlu değildir")
         self._tb_starless.setToolTip(
             "Run StarNet++ on current image\n"
             "Saves starless + stars-only files\n"
@@ -6936,7 +6936,7 @@ class AstroApp(QMainWindow):
         p.add_combo("method","Method",
                     ["mastro_noise","silentium","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
                     "mastro_noise",
-                    "mastro_noise     — Mastro Noise (NAFNet AI, en iyi kalite)\n"
+                    "mastro_noise     — Mastro Noise (dahili self-contained)\n"
                     "silentium        — Veralux Silentium (wavelet, hızlı alternatif)\n"
                     "silentium        — Veralux Silentium (linear-phase)\n"
                     "bilateral        — Kenar-koruyucu bilateral\n"
@@ -7801,19 +7801,9 @@ class AstroApp(QMainWindow):
 
     # ── Mastro Starless one-click run & save ───────────────────────────
     def _run_mastro_starless(self):
-        """One-click Mastro Starless — NAFNet AI star removal."""
+        """One-click Mastro Starless — self-contained star removal."""
         if self._current is None:
             QMessageBox.information(self, "Info", "Please open an image first.")
-            return
-
-        # Check model file
-        import pathlib
-        model_dir = pathlib.Path(os.environ.get("LOCALAPPDATA", "")) / "siril" / "syqon_starless"
-        model_file = model_dir / "zenith.pt"
-        if not model_file.exists():
-            QMessageBox.critical(self, "Model Bulunamadı",
-                f"Mastro Starless modeli bulunamadı:\n{model_file}\n\n"
-                f"zenith.pt dosyasını aşağıdaki klasöre koyun:\n{model_dir}")
             return
 
         # Ask for output folder
@@ -7832,8 +7822,8 @@ class AstroApp(QMainWindow):
 
         reply = QMessageBox.question(
             self, "Mastro Starless",
-            f"Engine:  NAFNet (Zenith)\n"
-            f"Model:   zenith.pt\n"
+            f"Engine:  Mastro Starless (built-in)\n"
+            f"Runtime: Self-contained\n"
             "Source:  Current linear image (AutoSTF preview only)\n"
             f"Output:  {out_dir}\n\n"
             f"Kaydedilecek:\n"
