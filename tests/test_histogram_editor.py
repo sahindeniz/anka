@@ -1,15 +1,26 @@
+import os
 import sys
 import unittest
 from pathlib import Path
 
 import numpy as np
 
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from gui.histogram_editor import apply_camera_raw_adjustments, build_preview_proxy
+from PyQt6.QtWidgets import QApplication
+
+from gui.histogram_editor import (
+    HistogramEditorPanel,
+    apply_camera_raw_adjustments,
+    build_preview_proxy,
+)
+
+
+_APP = QApplication.instance() or QApplication([])
 
 
 class HistogramEditorPreviewTests(unittest.TestCase):
@@ -97,6 +108,69 @@ class HistogramEditorRawAdjustmentsTests(unittest.TestCase):
 
         np.testing.assert_allclose(out[:, :, 0], out[:, :, 1], atol=1e-6)
         np.testing.assert_allclose(out[:, :, 1], out[:, :, 2], atol=1e-6)
+
+
+class HistogramEditorPanelTests(unittest.TestCase):
+    def setUp(self):
+        self.panel = HistogramEditorPanel()
+        self.img = np.zeros((4, 4, 3), dtype=np.float32)
+        self.img[:, :, 0] = 0.25
+        self.img[:, :, 1] = 0.50
+        self.img[:, :, 2] = 0.75
+        self.panel.set_image(self.img, reset=True)
+
+    def test_curve_section_is_first_and_expanded(self):
+        section_order = []
+        for idx in range(self.panel._panel_lay.count()):
+            item = self.panel._panel_lay.itemAt(idx)
+            widget = item.widget() if item is not None else None
+            if widget is None:
+                continue
+            name = widget.objectName()
+            if name.startswith("hist_section_"):
+                section_order.append(name)
+        self.assertEqual(
+            section_order,
+            [
+                "hist_section_curve",
+                "hist_section_basic",
+                "hist_section_detail",
+                "hist_section_levels",
+                "hist_section_channels",
+            ],
+        )
+        curve_body = self.panel.findChild(type(self.panel._curves_wgt.parentWidget()), "hist_section_body_curve")
+        self.assertIsNotNone(curve_body)
+        self.assertFalse(curve_body.isHidden())
+        self.assertGreaterEqual(self.panel._curves_wgt.minimumHeight(), 320)
+
+    def test_curve_channel_edit_unlinked_affects_selected_channel_only(self):
+        self.panel._chk_link.setChecked(False)
+        self.panel._set_channel("G")
+        self.panel._curves_wgt._pts["G"] = [(0.0, 0.0), (0.5, 1.0), (1.0, 1.0)]
+
+        out = self.panel._apply(emit=False, preview=False)
+
+        self.assertAlmostEqual(float(out[0, 0, 0]), 0.25, places=4)
+        self.assertGreater(float(out[0, 0, 1]), 0.90)
+        self.assertAlmostEqual(float(out[0, 0, 2]), 0.75, places=4)
+
+    def test_levels_with_rgb_link_affect_all_rgb_channels(self):
+        self.panel._chk_link.setChecked(True)
+        self.panel._set_channel("R")
+        self.panel._hist_wgt.set_state("R", 0.0, 0.35, 1.0, 0.0, 1.0)
+        self.panel._on_levels_changed("R", 0.0, 0.35, 1.0, 0.0, 1.0)
+
+        for channel in ("R", "G", "B"):
+            self.assertEqual(
+                self.panel._hist_wgt.get_state(channel),
+                [0.0, 0.35, 1.0, 0.0, 1.0],
+            )
+
+        out = self.panel._apply(emit=False, preview=False)
+        self.assertGreater(float(out[0, 0, 0]), 0.35)
+        self.assertGreater(float(out[0, 0, 1]), 0.60)
+        self.assertGreater(float(out[0, 0, 2]), 0.80)
 
 
 if __name__ == "__main__":

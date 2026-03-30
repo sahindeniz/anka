@@ -4683,27 +4683,7 @@ class ImageViewer(QWidget):
         display = self._apply_display_filter(self._apply_hist_points(img), slot)
 
         # ── Kanal filtresi + Colormap ─────────────────────────────
-        ch_mode = getattr(self, '_channel_mode', 'RGB')
-        selected_cmap = self.cmap_cb.currentText()
-        cmap = None
-
-        if display.ndim == 3 and ch_mode != "RGB":
-            # Tek kanal çıkarma — seçilen colormap uygulanır
-            if ch_mode == "R":
-                display = display[:, :, 0]
-            elif ch_mode == "G":
-                display = display[:, :, 1]
-            elif ch_mode == "B":
-                display = display[:, :, 2]
-            elif ch_mode == "L":
-                display = 0.2126*display[:,:,0] + 0.7152*display[:,:,1] + 0.0722*display[:,:,2]
-            cmap = selected_cmap
-        elif display.ndim == 3 and selected_cmap != "gray":
-            # RGB görüntü + colormap seçilmiş → luminance'a çevirip colormap uygula
-            display = 0.2126*display[:,:,0] + 0.7152*display[:,:,1] + 0.0722*display[:,:,2]
-            cmap = selected_cmap
-        elif display.ndim == 2:
-            cmap = selected_cmap
+        display, cmap = self._apply_view_channel_mode(display)
 
         ax.imshow(display, cmap=cmap, origin="upper",
                   aspect="equal", interpolation="nearest")
@@ -4735,6 +4715,29 @@ class ImageViewer(QWidget):
         except Exception:
             pass
         return img
+
+    def _apply_view_channel_mode(self, display: np.ndarray):
+        if display is None:
+            return None, None
+        ch_mode = getattr(self, '_channel_mode', 'RGB')
+        selected_cmap = self.cmap_cb.currentText()
+        cmap = None
+        if display.ndim == 3 and ch_mode != "RGB":
+            if ch_mode == "R":
+                display = display[:, :, 0]
+            elif ch_mode == "G":
+                display = display[:, :, 1]
+            elif ch_mode == "B":
+                display = display[:, :, 2]
+            elif ch_mode == "L":
+                display = 0.2126 * display[:, :, 0] + 0.7152 * display[:, :, 1] + 0.0722 * display[:, :, 2]
+            cmap = selected_cmap
+        elif display.ndim == 3 and selected_cmap != "gray":
+            display = 0.2126 * display[:, :, 0] + 0.7152 * display[:, :, 1] + 0.0722 * display[:, :, 2]
+            cmap = selected_cmap
+        elif display.ndim == 2:
+            cmap = selected_cmap
+        return display, cmap
 
     def _redraw_all(self):
         for i in range(self._layout_n):
@@ -4935,7 +4938,7 @@ class ImageViewer(QWidget):
         ax.clear(); self._sax_style(ax)
         ax.set_axis_off()
         display = self._apply_display_filter(np.clip(img,0,1).astype(np.float32), slot)
-        cmap = None if display.ndim == 3 else self.cmap_cb.currentText()
+        display, cmap = self._apply_view_channel_mode(display)
         ax.imshow(display, aspect="equal", interpolation="bilinear",
                   origin="upper", cmap=cmap)
         if had_limits:

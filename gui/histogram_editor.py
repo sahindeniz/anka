@@ -830,23 +830,23 @@ class HistogramEditorPanel(QWidget):
         profile_row.addWidget(self._raw_profile, 1)
         self._panel_lay.addLayout(profile_row)
 
-        basic_frame, basic_lay = self._make_section("Temel", expanded=True)
-        self._panel_lay.addWidget(basic_frame)
-        self._build_basic_section(basic_lay)
-
-        curve_frame, curve_lay = self._make_section("Eğri", expanded=False)
+        curve_frame, curve_lay = self._make_section("Eğri", section_key="curve", expanded=True)
         self._panel_lay.addWidget(curve_frame)
         self._build_curve_section(curve_lay)
 
-        detail_frame, detail_lay = self._make_section("Ayrıntı", expanded=False)
+        basic_frame, basic_lay = self._make_section("Temel", section_key="basic", expanded=True)
+        self._panel_lay.addWidget(basic_frame)
+        self._build_basic_section(basic_lay)
+
+        detail_frame, detail_lay = self._make_section("Ayrıntı", section_key="detail", expanded=False)
         self._panel_lay.addWidget(detail_frame)
         self._build_detail_section(detail_lay)
 
-        levels_frame, levels_lay = self._make_section("Histogram", expanded=False)
+        levels_frame, levels_lay = self._make_section("Histogram", section_key="levels", expanded=False)
         self._panel_lay.addWidget(levels_frame)
         self._build_levels_section(levels_lay)
 
-        channels_frame, channels_lay = self._make_section("Kanallar", expanded=False)
+        channels_frame, channels_lay = self._make_section("Kanallar", section_key="channels", expanded=False)
         self._panel_lay.addWidget(channels_frame)
         self._build_channel_section(channels_lay)
         self._panel_lay.addStretch()
@@ -880,8 +880,10 @@ class HistogramEditorPanel(QWidget):
         btn_row.addWidget(b_apply)
         root.addLayout(btn_row)
 
-    def _make_section(self, title, expanded=True):
+    def _make_section(self, title, section_key=None, expanded=True):
         frame = QFrame()
+        if section_key:
+            frame.setObjectName(f"hist_section_{section_key}")
         frame.setStyleSheet(
             f"QFrame{{background:{BG2};border:1px solid {BORDER};border-radius:4px;}}"
         )
@@ -900,6 +902,8 @@ class HistogramEditorPanel(QWidget):
         outer.addWidget(button)
 
         body = QWidget()
+        if section_key:
+            body.setObjectName(f"hist_section_body_{section_key}")
         body.setStyleSheet(f"background:{BG2};")
         body_lay = QVBoxLayout(body)
         body_lay.setContentsMargins(8, 8, 8, 8)
@@ -962,7 +966,7 @@ class HistogramEditorPanel(QWidget):
     def _build_curve_section(self, lay):
         self._curves_wgt = CurvesWidget()
         self._curves_wgt.curve_changed.connect(self._on_curve_changed)
-        self._curves_wgt.setMinimumHeight(220)
+        self._curves_wgt.setMinimumHeight(320)
         lay.addWidget(self._curves_wgt)
 
         hint = QLabel("Left: add point  |  Right: remove  |  Drag: adjust")
