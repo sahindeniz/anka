@@ -15,6 +15,8 @@ test_*.png
 test_*.jpg
 _tmp_compare_*.png
 _tmp_method_compare_*.png
+_tmp_mmap*/
+_tmp_test_*/
 
 # IDE
 .vscode/

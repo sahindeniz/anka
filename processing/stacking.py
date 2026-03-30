@@ -14,6 +14,7 @@ PixInsight ImageIntegration seviyesinde stacking engine.
 """
 
 import os
+import tempfile
 import warnings
 import numpy as np
 import cv2
@@ -26,6 +27,103 @@ _ANALYSIS_MAX_DIM = 960
 _ECC_MAX_DIM = 768
 _BLOB_DETECTOR = None
 _ORB_DETECTOR = None
+
+# Eşik: bu kadar frame × piksel RAM'e sığmıyorsa disk-backed mmap kullan
+_MMAP_THRESHOLD_GB = 6.0
+_MMAP_TEMP_ROOT = os.path.join(os.path.dirname(os.path.dirname(__file__)), "_tmp_mmap")
+
+
+def _should_use_mmap(n_frames: int, shape: tuple, dtype=np.float32) -> bool:
+    """Toplam bellek ihtiyacı eşiği aşıyorsa True döndür."""
+    pixels = 1
+    for s in shape:
+        pixels *= s
+    total_bytes = n_frames * pixels * np.dtype(dtype).itemsize
+    return total_bytes > _MMAP_THRESHOLD_GB * 1024**3
+
+
+class _MmapFrameStore:
+    """Disk-backed frame deposu — RAM'e sığmayan büyük stackler için.
+
+    Frame'ler numpy memmap dosyasına yazılır, sadece ihtiyaç duyulduğunda
+    okunur. Bu sayede 171+ frame bile 16GB RAM'de stacklenebilir.
+    """
+
+    def __init__(self, n_frames: int, shape: tuple, dtype=np.float32):
+        self._n = n_frames
+        self._shape = shape
+        self._dtype = np.dtype(dtype)
+        os.makedirs(_MMAP_TEMP_ROOT, exist_ok=True)
+        full_shape = (n_frames,) + shape
+        handle = tempfile.NamedTemporaryFile(
+            prefix="amp_mmap_",
+            suffix=".dat",
+            dir=_MMAP_TEMP_ROOT,
+            delete=False,
+        )
+        self._path = handle.name
+        handle.close()
+        total_bytes = int(np.prod(full_shape, dtype=np.int64)) * int(self._dtype.itemsize)
+        with open(self._path, "wb") as handle:
+            handle.truncate(max(total_bytes, 1))
+        self._mmap = np.memmap(self._path, dtype=self._dtype,
+                               mode="r+", shape=full_shape)
+
+    def __len__(self):
+        return self._n
+
+    def __iter__(self):
+        for i in range(self._n):
+            yield self._mmap[i]
+
+    def __getitem__(self, idx):
+        return self._mmap[idx]
+
+    def __setitem__(self, idx, value):
+        self._mmap[idx] = value
+
+    def __array__(self, dtype=None):
+        return np.asarray(self._mmap, dtype=dtype)
+
+    @property
+    def shape(self):
+        return self._mmap.shape
+
+    @property
+    def dtype(self):
+        return self._mmap.dtype
+
+    def append_at(self, idx: int, frame: np.ndarray):
+        self._mmap[idx] = frame.astype(self._dtype)
+
+    def as_list(self) -> list:
+        """Rejection/stacking fonksiyonları List[ndarray] bekliyor — uyumluluk."""
+        return [self._mmap[i] for i in range(self._n)]
+
+    def cleanup(self):
+        try:
+            mmap_obj = self._mmap
+        except Exception:
+            mmap_obj = None
+        if mmap_obj is not None:
+            try:
+                mmap_obj.flush()
+            except Exception:
+                pass
+            try:
+                raw_mmap = getattr(mmap_obj, "_mmap", None)
+                if raw_mmap is not None:
+                    raw_mmap.close()
+            except Exception:
+                pass
+        self._mmap = None
+        try:
+            os.remove(self._path)
+        except OSError:
+            pass
+
+    def __del__(self):
+        self.cleanup()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 #  YARDIMCI FONKSIYONLAR
@@ -253,29 +351,79 @@ def _ecc_fallback(img: np.ndarray, base: np.ndarray) -> Optional[np.ndarray]:
 
 def _build_master(paths: List[str], method: str = "median",
                   progress_cb=None, label="") -> Optional[np.ndarray]:
-    """Kalibrasyon karelerinden master frame oluştur."""
+    """Kalibrasyon karelerinden master frame oluştur.
+
+    Büyük setler için (RAM eşiği aşılırsa) disk-backed mmap kullanır.
+    Küçük setler için hala RAM'de çalışır (hızlı).
+    """
     if not paths:
         return None
     from core.loader import load_image
 
     n = len(paths)
-    frames = [None] * n
 
-    def _load(idx_path):
-        i, p = idx_path
-        return i, load_image(p)
+    # İlk frame'i oku, boyut al
+    first = load_image(paths[0]).astype(np.float32, copy=False)
+    shape = first.shape
+    use_mmap = _should_use_mmap(n, shape)
+    load_args = list(enumerate(paths[1:], start=1))
 
-    with ThreadPoolExecutor(max_workers=_N_WORKERS) as pool:
-        for i, img in pool.map(_load, enumerate(paths)):
-            frames[i] = img
-            if progress_cb:
-                progress_cb(label, f"{i+1}/{n} yukleniyor…")
+    if use_mmap:
+        store = _MmapFrameStore(n, shape, dtype=np.float32)
+        store.append_at(0, first)
+        del first
 
-    stack = np.stack(frames, axis=0)
-    if method == "median":
-        return np.median(stack, axis=0).astype(np.float32)
+        def _load(idx_path):
+            i, p = idx_path
+            return i, load_image(p).astype(np.float32, copy=False)
+
+        with ThreadPoolExecutor(max_workers=_N_WORKERS) as pool:
+            for i, img in pool.map(_load, load_args):
+                store.append_at(i, img)
+                if progress_cb:
+                    progress_cb(label, f"{i+1}/{n} yukleniyor…")
+
+        # Blok blok median/mean hesapla — tüm stack'i RAM'e almadan
+        h, w = shape[:2]
+        block_h = _select_block_size(
+            h,
+            w * (shape[2] if len(shape) > 2 else 1),
+            n,
+            max_block=128,
+            target_mb=128,
+            temp_buffers=2,
+        )
+        result = np.empty(shape, dtype=np.float32)
+        for y0 in range(0, h, block_h):
+            y1 = min(y0 + block_h, h)
+            block = store._mmap[:, y0:y1]  # (n, bh, w, [ch])
+            if method == "median":
+                result[y0:y1] = np.median(block, axis=0).astype(np.float32)
+            else:
+                result[y0:y1] = np.mean(block, axis=0).astype(np.float32)
+
+        store.cleanup()
+        return result
     else:
-        return np.mean(stack, axis=0).astype(np.float32)
+        # Küçük set — RAM'de hızlı
+        frames = [first]
+
+        def _load(idx_path):
+            i, p = idx_path
+            return i, load_image(p).astype(np.float32, copy=False)
+
+        with ThreadPoolExecutor(max_workers=_N_WORKERS) as pool:
+            for i, img in pool.map(_load, load_args):
+                frames.append(img)
+                if progress_cb:
+                    progress_cb(label, f"{i+1}/{n} yukleniyor…")
+
+        stack = np.stack(frames, axis=0)
+        del frames
+        if method == "median":
+            return np.median(stack, axis=0).astype(np.float32)
+        else:
+            return np.mean(stack, axis=0).astype(np.float32)
 
 
 def _calibrate_frame(
@@ -397,10 +545,12 @@ def _normalize_frames(frames: List[np.ndarray], masks: List[np.ndarray],
 
     ref_meds, ref_scales = stats[0]
 
-    normalized = []
+    keep_container = isinstance(frames, _MmapFrameStore)
+    normalized = frames if keep_container else []
     for i, (fr, (meds, scales)) in enumerate(zip(frames, stats)):
         if i == 0:
-            normalized.append(fr)
+            if not keep_container:
+                normalized.append(fr)
             continue
 
         try:
@@ -426,7 +576,8 @@ def _normalize_frames(frames: List[np.ndarray], masks: List[np.ndarray],
                     np.add(ch, scalar_t(ref_meds[c]), out=ch, casting="unsafe")
 
         np.clip(out, 0, None, out=out)
-        normalized.append(out)
+        if not keep_container:
+            normalized.append(out)
 
     return normalized
 
@@ -534,7 +685,12 @@ def _stack_weighted_mean(frames: List[np.ndarray], masks: List[np.ndarray],
 
 def _build_valid_mask_stack(masks: List[np.ndarray]) -> np.ndarray:
     """Maskeleri tek bir bool stack içine çevir."""
-    valid = np.empty((len(masks),) + masks[0].shape, dtype=bool)
+    use_mmap = _should_use_mmap(len(masks), masks[0].shape, dtype=np.bool_)
+    valid = (
+        _MmapFrameStore(len(masks), masks[0].shape, dtype=np.bool_)
+        if use_mmap else
+        np.empty((len(masks),) + masks[0].shape, dtype=bool)
+    )
     for i, msk in enumerate(masks):
         np.greater(msk, 0.5, out=valid[i])
     return valid
@@ -837,12 +993,8 @@ def align_frames_only(
     quality_warning_cb: Callable = None,
     **kwargs,
 ) -> Tuple[List[np.ndarray], List[dict]]:
-    """Hizalama pipeline — rotasyon destekli.
-
-    Returns:
-        (aligned_frames, frame_infos)
-        frame_infos: Her kare için {score, rotation, status, ...}
-    """
+    """Alignment pipeline with optional disk-backed frame storage."""
+    del align_method, normalize, quality_reject, kwargs
     from core.loader import load_image
 
     n = len(light_paths)
@@ -853,29 +1005,28 @@ def align_frames_only(
         if progress_cb:
             progress_cb(step, msg)
 
-    # ── 1. Master kareleri oluştur ──
-    cb(1, "Master Bias oluşturuluyor…")
+    cb(1, "Master Bias olusturuluyor...")
     master_bias = _build_master(bias_paths or [], "median", progress_cb, "1")
 
-    cb(2, "Master Dark oluşturuluyor…")
+    cb(2, "Master Dark olusturuluyor...")
     master_dark = _build_master(dark_paths or [], "median", progress_cb, "2")
 
-    cb(3, "Master Flat oluşturuluyor…")
+    cb(3, "Master Flat olusturuluyor...")
     master_flat = _build_master(flat_paths or [], "median", progress_cb, "3")
 
     if dark_flat_paths:
-        cb(3, "Dark Flat oluşturuluyor…")
+        cb(3, "Dark Flat olusturuluyor...")
         dark_flat = _build_master(dark_flat_paths, "median", progress_cb, "3")
         if dark_flat is not None and master_flat is not None:
             master_flat = np.clip(master_flat - dark_flat, 0, None)
 
-    # ── 2. Tüm kareleri yükle + kalibre et + kalite skoru ──
-    cb(4, f"{n} kare yükleniyor ve kalibre ediliyor…")
+    cb(4, f"{n} kare yukleniyor ve kalibre ediliyor...")
 
     def _load_and_calibrate(idx_path):
         i, p = idx_path
         img = load_image(p)
         img = _calibrate_frame(img, master_dark, master_flat, master_bias)
+        img = img.astype(np.float32, copy=False)
         sc = score_frame(img)
         sc["path"] = p
         sc["name"] = os.path.basename(p)
@@ -883,22 +1034,32 @@ def align_frames_only(
         sc["status"] = "ok"
         return i, img, sc
 
-    # Paralel yükle + kalibre et
-    loaded = [None] * n
+    first_i, first_img, first_sc = _load_and_calibrate((0, light_paths[0]))
+    use_mmap = _should_use_mmap(n, first_img.shape)
+    loaded_frames = _MmapFrameStore(n, first_img.shape, dtype=np.float32) if use_mmap else [None] * n
+    loaded_scores = [None] * n
+    loaded_frames[first_i] = first_img
+    loaded_scores[first_i] = first_sc
+    cb(4, f"Kare 1/{n}: {os.path.basename(light_paths[0])}")
+
+    load_args = list(enumerate(light_paths[1:], start=1))
     with ThreadPoolExecutor(max_workers=_N_WORKERS) as pool:
-        for i, img, sc in pool.map(_load_and_calibrate, enumerate(light_paths)):
-            loaded[i] = (img, sc)
+        for i, img, sc in pool.map(_load_and_calibrate, load_args):
+            loaded_frames[i] = img
+            loaded_scores[i] = sc
             cb(4, f"Kare {i+1}/{n}: {os.path.basename(light_paths[i])}")
 
-    frames = []
+    selected_indices = []
+    valid_infos = []
     frame_infos = []
-    for i, (img, sc) in enumerate(loaded):
-        # Düşük kalite uyarısı
+    for i, sc in enumerate(loaded_scores):
         if sc["score"] < quality_threshold:
             sc["status"] = "low_quality"
-            cb(4, f"  ⚠ Kare {i+1}: Düşük kalite (skor={sc['score']:.3f}, "
-                  f"yıldız={sc['star_count']}, SNR={sc['snr']:.2f})")
-            # GUI callback ile popup uyarı
+            cb(
+                4,
+                f"  Uyari kare {i+1}: dusuk kalite (skor={sc['score']:.3f}, "
+                f"yildiz={sc['star_count']}, SNR={sc['snr']:.2f})",
+            )
             if quality_warning_cb:
                 skip = quality_warning_cb(sc)
                 if skip:
@@ -906,82 +1067,106 @@ def align_frames_only(
                     frame_infos.append(sc)
                     continue
 
-        frames.append(img)
+        selected_indices.append(i)
+        valid_infos.append(sc)
         frame_infos.append(sc)
 
-    # ── 3. Referans kare seç ──
-    valid_infos = [fi for fi in frame_infos if fi["status"] != "skipped"]
-    if ref_mode == "best" and len(frames) > 1:
-        cb(5, "En iyi referans kare seçiliyor…")
+    if ref_mode == "best" and len(selected_indices) > 1:
+        cb(5, "En iyi referans kare seciliyor...")
         best_idx = 0
-        best_score = -1
+        best_score = -1.0
         for i, fi in enumerate(valid_infos):
-            if fi.get("score", 0) > best_score:
+            if fi.get("score", 0.0) > best_score:
                 best_score = fi["score"]
                 best_idx = i
         ref_index = best_idx
         cb(5, f"Referans: #{ref_index+1} (skor: {best_score:.3f})")
     else:
-        ref_index = max(0, min(ref_index, len(frames) - 1))
+        ref_index = max(0, min(ref_index, len(selected_indices) - 1))
 
-    if not frames:
+    if not selected_indices:
+        if isinstance(loaded_frames, _MmapFrameStore):
+            loaded_frames.cleanup()
         return [], frame_infos
 
-    base = frames[ref_index]
+    base = loaded_frames[selected_indices[ref_index]]
 
-    # ── 4. Hizalama — rotasyon destekli ──
-    cb(6, "AKAZE hizalama başlıyor (rotasyon destekli)…")
-    aligned = []
+    cb(6, "AKAZE hizalama basliyor...")
+    aligned = _MmapFrameStore(len(selected_indices), base.shape, dtype=np.float32) if use_mmap else []
     n_ok = 0
     n_fail = 0
+    out_count = 0
     base_cache = {}
 
-    for i, fr in enumerate(frames):
-        cb(6, f"Hizalama {i+1}/{len(frames)}")
+    for i, src_idx in enumerate(selected_indices):
+        fr = loaded_frames[src_idx]
         fi = valid_infos[i] if i < len(valid_infos) else {}
+        cb(6, f"Hizalama {i+1}/{len(selected_indices)}")
 
         if i == ref_index:
-            aligned.append(base.copy())
+            if use_mmap:
+                aligned[out_count] = base.copy()
+            else:
+                aligned.append(base.copy())
             fi["rotation_deg"] = 0.0
             fi["alignment"] = "reference"
             n_ok += 1
+            out_count += 1
             continue
 
-        H, align_info = _compute_homography(fr, base, threshold=0.85,
-                                             cache=base_cache, frame_num=i)
-
+        H, align_info = _compute_homography(fr, base, threshold=0.85, cache=base_cache, frame_num=i)
         if H is not None:
-            rot = align_info.get("rotation_deg", 0.0)
             warped = _warp_image(fr, H)
-            aligned.append(warped)
-            n_ok += 1
+            if use_mmap:
+                aligned[out_count] = warped
+            else:
+                aligned.append(warped)
+            rot = align_info.get("rotation_deg", 0.0)
             fi["rotation_deg"] = rot
             fi["alignment"] = "AKAZE"
             if abs(rot) > 0.5:
-                cb(6, f"  Kare {i+1}: rotasyon={rot:.1f}° düzeltildi")
-        else:
-            # ECC fallback — rotasyon destekli (EUCLIDEAN)
-            H_ecc = _ecc_fallback(fr, base)
-            if H_ecc is not None:
-                warped = _warp_image(fr, H_ecc)
-                aligned.append(warped)
-                n_ok += 1
-                fi["alignment"] = "ECC"
-                cb(6, f"  Kare {i+1}: ECC fallback ile hizalandı")
-            else:
-                n_fail += 1
-                fi["status"] = "align_failed"
-                cb(6, f"  ⚠ Kare {i+1}: hizalanamadı — atlandı")
-                # Uyarı callback
-                if quality_warning_cb:
-                    quality_warning_cb({
-                        "name": fi.get("name", f"Kare {i+1}"),
-                        "status": "align_failed",
-                        "score": fi.get("score", 0),
-                        "message": "Hizalama başarısız — kare atlandı"
-                    })
+                cb(6, f"  Kare {i+1}: rotasyon={rot:.1f} duzeltildi")
+            n_ok += 1
+            out_count += 1
+            continue
 
-    cb(7, f"✅ Hizalama tamamlandı — {n_ok} başarılı, {n_fail} hizalanamayan")
+        H_ecc = _ecc_fallback(fr, base)
+        if H_ecc is not None:
+            warped = _warp_image(fr, H_ecc)
+            if use_mmap:
+                aligned[out_count] = warped
+            else:
+                aligned.append(warped)
+            fi["alignment"] = "ECC"
+            cb(6, f"  Kare {i+1}: ECC fallback ile hizalandi")
+            n_ok += 1
+            out_count += 1
+            continue
+
+        n_fail += 1
+        fi["status"] = "align_failed"
+        cb(6, f"  Uyari kare {i+1}: hizalanamadi - atlandi")
+        if quality_warning_cb:
+            quality_warning_cb(
+                {
+                    "name": fi.get("name", f"Kare {i+1}"),
+                    "status": "align_failed",
+                    "score": fi.get("score", 0),
+                    "message": "Hizalama basarisiz - kare atlandi",
+                }
+            )
+
+    if isinstance(loaded_frames, _MmapFrameStore):
+        loaded_frames.cleanup()
+
+    if use_mmap and out_count < len(selected_indices):
+        trimmed = _MmapFrameStore(out_count, base.shape, dtype=np.float32)
+        for i in range(out_count):
+            trimmed[i] = aligned[i]
+        aligned.cleanup()
+        aligned = trimmed
+
+    cb(7, f"Alignment tamamlandi - {n_ok} basarili, {n_fail} hizalanamayan")
     return aligned, frame_infos
 
 
@@ -1003,16 +1188,10 @@ def stack_aligned(
     frame_scores: Optional[List[dict]] = None,
     **kwargs,
 ) -> dict:
-    """PixInsight tarzı stacking — normalizasyon + ağırlık + reddetme.
-
-    method: 'auto', 'sigma_clip', 'linear_fit', 'percentile',
-            'winsorized_sigma', 'median', 'mean'
-    normalization: 'additive_scaling', 'multiplicative', 'none'
-    weight_mode: 'snr', 'noise', 'fwhm', 'equal'
-    work_dtype: 'float32' (önerilen), 'float16' (daha az RAM)
-    """
+    """PixInsight-style stacking with optional disk-backed masks."""
+    del kappa, quality_reject, quality_threshold, drizzle_scale, kwargs
     if not aligned_frames:
-        raise ValueError("Hizalanmış kare yok!")
+        raise ValueError("Hizalanmis kare yok!")
 
     def cb(step, msg):
         if progress_cb:
@@ -1022,79 +1201,121 @@ def stack_aligned(
     is_color = aligned_frames[0].ndim == 3
     ch_count = aligned_frames[0].shape[2] if is_color else 1
 
-    # ── Maskeler oluştur ──
-    masks = []
-    for fr in aligned_frames:
-        if is_color:
-            mask = (np.max(fr, axis=2) > 1e-6).astype(np.float32)
+    mask_store = None
+    valid = None
+    try:
+        if _should_use_mmap(n, aligned_frames[0].shape[:2], dtype=np.bool_):
+            mask_store = _MmapFrameStore(n, aligned_frames[0].shape[:2], dtype=np.bool_)
+            masks = mask_store
         else:
-            mask = (fr > 1e-6).astype(np.float32)
-        masks.append(mask)
+            masks = []
 
-    # ── Normalizasyon ──
-    cb(8, f"Normalizasyon: {normalization}…")
-    dtype_map = {"float32": np.float32, "float16": np.float16}
-    norm_dtype = dtype_map.get(str(work_dtype).lower(), np.float32)
-    aligned_frames = _normalize_frames(
-        aligned_frames,
-        masks,
-        normalization,
-        work_dtype=norm_dtype,
-        allow_float16_fallback=allow_float16_fallback,
-    )
+        for i, fr in enumerate(aligned_frames):
+            if is_color:
+                mask = np.max(fr, axis=2) > 1e-6
+            else:
+                mask = fr > 1e-6
+            if mask_store is not None:
+                mask_store[i] = mask
+            else:
+                masks.append(mask.astype(bool, copy=False))
 
-    # ── Ağırlıklar ──
-    cb(8, f"Ağırlıklandırma: {weight_mode}…")
-    weights = _compute_weights(aligned_frames, masks, weight_mode, frame_scores)
+        cb(8, f"Normalizasyon: {normalization}...")
+        dtype_map = {"float32": np.float32, "float16": np.float16}
+        norm_dtype = dtype_map.get(str(work_dtype).lower(), np.float32)
+        aligned_frames = _normalize_frames(
+            aligned_frames,
+            masks,
+            normalization,
+            work_dtype=norm_dtype,
+            allow_float16_fallback=allow_float16_fallback,
+        )
 
-    # ── Auto rejection seçimi ──
-    if method == "auto":
-        method = _auto_select_rejection(n)
-        cb(8, f"Auto rejection: {method} ({n} kare)")
+        cb(8, f"Agirliklandirma: {weight_mode}...")
+        weights = _compute_weights(aligned_frames, masks, weight_mode, frame_scores)
 
-    cb(8, f"{n} kare stackleniyor — {method} — {weight_mode} ağırlık — "
-         f"{'RGB' if is_color else 'mono'} ({ch_count}ch)")
+        if method == "auto":
+            method = _auto_select_rejection(n)
+            cb(8, f"Auto rejection: {method} ({n} kare)")
 
-    # ── Reddetme + Stacking ──
-    n_rejected = 0
-    if method == "median":
-        result = _stack_median_weighted(
-            aligned_frames, masks, weights,
-            progress_cb=cb, progress_label="Median stacking")
-    elif method == "mean":
-        result = _stack_weighted_mean(
-            aligned_frames, masks, None, weights,
-            progress_cb=cb, progress_label="Ağırlıklı ortalama")
-    else:
-        # Rejection aynı bool stack üzerinde çalışır; ikinci büyük maske üretme.
-        valid = _build_valid_mask_stack(masks)
-        base_valid_count = int(np.sum(valid))
-        if method == "sigma_clip":
-            _reject_sigma_clip(aligned_frames, valid,
-                               progress_cb=cb, progress_label="Sigma clip rejection",
-                               kappa_low=kappa_low, kappa_high=kappa_high,
-                               iterations=iterations)
-        elif method == "linear_fit":
-            _reject_linear_fit(aligned_frames, valid,
-                               progress_cb=cb, progress_label="Linear fit rejection",
-                               kappa_low=kappa_low, kappa_high=kappa_high)
-        elif method == "percentile":
-            _reject_percentile(aligned_frames, valid,
-                               progress_cb=cb, progress_label="Percentile rejection",
-                               low_pct=10.0, high_pct=90.0)
-        elif method == "winsorized_sigma":
-            _reject_winsorized_sigma(aligned_frames, valid,
-                                     progress_cb=cb, progress_label="Winsorized sigma rejection",
-                                     kappa_low=kappa_low, kappa_high=kappa_high,
-                                     iterations=iterations)
+        cb(8, f"{n} kare stackleniyor - {method} - {weight_mode} agirlik - {'RGB' if is_color else 'mono'} ({ch_count}ch)")
 
-        n_rejected = int(base_valid_count - int(np.sum(valid)))
-        result = _stack_weighted_mean(
-            aligned_frames, masks, valid, weights,
-            progress_cb=cb, progress_label="Ağırlıklı ortalama")
-        del valid
+        n_rejected = 0
+        if method == "median":
+            result = _stack_median_weighted(
+                aligned_frames,
+                masks,
+                weights,
+                progress_cb=cb,
+                progress_label="Median stacking",
+            )
+        elif method == "mean":
+            result = _stack_weighted_mean(
+                aligned_frames,
+                masks,
+                None,
+                weights,
+                progress_cb=cb,
+                progress_label="Agirlikli ortalama",
+            )
+        else:
+            valid = _build_valid_mask_stack(masks)
+            base_valid_count = int(np.sum(valid))
+            if method == "sigma_clip":
+                _reject_sigma_clip(
+                    aligned_frames,
+                    valid,
+                    progress_cb=cb,
+                    progress_label="Sigma clip rejection",
+                    kappa_low=kappa_low,
+                    kappa_high=kappa_high,
+                    iterations=iterations,
+                )
+            elif method == "linear_fit":
+                _reject_linear_fit(
+                    aligned_frames,
+                    valid,
+                    progress_cb=cb,
+                    progress_label="Linear fit rejection",
+                    kappa_low=kappa_low,
+                    kappa_high=kappa_high,
+                )
+            elif method == "percentile":
+                _reject_percentile(
+                    aligned_frames,
+                    valid,
+                    progress_cb=cb,
+                    progress_label="Percentile rejection",
+                    low_pct=10.0,
+                    high_pct=90.0,
+                )
+            elif method == "winsorized_sigma":
+                _reject_winsorized_sigma(
+                    aligned_frames,
+                    valid,
+                    progress_cb=cb,
+                    progress_label="Winsorized sigma rejection",
+                    kappa_low=kappa_low,
+                    kappa_high=kappa_high,
+                    iterations=iterations,
+                )
 
-    cb(8, f"✅ Stacking tamamlandı — {n} kare, {n_rejected} piksel reddedildi")
+            n_rejected = int(base_valid_count - int(np.sum(valid)))
+            result = _stack_weighted_mean(
+                aligned_frames,
+                masks,
+                valid,
+                weights,
+                progress_cb=cb,
+                progress_label="Agirlikli ortalama",
+            )
+
+        cb(8, f"✅ Stacking tamamlandı — {n} kare, {n_rejected} piksel reddedildi")
+    finally:
+        if isinstance(valid, _MmapFrameStore):
+            valid.cleanup()
+        if isinstance(mask_store, _MmapFrameStore):
+            mask_store.cleanup()
 
     return {
         "result": np.clip(result, 0, None).astype(np.float32),
