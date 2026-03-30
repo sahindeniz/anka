@@ -12,14 +12,11 @@ Güncelleme kontrol ve indirme paneli.
 """
 
 import os
-import sys
 import threading
-import zipfile
 import tempfile
-import shutil
 
 from PyQt6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTextEdit, QProgressBar, QWidget, QFrame, QMessageBox,
     QGroupBox, QCheckBox
 )
@@ -392,7 +389,7 @@ class UpdateDialog(QDialog):
         self._pbar.setRange(0, 100)
         self._pbar.setValue(100)
         self._pbar.setFormat("✅  İndirme tamamlandı!")
-        self._btn_download.setText("✅ İndirildi")
+        self._btn_download.setText("✅ Kuruluma Hazır")
         self._lbl_dl_status.setText(f"Konum: {path}")
 
         ver = self._update_info.get("version", "?")
@@ -401,10 +398,13 @@ class UpdateDialog(QDialog):
             "İndirme Tamamlandı",
             f"v{ver} başarıyla indirildi!\n\n"
             f"Konum: {path}\n\n"
-            "Klasörü açmak ister misiniz?",
+            "Program şimdi kapanıp güncellenecek.\n"
+            "Kurulumu başlatmak ister misiniz?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
+            self._install_downloaded_update()
+        else:
             folder = os.path.dirname(path)
             QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
@@ -416,6 +416,54 @@ class UpdateDialog(QDialog):
         self._btn_download.setText("⬇ Güncellemeyi İndir")
         self._lbl_dl_status.setText(f"Hata: {msg[:100]}")
         QMessageBox.critical(self, "İndirme Hatası", msg[:400])
+
+    def _install_downloaded_update(self):
+        if not self._download_path:
+            QMessageBox.warning(self, "Güncelleme", "İndirilen ZIP bulunamadı.")
+            return
+
+        try:
+            from core.self_update import extract_release_archive, get_app_root, launch_update_helper
+
+            self._btn_download.setEnabled(False)
+            self._btn_download.setText("⏳ Kurulum Hazırlanıyor…")
+            self._pbar.setFormat("Kurulum hazırlanıyor…")
+            self._lbl_dl_status.setText("ZIP açılıyor ve güncelleyici hazırlanıyor…")
+
+            staging_dir, extracted_root = extract_release_archive(self._download_path)
+            launch_update_helper(
+                extracted_root,
+                get_app_root(),
+                os.getpid(),
+                helper_dir=staging_dir,
+            )
+        except Exception as exc:
+            self._btn_download.setEnabled(True)
+            self._btn_download.setText("⬇ Güncellemeyi İndir")
+            self._pbar.setFormat("❌  Kurulum başlatılamadı")
+            self._lbl_dl_status.setText(str(exc)[:120])
+            QMessageBox.critical(
+                self,
+                "Güncelleme Kurulamadı",
+                f"Güncelleme kurulumu başlatılamadı:\n\n{exc}",
+            )
+            return
+
+        ver = self._update_info.get("version", "?")
+        self._pbar.setValue(100)
+        self._pbar.setFormat("✅  Kurulum başlatıldı")
+        self._lbl_dl_status.setText("Uygulama kapanıyor; yeni sürüm birazdan yeniden açılacak.")
+        QMessageBox.information(
+            self,
+            "Güncelleme Başlatıldı",
+            f"v{ver} kurulumu başlatıldı.\n\n"
+            "Program kapanacak ve güncelleme tamamlandıktan sonra yeniden açılacak.",
+        )
+
+        app = QApplication.instance()
+        self.accept()
+        if app is not None:
+            QTimer.singleShot(150, app.quit)
 
     def _open_release_page(self):
         if self._update_info and self._update_info.get("url"):
