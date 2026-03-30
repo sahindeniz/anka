@@ -95,8 +95,8 @@ def write_update_helper(
 
         if __name__ == "__main__":
             apply_update_and_restart(
-                {str(Path(source_root).resolve())!r},
-                {str(Path(target_root).resolve())!r},
+                {Path(source_root).resolve().as_posix()!r},
+                {Path(target_root).resolve().as_posix()!r},
                 {int(current_pid)},
             )
         """
