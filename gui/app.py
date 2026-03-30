@@ -33,6 +33,7 @@ matplotlib.use("QtAgg")
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from gui.histogram_editor import HistogramEditorPanel
+from gui.recomposition_sources import collect_recomposition_sources
 from gui.script_editor import ScriptEditorDialog
 
 _APP_ICON_PATH = os.path.join(os.path.dirname(__file__), "icons", "astromestro_space.ico")
@@ -1757,44 +1758,27 @@ class RecompositionDialog(QDialog):
             self.lbl_st_file.setStyleSheet(f"color:{MUTED};font-size:9px;")
 
     def _pick_from_open(self, target):
-        """Filmstrip'teki açık resimlerden veya mevcut görüntüden seç."""
+        """Acik sekmelerden, viewer goruntusunden veya history'den sec."""
         app = self.parent()
         if app is None:
-            QMessageBox.warning(self, "Hata", "Ana uygulama bulunamadı")
+            QMessageBox.warning(self, "Hata", "Ana uygulama bulunamadi")
             return
 
-        # Seçenekleri topla
-        options = []
-        # 1. Mevcut aktif görüntü
-        if hasattr(app, '_current') and app._current is not None:
-            options.append(("🖼  Mevcut görüntü (aktif)", app._current.copy(), "current"))
-        # 2. Orijinal görüntü
-        if hasattr(app, '_orig') and app._orig is not None:
-            options.append(("📌  Orijinal görüntü", app._orig.copy(), "original"))
-        # 3. Filmstrip'teki resimler
-        if hasattr(app, '_filmstrip_data'):
-            for entry in app._filmstrip_data:
-                fname = os.path.basename(entry["path"])
-                options.append((f"📂  {fname}", entry["img"].copy(), entry["path"]))
-        # 4. History'deki adımlar
-        if hasattr(app, '_history'):
-            for idx, (label, hist_img) in enumerate(app._history):
-                if idx == 0 and len(options) > 1:
-                    continue  # Orijinal zaten var
-                options.append((f"📜  Step {idx}: {label}", hist_img.copy(), f"history_{idx}"))
-
+        options = collect_recomposition_sources(app)
         if not options:
-            QMessageBox.information(self, "Bilgi", "Açık resim bulunamadı.\nÖnce dosya açın.")
+            QMessageBox.information(self, "Bilgi", "Acik resim bulunamadi.\nOnce dosya acin.")
             return
 
-        # Seçim dialog'u
         dlg = QDialog(self)
-        dlg.setWindowTitle(f"{'Starless' if target=='starless' else 'Stars Only'} Seç")
-        dlg.setMinimumSize(400, 300)
+        dlg.setWindowTitle(f"{'Starless' if target=='starless' else 'Stars Only'} Sec")
+        dlg.setMinimumSize(460, 360)
         dlg.setStyleSheet(f"background:{BG};color:{TEXT};")
         lay = QVBoxLayout(dlg)
 
-        info = QLabel(f"{'Starless' if target=='starless' else 'Stars-only'} olarak kullanılacak resmi seçin:")
+        info = QLabel(
+            f"{'Starless' if target=='starless' else 'Stars-only'} olarak kullanilacak resmi secin:\n"
+            "Sekmeler, aktif goruntu ve history adimlari birlikte listelenir."
+        )
         info.setStyleSheet(f"color:{HEAD};font-size:11px;padding:8px;")
         lay.addWidget(info)
 
@@ -1804,19 +1788,20 @@ class RecompositionDialog(QDialog):
             f"font-size:11px;padding:4px;}}"
             f"QListWidget::item{{padding:6px;}}"
             f"QListWidget::item:selected{{background:{ACCENT};color:#000;}}"
-            f"QListWidget::item:hover{{background:{BG3};}}")
-        for label, img_data, src_id in options:
-            item = QListWidgetItem(label)
-            lst.addItem(item)
+            f"QListWidget::item:hover{{background:{BG3};}}"
+        )
+        for label, _img_data, _src_id in options:
+            lst.addItem(QListWidgetItem(label))
         lay.addWidget(lst, 1)
 
         btn_row = QHBoxLayout()
-        b_cancel = QPushButton("İptal")
+        b_cancel = QPushButton("Iptal")
         b_cancel.setStyleSheet(_btn(h=28))
-        b_ok = QPushButton("✅  Seç")
+        b_ok = QPushButton("Sec")
         b_ok.setStyleSheet(_run_btn(GREEN))
         b_ok.setFixedHeight(30)
-        btn_row.addWidget(b_cancel); btn_row.addWidget(b_ok)
+        btn_row.addWidget(b_cancel)
+        btn_row.addWidget(b_ok)
         lay.addLayout(btn_row)
 
         b_cancel.clicked.connect(dlg.reject)
@@ -1825,18 +1810,18 @@ class RecompositionDialog(QDialog):
 
         if dlg.exec() and lst.currentRow() >= 0:
             idx = lst.currentRow()
-            label, img_data, src_id = options[idx]
+            label, img_data, _src_id = options[idx]
 
             if target == "starless":
                 self._starless = img_data
                 h_i, w_i = img_data.shape[:2]
-                self.lbl_sl_file.setText(f"✅  {label}  ({w_i}×{h_i})")
+                self.lbl_sl_file.setText(f"Secili: {label}  ({w_i}x{h_i})")
                 self.lbl_sl_file.setStyleSheet(f"color:{GREEN};font-size:9px;")
                 self._show_slot(img_data, "Starless", 0)
             else:
                 self._stars = img_data
                 h_i, w_i = img_data.shape[:2]
-                self.lbl_st_file.setText(f"✅  {label}  ({w_i}×{h_i})")
+                self.lbl_st_file.setText(f"Secili: {label}  ({w_i}x{h_i})")
                 self.lbl_st_file.setStyleSheet(f"color:{GREEN};font-size:9px;")
                 self._show_slot(img_data, "Stars Only", 1)
             self._schedule_preview()
