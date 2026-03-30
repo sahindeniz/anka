@@ -281,17 +281,17 @@ def _calibrate_frame(
     cal = img.astype(np.float32)
 
     if master_bias is not None:
-        cal = cal - master_bias
+        cal = cal - _match_calibration_shape(master_bias, cal, "Bias")
 
     if master_dark is not None:
-        cal = cal - master_dark
+        cal = cal - _match_calibration_shape(master_dark, cal, "Dark")
 
     cal = np.clip(cal, 0, None)
 
     if master_flat is not None:
-        flat = master_flat.copy()
+        flat = _match_calibration_shape(master_flat, cal, "Flat").copy()
         if master_bias is not None:
-            flat = flat - master_bias
+            flat = flat - _match_calibration_shape(master_bias, flat, "Bias")
         flat = np.clip(flat, 0, None)
         flat_mean = np.mean(flat)
         if flat_mean > 0:
@@ -300,6 +300,35 @@ def _calibrate_frame(
             cal = cal / flat_norm
 
     return np.clip(cal, 0, None).astype(np.float32)
+
+
+def _match_calibration_shape(master: np.ndarray, target: np.ndarray, label: str) -> np.ndarray:
+    """Broadcast-compatible calibration frame matching for mono/color mixes."""
+    master_f32 = master.astype(np.float32, copy=False)
+
+    if master_f32.shape[:2] != target.shape[:2]:
+        raise ValueError(
+            f"{label} frame shape mismatch: target {target.shape[:2]}, master {master_f32.shape[:2]}"
+        )
+
+    if master_f32.ndim == target.ndim:
+        if master_f32.shape == target.shape:
+            return master_f32
+        if target.ndim == 3 and master_f32.ndim == 3 and master_f32.shape[2] == 1 and target.shape[2] >= 1:
+            return master_f32
+        raise ValueError(
+            f"{label} frame channel mismatch: target {target.shape}, master {master_f32.shape}"
+        )
+
+    if target.ndim == 3 and master_f32.ndim == 2:
+        return master_f32[:, :, None]
+
+    if target.ndim == 2 and master_f32.ndim == 3 and master_f32.shape[2] == 1:
+        return master_f32[:, :, 0]
+
+    raise ValueError(
+        f"{label} frame dimensions are incompatible: target {target.shape}, master {master_f32.shape}"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

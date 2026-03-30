@@ -15,7 +15,7 @@ from gui.bg_composer import generate_welcome_overlay
 from processing.mastro_noise import process_denoise
 from processing.mastro_starless import process_starless
 from processing.noise_reduction import reduce_noise
-from processing.stacking import _normalize_frames, _stack_weighted_mean, stack_aligned
+from processing.stacking import _calibrate_frame, _normalize_frames, _stack_weighted_mean, stack_aligned
 from processing.noisexterminator import denoise as denoise_noisexterminator
 from processing.veralux_silentium import denoise_silentium
 
@@ -134,6 +134,28 @@ class StackingRecentChangesTests(unittest.TestCase):
         self.assertEqual(result["method"], "winsorized_sigma")
         self.assertGreater(result["n_rejected"], 0)
         self.assertAlmostEqual(float(result["result"][4, 7]), 1.0, places=4)
+
+    def test_calibrate_frame_broadcasts_mono_masters_to_color_light(self):
+        img = np.array(
+            [
+                [[0.9, 0.8, 0.7], [0.9, 0.8, 0.7]],
+                [[0.9, 0.8, 0.7], [0.9, 0.8, 0.7]],
+            ],
+            dtype=np.float32,
+        )
+        master_bias = np.full((2, 2), 0.1, dtype=np.float32)
+        master_dark = np.full((2, 2), 0.2, dtype=np.float32)
+        master_flat = np.array([[0.5, 0.9], [0.5, 0.9]], dtype=np.float32)
+
+        calibrated = _calibrate_frame(img, master_dark, master_flat, master_bias)
+
+        flat_after_bias = np.clip(master_flat - master_bias, 0.0, None)
+        flat_norm = flat_after_bias / np.mean(flat_after_bias)
+        expected = np.clip(img - 0.3, 0.0, None) / flat_norm[:, :, None]
+
+        self.assertEqual(calibrated.shape, img.shape)
+        self.assertEqual(calibrated.dtype, np.float32)
+        np.testing.assert_allclose(calibrated, expected.astype(np.float32), rtol=1e-6, atol=1e-6)
 
 
 class WelcomeOverlayTests(unittest.TestCase):
