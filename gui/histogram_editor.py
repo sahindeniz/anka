@@ -789,7 +789,7 @@ class HistogramEditorPanel(QWidget):
 
         top = QHBoxLayout()
         top.setSpacing(6)
-        title = QLabel("D?zenle")
+        title = QLabel("Düzenle")
         title.setStyleSheet(f"color:{HEAD};font-size:11px;font-weight:800;")
         top.addWidget(title)
         top.addStretch()
@@ -821,11 +821,11 @@ class HistogramEditorPanel(QWidget):
         self._panel_lay.addWidget(basic_frame)
         self._build_basic_section(basic_lay)
 
-        curve_frame, curve_lay = self._make_section("E?ri", expanded=False)
+        curve_frame, curve_lay = self._make_section("Eğri", expanded=False)
         self._panel_lay.addWidget(curve_frame)
         self._build_curve_section(curve_lay)
 
-        detail_frame, detail_lay = self._make_section("Ayr?nt?", expanded=False)
+        detail_frame, detail_lay = self._make_section("Ayrıntı", expanded=False)
         self._panel_lay.addWidget(detail_frame)
         self._build_detail_section(detail_lay)
 
@@ -917,7 +917,7 @@ class HistogramEditorPanel(QWidget):
         wb_lbl = QLabel("Beyaz Dengesi")
         wb_lbl.setStyleSheet(f"color:{MUTED};font-size:10px;")
         self._wb_preset = self._styled_combo()
-        self._wb_preset.addItems(["?ekildi?i Gibi", "G?n I????", "Bulutlu", "G?lge", "Tungsten"])
+        self._wb_preset.addItems(["Çekildiği Gibi", "Gün Işığı", "Bulutlu", "Gölge", "Tungsten"])
         self._wb_preset.currentTextChanged.connect(self._on_wb_preset_changed)
         self._wb_sample_btn = QPushButton("N")
         self._wb_sample_btn.setFixedSize(24, 24)
@@ -935,15 +935,15 @@ class HistogramEditorPanel(QWidget):
             lay.addWidget(sr)
             return sr
 
-        self._adj_temp = _row("S?cakl?k", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_temp = _row("Sıcaklık", -100.0, 100.0, 0.0, 0, 1)
         self._adj_tint = _row("Renk Tonu", -100.0, 100.0, 0.0, 0, 1)
         self._adj_exposure = _row("Pozlama", -5.0, 5.0, 0.0, 2, 0.05)
         self._adj_contrast = _row("Kontrast", -100.0, 100.0, 0.0, 0, 1)
-        self._adj_highlights = _row("A??k Tonlar", -100.0, 100.0, 0.0, 0, 1)
-        self._adj_shadows = _row("G?lgeler", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_highlights = _row("Açık Tonlar", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_shadows = _row("Gölgeler", -100.0, 100.0, 0.0, 0, 1)
         self._adj_whites = _row("Beyazlar", -100.0, 100.0, 0.0, 0, 1)
         self._adj_blacks = _row("Siyahlar", -100.0, 100.0, 0.0, 0, 1)
-        self._adj_vibrance = _row("Titre?im", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_vibrance = _row("Titreşim", -100.0, 100.0, 0.0, 0, 1)
         self._adj_saturation = _row("Doygunluk", -100.0, 100.0, 0.0, 0, 1)
 
     def _build_curve_section(self, lay):
@@ -973,7 +973,7 @@ class HistogramEditorPanel(QWidget):
         self._adj_texture = _row("Doku", -100.0, 100.0, 0.0, 0, 1)
         self._adj_sharpen = _row("Netlik", -100.0, 100.0, 0.0, 0, 1)
         self._adj_clarity = _row("Mikro Kontrast", -100.0, 100.0, 0.0, 0, 1)
-        self._adj_dehaze = _row("Sis Kald?r", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_dehaze = _row("Sis Kaldır", -100.0, 100.0, 0.0, 0, 1)
 
     def _build_levels_section(self, lay):
         inp_row = QHBoxLayout()
@@ -1033,10 +1033,10 @@ class HistogramEditorPanel(QWidget):
 
         opts = QHBoxLayout()
         opts.setSpacing(10)
-        self._chk_link = QCheckBox("RGB Ba?la")
+        self._chk_link = QCheckBox("RGB Bağla")
         self._chk_link.setChecked(False)
         self._chk_link.setStyleSheet(CHECK_CSS)
-        self._chk_live = QCheckBox("Canl?")
+        self._chk_live = QCheckBox("Canlı")
         self._chk_live.setChecked(True)
         self._chk_live.setStyleSheet(CHECK_CSS)
         opts.addWidget(self._chk_link)
@@ -1135,7 +1135,7 @@ class HistogramEditorPanel(QWidget):
 
         top = QHBoxLayout()
         top.setSpacing(6)
-        title = QLabel("D?zenle")
+        title = QLabel("Düzenle")
         title.setStyleSheet(f"color:{HEAD};font-size:11px;font-weight:800;")
         top.addWidget(title)
         top.addStretch()
@@ -1186,23 +1186,23 @@ class HistogramEditorPanel(QWidget):
             return sr
 
         _sep("Temel")
-        self._adj_temp = _row("S?cakl?k", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_temp = _row("Sıcaklık", -100.0, 100.0, 0.0, 0, 1)
         self._adj_tint = _row("Renk Tonu", -100.0, 100.0, 0.0, 0, 1)
         self._adj_exposure = _row("Pozlama", -5.0, 5.0, 0.0, 2, 0.05)
         self._adj_contrast = _row("Kontrast", -100.0, 100.0, 0.0, 0, 1)
-        self._adj_highlights = _row("A??k Tonlar", -100.0, 100.0, 0.0, 0, 1)
-        self._adj_shadows = _row("G?lgeler", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_highlights = _row("Açık Tonlar", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_shadows = _row("Gölgeler", -100.0, 100.0, 0.0, 0, 1)
         self._adj_whites = _row("Beyazlar", -100.0, 100.0, 0.0, 0, 1)
         self._adj_blacks = _row("Siyahlar", -100.0, 100.0, 0.0, 0, 1)
 
-        _sep("Ayr?nt?")
+        _sep("Ayrıntı")
         self._adj_texture = _row("Doku", -100.0, 100.0, 0.0, 0, 1)
         self._adj_sharpen = _row("Netlik", -100.0, 100.0, 0.0, 0, 1)
         self._adj_clarity = _row("Mikro Kontrast", -100.0, 100.0, 0.0, 0, 1)
-        self._adj_dehaze = _row("Sis Kald?r", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_dehaze = _row("Sis Kaldır", -100.0, 100.0, 0.0, 0, 1)
 
         _sep("Renk")
-        self._adj_vibrance = _row("Titre?im", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_vibrance = _row("Titreşim", -100.0, 100.0, 0.0, 0, 1)
         self._adj_saturation = _row("Doygunluk", -100.0, 100.0, 0.0, 0, 1)
 
         lay.addStretch()
