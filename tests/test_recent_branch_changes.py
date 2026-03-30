@@ -17,6 +17,7 @@ from processing.mastro_noise import process_denoise
 from processing.mastro_starless import process_starless
 from processing.noise_reduction import reduce_noise
 from processing.stacking import _calibrate_frame, _normalize_frames, _stack_weighted_mean, stack_aligned
+from processing.starsmaller import reduce_stars
 from processing.noisexterminator import denoise as denoise_noisexterminator
 from processing.veralux_silentium import denoise_silentium
 
@@ -262,6 +263,50 @@ class HaloReductionTests(unittest.TestCase):
             float(result["result"][core].mean()),
             float(img[core].mean()) * 0.60,
         )
+
+
+class StarSmallerTests(unittest.TestCase):
+    def test_reduce_stars_fills_halo_zone_from_surrounding_background(self):
+        h = w = 96
+        yy, xx = np.mgrid[:h, :w]
+        bg = np.stack(
+            [
+                0.12 + xx.astype(np.float32) * 0.0007,
+                0.18 + yy.astype(np.float32) * 0.0005,
+                0.22 + (xx + yy).astype(np.float32) * 0.0003,
+            ],
+            axis=2,
+        ).astype(np.float32)
+
+        cx = cy = 48
+        r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        star = (
+            0.95 * np.exp(-r2 / (2.0 * 1.3 ** 2))
+            + 0.32 * np.exp(-r2 / (2.0 * 4.8 ** 2))
+        ).astype(np.float32)
+        img = np.clip(bg + star[:, :, None], 0.0, 1.0).astype(np.float32)
+
+        result, mask = reduce_stars(
+            img,
+            strength=0.85,
+            sensitivity=0.5,
+            feather=3,
+            max_sigma=8,
+            min_sigma=1,
+            threshold=0.02,
+        )
+
+        rr = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        halo_zone = (rr >= 4.0) & (rr <= 7.0)
+        core_zone = rr <= 1.5
+
+        before_bg_error = float(np.abs(img[halo_zone] - bg[halo_zone]).mean())
+        after_bg_error = float(np.abs(result[halo_zone] - bg[halo_zone]).mean())
+
+        self.assertEqual(result.shape, img.shape)
+        self.assertEqual(mask.shape, img.shape[:2])
+        self.assertLess(after_bg_error, before_bg_error * 0.35)
+        self.assertGreater(float(result[core_zone].mean()), float(bg[core_zone].mean()) + 0.10)
 
 
 class NoiseDispatchTests(unittest.TestCase):
