@@ -12,9 +12,9 @@ Güncelleme akışı:
 
 # ─── Versiyon ─────────────────────────────────────────────────────────────────
 APP_NAME       = "Astro Maestro Pro"
-APP_VERSION    = "2.1.0"          # Mevcut sürüm
+APP_VERSION    = "2.1.2"          # Mevcut sürüm
 APP_AUTHOR     = "Deniz"
-APP_BUILD_DATE = "2026-03-24"
+APP_BUILD_DATE = "2026-03-30"
 
 # GitHub güncelleme kaynağı
 GITHUB_REPO    = "sahindeniz/anka"
@@ -22,6 +22,13 @@ GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest" i
 
 # ─── Changelog ───────────────────────────────────────────────────────────────
 CHANGELOG = """
+v2.1.2  (2026-03-30)
+--------------------
+- Mastro Noise and Mastro Starless now run without Siril or external model folders.
+- Stacking rejection accuracy fixed for auto, linear_fit, sigma_clip, and winsorized_sigma.
+- Stacking memory usage reduced with block-based processing and lighter temporary buffers.
+- Noise reduction dispatch fixed so Silentium and NoiseXterminator use their intended engines.
+
 v1.0.0  (2025-03-15)
 ─────────────────────
 • İlk kararlı sürüm
