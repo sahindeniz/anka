@@ -676,7 +676,7 @@ class SliderRow(QWidget):
         self._scale = 10**decimals
         lay = QHBoxLayout(self); lay.setContentsMargins(0,0,0,0); lay.setSpacing(4)
 
-        lbl = QLabel(label); lbl.setFixedWidth(78)
+        lbl = QLabel(label); lbl.setFixedWidth(92)
         lbl.setStyleSheet(f"color:{MUTED};font-size:10px;")
 
         self._slider = QSlider(Qt.Orientation.Horizontal)
@@ -733,8 +733,8 @@ class HistogramEditorPanel(QWidget):
     """
     Main panel embedded in ImageViewer's Histogram tab.
     Signals:
-      preview_changed(ndarray)  — live preview, don't add to history
-      apply_requested(ndarray)  — user clicked Apply → add to history
+      preview_changed(ndarray)  - live preview, don't add to history
+      apply_requested(ndarray)  - user clicked Apply -> add to history
     """
     preview_changed = pyqtSignal(object)
     apply_requested = pyqtSignal(object)
@@ -742,84 +742,117 @@ class HistogramEditorPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setStyleSheet(f"background:{BG};")
-        self._img      = None   # current image
-        self._orig_img = None   # pristine original for non-destructive editing
-        self._ch       = "L"
-        self._linked   = True
-        self._live     = True
-        self._debounce = QTimer(); self._debounce.setSingleShot(True)
+        self._img = None
+        self._orig_img = None
+        self._preview_img = None
+        self._preview_orig = None
+        self._preview_scale = 1.0
+        self._ch = "L"
+        self._linked = True
+        self._live = True
+        self._debounce = QTimer()
+        self._debounce.setSingleShot(True)
         self._debounce.timeout.connect(self._emit_preview)
         self._build_ui()
 
-    # ── UI ────────────────────────────────────────────────────────────────────
     def _build_ui(self):
         root = QVBoxLayout(self)
-        root.setContentsMargins(6,6,6,6); root.setSpacing(4)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(4)
 
-        # ── Channel selector ──────────────────────────────────────────────
-        ch_row = QHBoxLayout(); ch_row.setSpacing(3)
-        ch_lbl = QLabel("Channel")
-        ch_lbl.setStyleSheet(f"color:{MUTED};font-size:9px;font-weight:600;letter-spacing:0.5px;")
-        ch_row.addWidget(ch_lbl)
-        self._ch_btns = {}
-        _ch_cols = {"L": ACCENT2, "R": RED, "G": GREEN, "B": "#6699ff"}
-        for ch, col in _ch_cols.items():
-            b = QPushButton(ch); b.setFixedSize(30, 24); b.setCheckable(True)
-            b.setStyleSheet(
-                f"QPushButton{{background:{BG3};color:{SUBTEXT};border:1px solid {BORDER};"
-                f"border-radius:4px;font-size:11px;font-weight:800;}}"
-                f"QPushButton:checked{{background:{col}40;color:{col};"
-                f"border:1px solid {col};border-bottom:2px solid {col};}}"
-                f"QPushButton:hover{{color:{col};background:{col}18;border-color:{col}66;}}")
-            b.clicked.connect(lambda _, c=ch: self._set_channel(c))
-            ch_row.addWidget(b); self._ch_btns[ch] = b
-        self._ch_btns["L"].setChecked(True)
-        ch_row.addSpacing(8)
-        self._chk_link = QCheckBox("Link RGB")
-        self._chk_link.setChecked(False)
-        self._chk_link.setStyleSheet(
-            f"QCheckBox{{color:{MUTED};font-size:9px;spacing:4px;}}"
-            f"QCheckBox::indicator{{width:14px;height:14px;border-radius:3px;"
-            f"border:1px solid {BORDER};background:{BG3};}}"
-            f"QCheckBox::indicator:checked{{background:{ACCENT}88;border:1px solid {ACCENT};}}")
-        ch_row.addWidget(self._chk_link)
-        ch_row.addStretch()
-        self._chk_live = QCheckBox("Live")
-        self._chk_live.setChecked(True)
-        self._chk_live.setStyleSheet(
-            f"QCheckBox{{color:{MUTED};font-size:9px;spacing:4px;}}"
-            f"QCheckBox::indicator{{width:14px;height:14px;border-radius:3px;"
-            f"border:1px solid {BORDER};background:{BG3};}}"
-            f"QCheckBox::indicator:checked{{background:{GREEN}88;border:1px solid {GREEN};}}")
-        ch_row.addWidget(self._chk_live)
-        root.addLayout(ch_row)
+        hist_card = QFrame()
+        hist_card.setStyleSheet(
+            f"QFrame{{background:{BG2};border:1px solid {BORDER};border-radius:6px;}}"
+        )
+        hist_lay = QVBoxLayout(hist_card)
+        hist_lay.setContentsMargins(8, 8, 8, 8)
+        hist_lay.setSpacing(6)
+        self._hist_wgt = HistogramWidget()
+        self._hist_wgt.setMinimumHeight(152)
+        self._hist_wgt.setMaximumHeight(184)
+        self._hist_wgt.levels_changed.connect(self._on_levels_changed)
+        hist_lay.addWidget(self._hist_wgt)
+        root.addWidget(hist_card)
 
-        # ── Tab widget ────────────────────────────────────────────────────
-        self._tabs = QTabWidget(); self._tabs.setStyleSheet(TAB_CSS)
-        root.addWidget(self._tabs, 1)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setStyleSheet(
+            f"QScrollArea{{background:{BG2};border:1px solid {BORDER};border-radius:6px;}}"
+        )
+        self._panel_host = QWidget()
+        self._panel_host.setStyleSheet(f"background:{BG2};")
+        self._panel_lay = QVBoxLayout(self._panel_host)
+        self._panel_lay.setContentsMargins(8, 8, 8, 8)
+        self._panel_lay.setSpacing(8)
+        self._scroll.setWidget(self._panel_host)
+        root.addWidget(self._scroll, 1)
 
-        # Tab 1: Levels
-        self._levels_tab()
-        # Tab 2: Curves
-        self._curves_tab()
-        # Tab 3: Adjustments
-        self._adjustments_tab()
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        title = QLabel("D?zenle")
+        title.setStyleSheet(f"color:{HEAD};font-size:11px;font-weight:800;")
+        top.addWidget(title)
+        top.addStretch()
+        b_auto = QPushButton("Otomatik")
+        b_auto.setStyleSheet(BTN_CSS)
+        b_auto.setFixedHeight(24)
+        b_auto.clicked.connect(self._auto_raw_adjustments)
+        top.addWidget(b_auto)
+        self._raw_bw_btn = QPushButton("Siyah Beyaz")
+        self._raw_bw_btn.setCheckable(True)
+        self._raw_bw_btn.setFixedHeight(24)
+        self._raw_bw_btn.setStyleSheet(BTN_CSS)
+        self._raw_bw_btn.toggled.connect(self._toggle_bw_profile)
+        top.addWidget(self._raw_bw_btn)
+        self._panel_lay.addLayout(top)
 
-        # ── Bottom buttons ────────────────────────────────────────────────
-        btn_row = QHBoxLayout(); btn_row.setSpacing(8)
-        b_reset = QPushButton("↺ Reset All")
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(6)
+        profile_lbl = QLabel("Profil")
+        profile_lbl.setStyleSheet(f"color:{MUTED};font-size:10px;")
+        self._raw_profile = self._styled_combo()
+        self._raw_profile.addItems(["Renk", "Siyah Beyaz"])
+        self._raw_profile.currentTextChanged.connect(self._on_profile_changed)
+        profile_row.addWidget(profile_lbl)
+        profile_row.addWidget(self._raw_profile, 1)
+        self._panel_lay.addLayout(profile_row)
+
+        basic_frame, basic_lay = self._make_section("Temel", expanded=True)
+        self._panel_lay.addWidget(basic_frame)
+        self._build_basic_section(basic_lay)
+
+        curve_frame, curve_lay = self._make_section("E?ri", expanded=False)
+        self._panel_lay.addWidget(curve_frame)
+        self._build_curve_section(curve_lay)
+
+        detail_frame, detail_lay = self._make_section("Ayr?nt?", expanded=False)
+        self._panel_lay.addWidget(detail_frame)
+        self._build_detail_section(detail_lay)
+
+        levels_frame, levels_lay = self._make_section("Histogram", expanded=False)
+        self._panel_lay.addWidget(levels_frame)
+        self._build_levels_section(levels_lay)
+
+        channels_frame, channels_lay = self._make_section("Kanallar", expanded=False)
+        self._panel_lay.addWidget(channels_frame)
+        self._build_channel_section(channels_lay)
+        self._panel_lay.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+        b_reset = QPushButton("Reset All")
         b_reset.setFixedHeight(28)
         b_reset.setStyleSheet(
             f"QPushButton{{background:{BG3};color:{MUTED};"
             f"border:1px solid {BORDER};border-radius:5px;"
             f"padding:3px 12px;font-size:10px;font-weight:600;}}"
-            f"QPushButton:hover{{color:{TEXT};background:{BG4};"
-            f"border-color:{ACCENT};}}"
-            f"QPushButton:pressed{{background:{BG};}}")
+            f"QPushButton:hover{{color:{TEXT};background:{BG4};border-color:{ACCENT};}}"
+            f"QPushButton:pressed{{background:{BG};}}"
+        )
         b_reset.clicked.connect(self._reset_all)
         btn_row.addWidget(b_reset)
         btn_row.addStretch()
-        b_apply = QPushButton("✅  Apply to Image")
+        b_apply = QPushButton("Apply to Image")
         b_apply.setFixedHeight(30)
         b_apply.setStyleSheet(
             f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
@@ -828,42 +861,226 @@ class HistogramEditorPanel(QWidget):
             f"font-size:11px;font-weight:700;letter-spacing:0.3px;}}"
             f"QPushButton:hover{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
             f"stop:0 #5ad48a,stop:1 #3dbd6e);}}"
-            f"QPushButton:pressed{{background:{BG4};}}")
+            f"QPushButton:pressed{{background:{BG4};}}"
+        )
         b_apply.clicked.connect(lambda: self._apply(emit=True))
         btn_row.addWidget(b_apply)
         root.addLayout(btn_row)
 
-    def _levels_tab(self):
-        w = QWidget(); w.setStyleSheet(f"background:{BG2};")
-        lay = QVBoxLayout(w); lay.setContentsMargins(6,6,6,4); lay.setSpacing(6)
+    def _make_section(self, title, expanded=True):
+        frame = QFrame()
+        frame.setStyleSheet(
+            f"QFrame{{background:{BG2};border:1px solid {BORDER};border-radius:4px;}}"
+        )
+        outer = QVBoxLayout(frame)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # Histogram + triangle widget
+        button = QPushButton()
+        button.setCheckable(True)
+        button.setChecked(expanded)
+        button.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{HEAD};border:none;text-align:left;"
+            f"padding:7px 10px;font-size:10px;font-weight:700;}}"
+            f"QPushButton:hover{{background:{BG4};}}"
+        )
+        outer.addWidget(button)
+
+        body = QWidget()
+        body.setStyleSheet(f"background:{BG2};")
+        body_lay = QVBoxLayout(body)
+        body_lay.setContentsMargins(8, 8, 8, 8)
+        body_lay.setSpacing(4)
+        outer.addWidget(body)
+
+        def _sync(checked):
+            button.setText(f"{'v' if checked else '>'} {title}")
+            body.setVisible(checked)
+
+        button.toggled.connect(_sync)
+        _sync(expanded)
+        return frame, body_lay
+
+    def _styled_combo(self):
+        combo = QComboBox()
+        combo.setStyleSheet(
+            f"QComboBox{{background:{BG3};color:{TEXT};border:1px solid {BORDER};"
+            f"border-radius:4px;padding:3px 8px;font-size:10px;min-height:24px;}}"
+            f"QComboBox::drop-down{{border:none;width:18px;}}"
+            f"QComboBox QAbstractItemView{{background:{BG3};color:{TEXT};selection-background-color:{ACCENT};}}"
+        )
+        return combo
+
+    def _build_basic_section(self, lay):
+        wb_row = QHBoxLayout()
+        wb_row.setSpacing(6)
+        wb_lbl = QLabel("Beyaz Dengesi")
+        wb_lbl.setStyleSheet(f"color:{MUTED};font-size:10px;")
+        self._wb_preset = self._styled_combo()
+        self._wb_preset.addItems(["?ekildi?i Gibi", "G?n I????", "Bulutlu", "G?lge", "Tungsten"])
+        self._wb_preset.currentTextChanged.connect(self._on_wb_preset_changed)
+        self._wb_sample_btn = QPushButton("N")
+        self._wb_sample_btn.setFixedSize(24, 24)
+        self._wb_sample_btn.setStyleSheet(BTN_CSS)
+        self._wb_sample_btn.setToolTip("Otomatik beyaz dengesi")
+        self._wb_sample_btn.clicked.connect(self._auto_white_balance)
+        wb_row.addWidget(wb_lbl)
+        wb_row.addWidget(self._wb_preset, 1)
+        wb_row.addWidget(self._wb_sample_btn)
+        lay.addLayout(wb_row)
+
+        def _row(label, lo, hi, default, dec=2, step=None):
+            sr = SliderRow(label, lo, hi, default, dec, step)
+            sr.value_changed.connect(self._on_adjustment)
+            lay.addWidget(sr)
+            return sr
+
+        self._adj_temp = _row("S?cakl?k", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_tint = _row("Renk Tonu", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_exposure = _row("Pozlama", -5.0, 5.0, 0.0, 2, 0.05)
+        self._adj_contrast = _row("Kontrast", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_highlights = _row("A??k Tonlar", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_shadows = _row("G?lgeler", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_whites = _row("Beyazlar", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_blacks = _row("Siyahlar", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_vibrance = _row("Titre?im", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_saturation = _row("Doygunluk", -100.0, 100.0, 0.0, 0, 1)
+
+    def _build_curve_section(self, lay):
+        self._curves_wgt = CurvesWidget()
+        self._curves_wgt.curve_changed.connect(self._on_curve_changed)
+        self._curves_wgt.setMinimumHeight(220)
+        lay.addWidget(self._curves_wgt)
+
+        hint = QLabel("Left: add point  |  Right: remove  |  Drag: adjust")
+        hint.setStyleSheet(f"color:{SUBTEXT};font-size:8px;letter-spacing:0.3px;")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(hint)
+
+        b_reset_curve = QPushButton("Reset Curve")
+        b_reset_curve.setFixedHeight(24)
+        b_reset_curve.setStyleSheet(BTN_CSS)
+        b_reset_curve.clicked.connect(lambda: self._curves_wgt.reset_channel(self._ch))
+        lay.addWidget(b_reset_curve)
+
+    def _build_detail_section(self, lay):
+        def _row(label, lo, hi, default, dec=2, step=None):
+            sr = SliderRow(label, lo, hi, default, dec, step)
+            sr.value_changed.connect(self._on_adjustment)
+            lay.addWidget(sr)
+            return sr
+
+        self._adj_texture = _row("Doku", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_sharpen = _row("Netlik", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_clarity = _row("Mikro Kontrast", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_dehaze = _row("Sis Kald?r", -100.0, 100.0, 0.0, 0, 1)
+
+    def _build_levels_section(self, lay):
+        inp_row = QHBoxLayout()
+        inp_row.setSpacing(4)
+        inp_row.addWidget(QLabel("In:"))
+        self._sp_black = self._spinbox(0, 1, 0.0, 3)
+        self._sp_mid = self._spinbox(0, 1, 0.5, 3)
+        self._sp_white = self._spinbox(0, 1, 1.0, 3)
+        for sp, tip in [
+            (self._sp_black, "Shadows (Black point)"),
+            (self._sp_mid, "Midtones (Gamma)"),
+            (self._sp_white, "Highlights (White point)"),
+        ]:
+            sp.setToolTip(tip)
+            sp.valueChanged.connect(self._on_spin_levels)
+            inp_row.addWidget(sp)
+        b_auto = QPushButton("Auto")
+        b_auto.setStyleSheet(BTN_CSS)
+        b_auto.setFixedHeight(22)
+        b_auto.setFixedWidth(44)
+        b_auto.clicked.connect(self._auto_levels)
+        inp_row.addWidget(b_auto)
+        lay.addLayout(inp_row)
+
+        out_row = QHBoxLayout()
+        out_row.setSpacing(4)
+        out_row.addWidget(QLabel("Out:"))
+        self._sp_out_lo = self._spinbox(0, 1, 0.0, 3)
+        self._sp_out_hi = self._spinbox(0, 1, 1.0, 3)
+        self._sp_out_lo.valueChanged.connect(self._on_spin_levels)
+        self._sp_out_hi.valueChanged.connect(self._on_spin_levels)
+        out_row.addWidget(self._sp_out_lo)
+        out_row.addWidget(self._sp_out_hi)
+        lay.addLayout(out_row)
+
+    def _build_channel_section(self, lay):
+        ch_row = QHBoxLayout()
+        ch_row.setSpacing(4)
+        self._ch_btns = {}
+        for ch, col in {"L": ACCENT2, "R": RED, "G": GREEN, "B": "#6699ff"}.items():
+            b = QPushButton(ch)
+            b.setFixedSize(30, 24)
+            b.setCheckable(True)
+            b.setStyleSheet(
+                f"QPushButton{{background:{BG3};color:{SUBTEXT};border:1px solid {BORDER};"
+                f"border-radius:4px;font-size:11px;font-weight:800;}}"
+                f"QPushButton:checked{{background:{col}40;color:{col};"
+                f"border:1px solid {col};border-bottom:2px solid {col};}}"
+                f"QPushButton:hover{{color:{col};background:{col}18;border-color:{col}66;}}"
+            )
+            b.clicked.connect(lambda _, c=ch: self._set_channel(c))
+            ch_row.addWidget(b)
+            self._ch_btns[ch] = b
+        self._ch_btns["L"].setChecked(True)
+        ch_row.addStretch()
+        lay.addLayout(ch_row)
+
+        opts = QHBoxLayout()
+        opts.setSpacing(10)
+        self._chk_link = QCheckBox("RGB Ba?la")
+        self._chk_link.setChecked(False)
+        self._chk_link.setStyleSheet(CHECK_CSS)
+        self._chk_live = QCheckBox("Canl?")
+        self._chk_live.setChecked(True)
+        self._chk_live.setStyleSheet(CHECK_CSS)
+        opts.addWidget(self._chk_link)
+        opts.addWidget(self._chk_live)
+        opts.addStretch()
+        lay.addLayout(opts)
+
+    def _levels_tab(self):
+        w = QWidget()
+        w.setStyleSheet(f"background:{BG2};")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(6, 6, 6, 4)
+        lay.setSpacing(6)
+
         self._hist_wgt = HistogramWidget()
         self._hist_wgt.levels_changed.connect(self._on_levels_changed)
         lay.addWidget(self._hist_wgt, 1)
 
-        # Input spinboxes
-        inp_row = QHBoxLayout(); inp_row.setSpacing(4)
+        inp_row = QHBoxLayout()
+        inp_row.setSpacing(4)
         inp_row.addWidget(QLabel("In:"))
         self._sp_black = self._spinbox(0, 1, 0.0, 3)
-        self._sp_mid   = self._spinbox(0, 1, 0.5, 3)
+        self._sp_mid = self._spinbox(0, 1, 0.5, 3)
         self._sp_white = self._spinbox(0, 1, 1.0, 3)
-        for sp, tip in [(self._sp_black,"Shadows (Black point)"),
-                        (self._sp_mid,  "Midtones (Gamma)"),
-                        (self._sp_white,"Highlights (White point)")]:
+        for sp, tip in [
+            (self._sp_black, "Shadows (Black point)"),
+            (self._sp_mid, "Midtones (Gamma)"),
+            (self._sp_white, "Highlights (White point)"),
+        ]:
             sp.setToolTip(tip)
             sp.valueChanged.connect(self._on_spin_levels)
             inp_row.addWidget(sp)
         inp_row.addStretch()
         b_auto = QPushButton("Auto")
-        b_auto.setStyleSheet(BTN_CSS); b_auto.setFixedHeight(22); b_auto.setFixedWidth(44)
-        b_auto.setToolTip("Auto Levels: stretch to 0.1%–99.9%")
+        b_auto.setStyleSheet(BTN_CSS)
+        b_auto.setFixedHeight(22)
+        b_auto.setFixedWidth(44)
+        b_auto.setToolTip("Auto Levels: stretch to 0.1%-99.9%")
         b_auto.clicked.connect(self._auto_levels)
         inp_row.addWidget(b_auto)
         lay.addLayout(inp_row)
 
-        # Output spinboxes
-        out_row = QHBoxLayout(); out_row.setSpacing(4)
+        out_row = QHBoxLayout()
+        out_row.setSpacing(4)
         out_row.addWidget(QLabel("Out:"))
         self._sp_out_lo = self._spinbox(0, 1, 0.0, 3)
         self._sp_out_hi = self._spinbox(0, 1, 1.0, 3)
@@ -871,49 +1088,95 @@ class HistogramEditorPanel(QWidget):
         self._sp_out_hi.setToolTip("Output white (compress highlights)")
         self._sp_out_lo.valueChanged.connect(self._on_spin_levels)
         self._sp_out_hi.valueChanged.connect(self._on_spin_levels)
-        out_row.addWidget(self._sp_out_lo); out_row.addWidget(self._sp_out_hi)
+        out_row.addWidget(self._sp_out_lo)
+        out_row.addWidget(self._sp_out_hi)
         out_row.addStretch()
         self._tabs.addTab(w, "Levels")
         lay.addLayout(out_row)
 
     def _curves_tab(self):
-        w = QWidget(); w.setStyleSheet(f"background:{BG2};")
-        lay = QVBoxLayout(w); lay.setContentsMargins(4,4,4,4); lay.setSpacing(3)
+        w = QWidget()
+        w.setStyleSheet(f"background:{BG2};")
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(4, 4, 4, 4)
+        lay.setSpacing(3)
 
         self._curves_wgt = CurvesWidget()
         self._curves_wgt.curve_changed.connect(self._on_curve_changed)
         lay.addWidget(self._curves_wgt, 1)
 
-        hint = QLabel("🖱 Left: add point  •  Right: remove  •  Drag: adjust")
+        hint = QLabel("Left: add point  |  Right: remove  |  Drag: adjust")
         hint.setStyleSheet(f"color:{SUBTEXT};font-size:8px;letter-spacing:0.3px;")
         hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         lay.addWidget(hint)
 
-        b_reset_curve = QPushButton("↺ Reset Curve")
+        b_reset_curve = QPushButton("Reset Curve")
         b_reset_curve.setFixedHeight(24)
         b_reset_curve.setStyleSheet(
             f"QPushButton{{background:{BG3};color:{MUTED};"
-            f"border:1px solid {BORDER};border-radius:4px;"
-            f"font-size:10px;font-weight:600;}}"
-            f"QPushButton:hover{{color:{ACCENT2};border-color:{ACCENT};"
-            f"background:{BG4};}}"
-            f"QPushButton:pressed{{background:{BG};}}")
+            f"border:1px solid {BORDER};border-radius:4px;font-size:10px;font-weight:600;}}"
+            f"QPushButton:hover{{color:{ACCENT2};border-color:{ACCENT};background:{BG4};}}"
+            f"QPushButton:pressed{{background:{BG};}}"
+        )
         b_reset_curve.clicked.connect(lambda: self._curves_wgt.reset_channel(self._ch))
         lay.addWidget(b_reset_curve)
         self._tabs.addTab(w, "Curves")
 
     def _adjustments_tab(self):
-        w = QWidget(); w.setStyleSheet(f"background:{BG2};")
-        scroll = QScrollArea(); scroll.setWidget(w)
+        w = QWidget()
+        w.setStyleSheet(f"background:{BG2};")
+        scroll = QScrollArea()
+        scroll.setWidget(w)
         scroll.setWidgetResizable(True)
         scroll.setStyleSheet(f"background:{BG2};border:none;")
-        lay = QVBoxLayout(w); lay.setContentsMargins(8,8,8,8); lay.setSpacing(2)
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(8, 8, 8, 8)
+        lay.setSpacing(2)
 
-        def _sep(title):
-            lbl = QLabel(title)
+        top = QHBoxLayout()
+        top.setSpacing(6)
+        title = QLabel("D?zenle")
+        title.setStyleSheet(f"color:{HEAD};font-size:11px;font-weight:800;")
+        top.addWidget(title)
+        top.addStretch()
+
+        b_auto = QPushButton("Otomatik")
+        b_auto.setStyleSheet(BTN_CSS)
+        b_auto.setFixedHeight(24)
+        b_auto.clicked.connect(self._auto_raw_adjustments)
+        top.addWidget(b_auto)
+
+        self._raw_bw_btn = QPushButton("Siyah Beyaz")
+        self._raw_bw_btn.setCheckable(True)
+        self._raw_bw_btn.setFixedHeight(24)
+        self._raw_bw_btn.setStyleSheet(BTN_CSS)
+        self._raw_bw_btn.toggled.connect(self._toggle_bw_profile)
+        top.addWidget(self._raw_bw_btn)
+        lay.addLayout(top)
+
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(6)
+        profile_lbl = QLabel("Profil")
+        profile_lbl.setStyleSheet(f"color:{MUTED};font-size:10px;")
+        self._raw_profile = QComboBox()
+        self._raw_profile.addItems(["Renk", "Siyah Beyaz"])
+        self._raw_profile.setStyleSheet(
+            f"QComboBox{{background:{BG3};color:{TEXT};border:1px solid {BORDER};"
+            f"border-radius:4px;padding:3px 8px;font-size:10px;min-height:22px;}}"
+            f"QComboBox::drop-down{{border:none;width:18px;}}"
+            f"QComboBox QAbstractItemView{{background:{BG3};color:{TEXT};selection-background-color:{ACCENT};}}"
+        )
+        self._raw_profile.currentTextChanged.connect(self._on_profile_changed)
+        profile_row.addWidget(profile_lbl)
+        profile_row.addWidget(self._raw_profile, 1)
+        lay.addLayout(profile_row)
+
+        def _sep(title_text):
+            lbl = QLabel(title_text)
             lbl.setStyleSheet(
                 f"color:{HEAD};font-size:10px;font-weight:700;"
-                f"border-bottom:1px solid {BORDER};padding-bottom:2px;margin-top:6px;")
+                f"border-bottom:1px solid {BORDER};padding-bottom:4px;margin-top:8px;"
+            )
             lay.addWidget(lbl)
 
         def _row(label, lo, hi, default, dec=2, step=None):
@@ -922,69 +1185,78 @@ class HistogramEditorPanel(QWidget):
             lay.addWidget(sr)
             return sr
 
-        _sep("Exposure & Tone")
-        self._adj_exposure    = _row("Exposure",    -3.0,  3.0,  0.0, 2, 0.05)
-        self._adj_brightness  = _row("Brightness",  -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_contrast    = _row("Contrast",    -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_highlights  = _row("Highlights",  -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_shadows     = _row("Shadows",     -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_whites      = _row("Whites",      -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_blacks      = _row("Blacks",      -1.0,  1.0,  0.0, 2, 0.01)
+        _sep("Temel")
+        self._adj_temp = _row("S?cakl?k", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_tint = _row("Renk Tonu", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_exposure = _row("Pozlama", -5.0, 5.0, 0.0, 2, 0.05)
+        self._adj_contrast = _row("Kontrast", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_highlights = _row("A??k Tonlar", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_shadows = _row("G?lgeler", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_whites = _row("Beyazlar", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_blacks = _row("Siyahlar", -100.0, 100.0, 0.0, 0, 1)
 
-        _sep("Color")
-        self._adj_temp        = _row("Color Temp",  -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_tint        = _row("Tint",        -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_vibrance    = _row("Vibrance",    -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_saturation  = _row("Saturation",  -1.0,  1.0,  0.0, 2, 0.01)
-        self._adj_hue         = _row("Hue Shift",  -0.5,  0.5,  0.0, 2, 0.005)
+        _sep("Ayr?nt?")
+        self._adj_texture = _row("Doku", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_sharpen = _row("Netlik", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_clarity = _row("Mikro Kontrast", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_dehaze = _row("Sis Kald?r", -100.0, 100.0, 0.0, 0, 1)
 
-        _sep("Detail")
-        self._adj_clarity     = _row("Clarity",      0.0,  1.0,  0.0, 2, 0.01)
-        self._adj_dehaze      = _row("Dehaze",        0.0,  1.0,  0.0, 2, 0.01)
+        _sep("Renk")
+        self._adj_vibrance = _row("Titre?im", -100.0, 100.0, 0.0, 0, 1)
+        self._adj_saturation = _row("Doygunluk", -100.0, 100.0, 0.0, 0, 1)
 
         lay.addStretch()
 
-        b_reset_adj = QPushButton("↺ Reset Adjustments")
-        b_reset_adj.setStyleSheet(BTN_CSS); b_reset_adj.setFixedHeight(22)
+        b_reset_adj = QPushButton("Reset RAW")
+        b_reset_adj.setStyleSheet(BTN_CSS)
+        b_reset_adj.setFixedHeight(22)
         b_reset_adj.clicked.connect(self._reset_adjustments)
         lay.addWidget(b_reset_adj)
 
-        self._tabs.addTab(scroll, "Adjustments")
+        self._tabs.addTab(scroll, "RAW")
 
     def _spinbox(self, lo, hi, val, dec):
         sp = QDoubleSpinBox()
-        sp.setRange(lo, hi); sp.setValue(val)
-        sp.setDecimals(dec); sp.setSingleStep(10**-dec)
-        sp.setFixedWidth(66); sp.setStyleSheet(SPIN_CSS)
+        sp.setRange(lo, hi)
+        sp.setValue(val)
+        sp.setDecimals(dec)
+        sp.setSingleStep(10 ** -dec)
+        sp.setFixedWidth(66)
+        sp.setStyleSheet(SPIN_CSS)
         return sp
 
-    # ── Data ──────────────────────────────────────────────────────────────────
     def set_image(self, img: np.ndarray, reset: bool = False):
         self._img = np.clip(img, 0, 1).astype(np.float32) if img is not None else None
         self._orig_img = self._img.copy() if self._img is not None else None
-        self._hist_wgt.set_image(self._img)
-        self._curves_wgt.set_image(self._img)
+        self._preview_img, self._preview_scale = build_preview_proxy(self._img)
+        self._preview_orig = self._preview_img.copy() if self._preview_img is not None else None
+        hist_src = self._preview_img if self._preview_img is not None else self._img
+        self._hist_wgt.set_image(hist_src)
+        self._curves_wgt.set_image(hist_src)
         if reset:
             self._reset_all_silent()
 
     def _set_channel(self, ch):
         self._ch = ch
-        for c, b in self._ch_btns.items(): b.setChecked(c==ch)
+        for c, b in self._ch_btns.items():
+            b.setChecked(c == ch)
         self._hist_wgt.set_channel(ch)
         self._curves_wgt.set_channel(ch)
-        # Sync spinboxes to channel state
-        st = self._hist_wgt.get_state(ch)
-        self._sync_spins_from_state(st)
+        self._sync_spins_from_state(self._hist_wgt.get_state(ch))
 
     def _sync_spins_from_state(self, st):
-        for sp, v in [(self._sp_black, st[0]), (self._sp_mid, st[1]),
-                      (self._sp_white, st[2]), (self._sp_out_lo, st[3]),
-                      (self._sp_out_hi, st[4])]:
-            sp.blockSignals(True); sp.setValue(v); sp.blockSignals(False)
+        for sp, v in [
+            (self._sp_black, st[0]),
+            (self._sp_mid, st[1]),
+            (self._sp_white, st[2]),
+            (self._sp_out_lo, st[3]),
+            (self._sp_out_hi, st[4]),
+        ]:
+            sp.blockSignals(True)
+            sp.setValue(v)
+            sp.blockSignals(False)
 
-    # ── Callbacks ─────────────────────────────────────────────────────────────
     def _on_levels_changed(self, ch, b, m, w, ol, oh):
-        """Histogram widget drag → sync spinboxes."""
         channels = self._linked_channels(ch)
         for c in channels:
             self._hist_wgt.set_state(c, b, m, w, ol, oh)
@@ -992,13 +1264,13 @@ class HistogramEditorPanel(QWidget):
         self._schedule_preview()
 
     def _on_spin_levels(self):
-        b  = float(self._sp_black.value())
-        m  = float(self._sp_mid.value())
-        w  = float(self._sp_white.value())
+        b = float(self._sp_black.value())
+        m = float(self._sp_mid.value())
+        w = float(self._sp_white.value())
         ol = float(self._sp_out_lo.value())
         oh = float(self._sp_out_hi.value())
-        # Clamp
-        b = min(b, w-0.01); w = max(w, b+0.01)
+        b = min(b, w - 0.01)
+        w = max(w, b + 0.01)
         m = float(np.clip(m, b, w))
         channels = self._linked_channels(self._ch)
         for c in channels:
@@ -1015,10 +1287,57 @@ class HistogramEditorPanel(QWidget):
     def _on_adjustment(self, _):
         self._schedule_preview()
 
+    def _on_profile_changed(self, text):
+        self._raw_bw_btn.blockSignals(True)
+        self._raw_bw_btn.setChecked(text == "Siyah Beyaz")
+        self._raw_bw_btn.blockSignals(False)
+        self._schedule_preview()
+
+    def _toggle_bw_profile(self, checked):
+        self._raw_profile.blockSignals(True)
+        self._raw_profile.setCurrentText("Siyah Beyaz" if checked else "Renk")
+        self._raw_profile.blockSignals(False)
+        self._schedule_preview()
+
+    def _on_wb_preset_changed(self, text):
+        presets = {
+            "Çekildiği Gibi": (0.0, 0.0),
+            "Gün Işığı": (6.0, 0.0),
+            "Bulutlu": (16.0, 2.0),
+            "Gölge": (28.0, 4.0),
+            "Tungsten": (-32.0, -6.0),
+        }
+        if text not in presets:
+            return
+        temp, tint = presets[text]
+        self._set_adjustment_values(
+            {
+                "_adj_temp": temp,
+                "_adj_tint": tint,
+            },
+            schedule=True,
+        )
+
+    def _auto_white_balance(self):
+        base = self._preview_orig if self._preview_orig is not None else self._orig_img
+        if base is None or base.ndim != 3:
+            return
+        med = np.median(base.reshape(-1, 3), axis=0).astype(np.float32)
+        mean_med = float(np.mean(med))
+        if mean_med <= 1e-6:
+            return
+        temp = float(np.clip((med[2] - med[0]) / mean_med * 60.0, -100.0, 100.0))
+        tint = float(np.clip((med[1] - 0.5 * (med[0] + med[2])) / mean_med * 90.0, -100.0, 100.0))
+        self._set_adjustment_values(
+            {
+                "_adj_temp": temp,
+                "_adj_tint": tint,
+                "wb_preset": "Çekildiği Gibi",
+            },
+            schedule=True,
+        )
+
     def _linked_channels(self, ch):
-        """Link açık: R/G/B birbirine bağlı (birini değiştir → hepsi değişir).
-        L her zaman bağımsız (apply'da tüm RGB'ye uygulanır).
-        Link kapalı: her kanal tamamen bağımsız."""
         if not self._chk_link.isChecked():
             return [ch]
         if ch in ("R", "G", "B"):
@@ -1026,34 +1345,30 @@ class HistogramEditorPanel(QWidget):
         return ["L"]
 
     def _schedule_preview(self):
-        import sys
-        print(f"[HIST DEBUG] _schedule_preview, live={self._chk_live.isChecked()}, img={'SET' if self._img is not None else 'NONE'}", flush=True)
         if self._chk_live.isChecked():
-            self._debounce.start(50)
+            self._debounce.start(24)
 
     def _emit_preview(self):
-        import sys
         if self._img is None:
-            print(f"[HIST DEBUG] _emit_preview ABORT — no image", flush=True)
             return
-        print(f"[HIST DEBUG] _emit_preview CALLING _apply...", flush=True)
-        result = self._apply(emit=False)
+        result = self._apply(emit=False, preview=True)
         if result is not None:
-            print(f"[HIST DEBUG] _emit_preview EMITTING, shape={result.shape}", flush=True)
+            if self._orig_img is not None and result.shape != self._orig_img.shape:
+                result = resize_to_shape(result, self._orig_img.shape)
             self.preview_changed.emit(result)
-        else:
-            print(f"[HIST DEBUG] _emit_preview — _apply returned None", flush=True)
 
     def _auto_levels(self):
-        if self._img is None: return
+        base = self._preview_orig if self._preview_orig is not None else self._img
+        if base is None:
+            return
         ch = self._ch
-        if self._img.ndim == 2:
-            data = self._img.ravel()
+        if base.ndim == 2:
+            data = base.ravel()
         elif ch == "L":
-            data = self._img.mean(axis=2).ravel()
+            data = base.mean(axis=2).ravel()
         else:
-            ci = {"R":0,"G":1,"B":2}[ch]
-            data = self._img[:,:,ci].ravel()
+            ci = {"R": 0, "G": 1, "B": 2}[ch]
+            data = base[:, :, ci].ravel()
         lo = float(np.percentile(data, 0.1))
         hi = float(np.percentile(data, 99.9))
         mid = 0.5
@@ -1062,208 +1377,371 @@ class HistogramEditorPanel(QWidget):
         self._sync_spins_from_state([lo, mid, hi, 0.0, 1.0])
         self._schedule_preview()
 
+    def _set_adjustment_values(self, values, schedule=False):
+        payload = dict(values)
+        profile_value = payload.pop("profile", None)
+        wb_value = payload.pop("wb_preset", None)
+        for attr, value in payload.items():
+            widget = getattr(self, attr, None)
+            if widget is None:
+                continue
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+        if profile_value is not None:
+            self._raw_profile.blockSignals(True)
+            self._raw_profile.setCurrentText(profile_value)
+            self._raw_profile.blockSignals(False)
+            self._raw_bw_btn.blockSignals(True)
+            self._raw_bw_btn.setChecked(profile_value == "Siyah Beyaz")
+            self._raw_bw_btn.blockSignals(False)
+        if wb_value is not None and hasattr(self, "_wb_preset"):
+            self._wb_preset.blockSignals(True)
+            self._wb_preset.setCurrentText(wb_value)
+            self._wb_preset.blockSignals(False)
+        if schedule:
+            self._schedule_preview()
+
+    def _auto_raw_adjustments(self):
+        base = self._preview_orig if self._preview_orig is not None else self._orig_img
+        if base is None:
+            return
+        luma = image_luma(base)
+        p1, p10, p50, p90, p99 = [float(v) for v in np.percentile(luma, [1, 10, 50, 90, 99])]
+        dynamic = max(p99 - p1, 1e-3)
+        exposure = float(np.clip(np.log2(0.30 / max(p50, 1e-3)), -1.75, 1.75))
+        contrast = float(np.clip((0.56 - dynamic) * 140.0, -20.0, 42.0))
+        shadows = float(np.clip((0.18 - p10) * 240.0, -20.0, 48.0))
+        highlights = float(np.clip((0.82 - p90) * 220.0, -45.0, 28.0))
+        whites = float(np.clip((0.94 - p99) * 180.0, -25.0, 30.0))
+        blacks = float(np.clip((0.03 - p1) * 320.0, -38.0, 24.0))
+        self._set_adjustment_values(
+            {
+                "_adj_exposure": exposure,
+                "_adj_contrast": contrast,
+                "_adj_highlights": highlights,
+                "_adj_shadows": shadows,
+                "_adj_whites": whites,
+                "_adj_blacks": blacks,
+                "_adj_texture": 12.0,
+                "_adj_sharpen": 10.0,
+                "_adj_clarity": 10.0,
+                "_adj_dehaze": 8.0,
+                "_adj_vibrance": 14.0,
+                "_adj_saturation": 0.0,
+                "_adj_temp": 0.0,
+                "_adj_tint": 0.0,
+                "profile": "Renk",
+                "wb_preset": "Çekildiği Gibi",
+            },
+            schedule=True,
+        )
+
     def _reset_all(self):
         self._hist_wgt.reset_channel()
         self._curves_wgt.reset_channel()
         self._reset_adjustments()
-        self._sync_spins_from_state([0.0,0.5,1.0,0.0,1.0])
+        self._sync_spins_from_state([0.0, 0.5, 1.0, 0.0, 1.0])
         self._schedule_preview()
 
     def _reset_all_silent(self):
-        """Reset all controls without emitting preview (used after Apply).
-        Image stays as-is; only the editor UI resets to defaults."""
-        # Stop any pending preview timer
         self._debounce.stop()
-        # Block signals so reset doesn't trigger preview chain
         self._hist_wgt.blockSignals(True)
         self._curves_wgt.blockSignals(True)
-        # Reset levels: all channels → [0, 0.5, 1, 0, 1]
         for c in list(self._hist_wgt._state.keys()):
             self._hist_wgt._state[c] = [0.0, 0.5, 1.0, 0.0, 1.0]
-        # Reset curves: all channels → diagonal line
         for c in list(self._curves_wgt._pts.keys()):
             self._curves_wgt._pts[c] = [(0.0, 0.0), (1.0, 1.0)]
-        # Unblock signals
         self._hist_wgt.blockSignals(False)
         self._curves_wgt.blockSignals(False)
-        # Reset adjustment sliders
         self._reset_adjustments()
-        # Sync spinboxes to default
         self._sync_spins_from_state([0.0, 0.5, 1.0, 0.0, 1.0])
-        # Force immediate repaint (not deferred)
         self._hist_wgt.repaint()
         self._curves_wgt.repaint()
 
     def _reset_adjustments(self):
-        defaults = {
-            "_adj_exposure":0.0,"_adj_brightness":0.0,"_adj_contrast":0.0,
-            "_adj_highlights":0.0,"_adj_shadows":0.0,"_adj_whites":0.0,
-            "_adj_blacks":0.0,"_adj_temp":0.0,"_adj_tint":0.0,
-            "_adj_vibrance":0.0,"_adj_saturation":0.0,"_adj_hue":0.0,
-            "_adj_clarity":0.0,"_adj_dehaze":0.0,
-        }
-        for attr, val in defaults.items():
-            getattr(self, attr).setValue(val)
+        self._set_adjustment_values(
+            {
+                "_adj_exposure": 0.0,
+                "_adj_contrast": 0.0,
+                "_adj_highlights": 0.0,
+                "_adj_shadows": 0.0,
+                "_adj_whites": 0.0,
+                "_adj_blacks": 0.0,
+                "_adj_temp": 0.0,
+                "_adj_tint": 0.0,
+                "_adj_texture": 0.0,
+                "_adj_sharpen": 0.0,
+                "_adj_clarity": 0.0,
+                "_adj_dehaze": 0.0,
+                "_adj_vibrance": 0.0,
+                "_adj_saturation": 0.0,
+                "profile": "Renk",
+                "wb_preset": "Çekildiği Gibi",
+            },
+            schedule=False,
+        )
 
-    # ── Apply ─────────────────────────────────────────────────────────────────
-    def _apply(self, emit=True):
-        if self._img is None: return None
-        # Always apply from ORIGINAL — prevents cumulative degradation on live preview
-        base = self._orig_img if self._orig_img is not None else self._img
-        img = base.astype(np.float64)
+    def _apply(self, emit=True, preview=False):
+        if self._img is None:
+            return None
+        base = (
+            self._preview_orig if preview and self._preview_orig is not None
+            else self._orig_img if self._orig_img is not None
+            else self._img
+        )
+        img = base.astype(np.float32, copy=True)
 
-        # ① Levels per channel
-        def _apply_levels_1ch(c, st):
+        def _apply_levels_1ch(channel, st):
             b, m, w, ol, oh = st
             rng = max(w - b, 1e-9)
-            c = np.clip((c - b) / rng, 0, 1)
+            channel = np.clip((channel - b) / rng, 0, 1)
             if abs(m - 0.5) > 0.005:
                 eps = 1e-9
-                c = np.where(c<=0, 0, np.where(c>=1, 1,
-                    (m-1)*c / ((2*m-1)*c - m + eps)))
-                c = np.clip(c, 0, 1)
-            c = ol + c * (oh - ol)
-            return c
+                channel = np.where(
+                    channel <= 0,
+                    0,
+                    np.where(
+                        channel >= 1,
+                        1,
+                        (m - 1) * channel / ((2 * m - 1) * channel - m + eps),
+                    ),
+                )
+                channel = np.clip(channel, 0, 1)
+            channel = ol + channel * (oh - ol)
+            return channel
 
         if img.ndim == 2:
             img = _apply_levels_1ch(img, self._hist_wgt.get_state("L"))
         else:
-            # Önce L kanalı — tüm RGB'ye eşit uygula
-            st_L = self._hist_wgt.get_state("L")
-            if st_L != [0.0, 0.5, 1.0, 0.0, 1.0]:
+            st_l = self._hist_wgt.get_state("L")
+            if st_l != [0.0, 0.5, 1.0, 0.0, 1.0]:
                 for i in range(3):
-                    img[:,:,i] = _apply_levels_1ch(img[:,:,i], st_L)
-            # Sonra ayrı R, G, B kanalları
-            for i, ch in enumerate(("R","G","B")):
+                    img[:, :, i] = _apply_levels_1ch(img[:, :, i], st_l)
+            for i, ch in enumerate(("R", "G", "B")):
                 st = self._hist_wgt.get_state(ch)
                 if st != [0.0, 0.5, 1.0, 0.0, 1.0]:
-                    img[:,:,i] = _apply_levels_1ch(img[:,:,i], st)
+                    img[:, :, i] = _apply_levels_1ch(img[:, :, i], st)
 
-        # ② Curves per channel (apply LUT)
-        pts_L = self._curves_wgt._pts.get("L", [(0,0),(1,1)])
-        is_flat_L = (len(pts_L)==2 and pts_L[0]==(0,0) and pts_L[1]==(1,1))
+        pts_l = self._curves_wgt._pts.get("L", [(0, 0), (1, 1)])
+        is_flat_l = len(pts_l) == 2 and pts_l[0] == (0, 0) and pts_l[1] == (1, 1)
+        xs = np.linspace(0.0, 1.0, 256, dtype=np.float32)
         if img.ndim == 2:
-            if not is_flat_L:
+            if not is_flat_l:
                 lut = self._curves_wgt.get_lut("L")
-                img = np.clip(np.interp(img, np.linspace(0,1,256), lut), 0, 1)
+                img = np.clip(np.interp(img, xs, lut), 0, 1)
         else:
-            # Önce L curve — tüm RGB'ye uygula
-            if not is_flat_L:
-                lut_L = self._curves_wgt.get_lut("L")
-                xs = np.linspace(0,1,256)
+            if not is_flat_l:
+                lut_l = self._curves_wgt.get_lut("L")
                 for i in range(3):
-                    img[:,:,i] = np.interp(img[:,:,i], xs, lut_L)
-            # Sonra ayrı R, G, B curves
-            for i, ch in enumerate(("R","G","B")):
-                pts = self._curves_wgt._pts.get(ch, [(0,0),(1,1)])
-                is_flat = (len(pts)==2 and pts[0]==(0,0) and pts[1]==(1,1))
+                    img[:, :, i] = np.interp(img[:, :, i], xs, lut_l)
+            for i, ch in enumerate(("R", "G", "B")):
+                pts = self._curves_wgt._pts.get(ch, [(0, 0), (1, 1)])
+                is_flat = len(pts) == 2 and pts[0] == (0, 0) and pts[1] == (1, 1)
                 if not is_flat:
                     lut = self._curves_wgt.get_lut(ch)
-                    img[:,:,i] = np.interp(img[:,:,i], np.linspace(0,1,256), lut)
+                    img[:, :, i] = np.interp(img[:, :, i], xs, lut)
 
         img = np.clip(img, 0, 1).astype(np.float32)
-
-        # ③ Adjustments
         img = self._apply_adjustments(img)
         img = np.clip(img, 0, 1).astype(np.float32)
 
         if emit:
             self.apply_requested.emit(img)
-            # After apply: update baseline and reset all controls to defaults
             self._img = img.copy()
             self._orig_img = img.copy()
-            self._hist_wgt.set_image(self._img)
-            self._curves_wgt.set_image(self._img)
+            self._preview_img, self._preview_scale = build_preview_proxy(self._img)
+            self._preview_orig = self._preview_img.copy() if self._preview_img is not None else None
+            hist_src = self._preview_img if self._preview_img is not None else self._img
+            self._hist_wgt.set_image(hist_src)
+            self._curves_wgt.set_image(hist_src)
             self._reset_all_silent()
         return img
 
     def _apply_adjustments(self, img: np.ndarray) -> np.ndarray:
-        img = img.astype(np.float32)
+        params = {
+            "profile": self._raw_profile.currentText() if hasattr(self, "_raw_profile") else "Renk",
+            "exposure": float(self._adj_exposure.value()),
+            "contrast": float(self._adj_contrast.value()),
+            "highlights": float(self._adj_highlights.value()),
+            "shadows": float(self._adj_shadows.value()),
+            "whites": float(self._adj_whites.value()),
+            "blacks": float(self._adj_blacks.value()),
+            "temp": float(self._adj_temp.value()),
+            "tint": float(self._adj_tint.value()),
+            "texture": float(self._adj_texture.value()),
+            "sharpen": float(self._adj_sharpen.value()),
+            "clarity": float(self._adj_clarity.value()),
+            "dehaze": float(self._adj_dehaze.value()),
+            "vibrance": float(self._adj_vibrance.value()),
+            "saturation": float(self._adj_saturation.value()),
+        }
+        return apply_camera_raw_adjustments(img, params)
 
-        # Exposure (EV stops)
-        exp = float(self._adj_exposure.value())
-        if abs(exp) > 0.001:
-            img = np.clip(img * (2.0 ** exp), 0, 1)
 
-        # Brightness (additive)
-        br = float(self._adj_brightness.value())
-        if abs(br) > 0.001:
-            img = np.clip(img + br * 0.5, 0, 1)
+def image_luma(img: np.ndarray) -> np.ndarray:
+    if img is None:
+        return None
+    if img.ndim == 2:
+        return img.astype(np.float32, copy=False)
+    return (
+        0.2126 * img[:, :, 0]
+        + 0.7152 * img[:, :, 1]
+        + 0.0722 * img[:, :, 2]
+    ).astype(np.float32, copy=False)
 
-        # Contrast (S-curve)
-        ct = float(self._adj_contrast.value())
-        if abs(ct) > 0.001:
-            mid = 0.5
-            img = np.clip(mid + (img - mid) * (1 + ct), 0, 1)
 
-        # Highlights recovery
-        hl = float(self._adj_highlights.value())
-        if abs(hl) > 0.001 and img.ndim == 3:
-            gray = img.mean(axis=2, keepdims=True)
-            mask = np.clip((gray - 0.5) * 2, 0, 1)
-            img  = np.clip(img + hl * mask * (-0.5), 0, 1)
+def smoothstep(edge0: float, edge1: float, x: np.ndarray) -> np.ndarray:
+    width = max(edge1 - edge0, 1e-6)
+    t = np.clip((x - edge0) / width, 0.0, 1.0).astype(np.float32)
+    return t * t * (3.0 - 2.0 * t)
 
-        # Shadows boost
-        sh = float(self._adj_shadows.value())
-        if abs(sh) > 0.001 and img.ndim == 3:
-            gray = img.mean(axis=2, keepdims=True)
-            mask = np.clip((0.5 - gray) * 2, 0, 1)
-            img  = np.clip(img + sh * mask * 0.5, 0, 1)
 
-        # Whites / Blacks
-        wh = float(self._adj_whites.value())
-        bl = float(self._adj_blacks.value())
-        if abs(wh) > 0.001:
-            img = np.clip(img + wh * (img**2), 0, 1)
-        if abs(bl) > 0.001:
-            img = np.clip(img + bl * ((1-img)**2) * (-0.3), 0, 1)
+def build_preview_proxy(img: np.ndarray, max_side: int = 1440):
+    if img is None:
+        return None, 1.0
+    h, w = img.shape[:2]
+    scale = min(1.0, float(max_side) / float(max(h, w, 1)))
+    if scale >= 0.999:
+        return img.copy(), 1.0
+    new_w = max(1, int(round(w * scale)))
+    new_h = max(1, int(round(h * scale)))
+    resized = cv2.resize(
+        img.astype(np.float32, copy=False),
+        (new_w, new_h),
+        interpolation=cv2.INTER_AREA,
+    )
+    return np.clip(resized, 0.0, 1.0).astype(np.float32), scale
 
+
+def resize_to_shape(img: np.ndarray, shape) -> np.ndarray:
+    if img is None:
+        return None
+    target_h, target_w = shape[:2]
+    if img.shape[:2] == (target_h, target_w):
+        return np.clip(img, 0.0, 1.0).astype(np.float32, copy=False)
+    resized = cv2.resize(
+        img.astype(np.float32, copy=False),
+        (int(target_w), int(target_h)),
+        interpolation=cv2.INTER_LINEAR,
+    )
+    return np.clip(resized, 0.0, 1.0).astype(np.float32)
+
+
+def apply_camera_raw_adjustments(img: np.ndarray, params: dict) -> np.ndarray:
+    img = np.clip(img.astype(np.float32, copy=True), 0.0, 1.0)
+
+    exposure = float(params.get("exposure", 0.0))
+    if abs(exposure) > 1e-4:
+        img = np.clip(img * (2.0 ** exposure), 0.0, 1.0)
+
+    contrast = float(params.get("contrast", 0.0)) / 100.0
+    if abs(contrast) > 1e-4:
+        img = np.clip(0.5 + (img - 0.5) * (1.0 + contrast * 1.65), 0.0, 1.0)
+
+    luma = image_luma(img)
+    shadow_mask = 1.0 - smoothstep(0.16, 0.58, luma)
+    highlight_mask = smoothstep(0.42, 0.90, luma)
+    white_mask = smoothstep(0.72, 0.98, luma)
+    black_mask = 1.0 - smoothstep(0.02, 0.28, luma)
+    if img.ndim == 3:
+        shadow_mask = shadow_mask[:, :, None]
+        highlight_mask = highlight_mask[:, :, None]
+        white_mask = white_mask[:, :, None]
+        black_mask = black_mask[:, :, None]
+
+    shadows = float(params.get("shadows", 0.0)) / 100.0
+    if abs(shadows) > 1e-4:
+        if shadows >= 0.0:
+            img = img + shadows * shadow_mask * (1.0 - img) * 0.78
+        else:
+            img = img + shadows * shadow_mask * img * 0.72
+        img = np.clip(img, 0.0, 1.0)
+
+    highlights = float(params.get("highlights", 0.0)) / 100.0
+    if abs(highlights) > 1e-4:
+        if highlights >= 0.0:
+            img = img + highlights * highlight_mask * (1.0 - img) * 0.52
+        else:
+            img = img + highlights * highlight_mask * img * 0.82
+        img = np.clip(img, 0.0, 1.0)
+
+    whites = float(params.get("whites", 0.0)) / 100.0
+    if abs(whites) > 1e-4:
+        if whites >= 0.0:
+            img = img + whites * white_mask * (1.0 - img) * 0.95
+        else:
+            img = img + whites * white_mask * img * 0.96
+        img = np.clip(img, 0.0, 1.0)
+
+    blacks = float(params.get("blacks", 0.0)) / 100.0
+    if abs(blacks) > 1e-4:
+        if blacks >= 0.0:
+            img = img + blacks * black_mask * np.maximum(0.30 - img, 0.0) * 1.15
+        else:
+            img = img + blacks * black_mask * img * 1.08
+        img = np.clip(img, 0.0, 1.0)
+
+    if img.ndim == 3:
+        profile = str(params.get("profile", "Renk"))
+        if profile != "Siyah Beyaz":
+            temp = float(params.get("temp", 0.0)) / 100.0
+            tint = float(params.get("tint", 0.0)) / 100.0
+            if abs(temp) > 1e-4 or abs(tint) > 1e-4:
+                gains = np.array(
+                    [
+                        1.0 + temp * 0.20 + tint * 0.07,
+                        1.0 + temp * 0.05 - tint * 0.12,
+                        1.0 - temp * 0.24 + tint * 0.05,
+                    ],
+                    dtype=np.float32,
+                )
+                img = np.clip(img * gains.reshape(1, 1, 3), 0.0, 1.0)
+
+            gray = image_luma(img)[:, :, None]
+            chroma = img - gray
+            saturation = float(params.get("saturation", 0.0)) / 100.0
+            vibrance = float(params.get("vibrance", 0.0)) / 100.0
+            if abs(saturation) > 1e-4:
+                img = np.clip(gray + chroma * (1.0 + saturation * 1.35), 0.0, 1.0)
+                chroma = img - image_luma(img)[:, :, None]
+            if abs(vibrance) > 1e-4:
+                sat_map = np.clip(
+                    np.max(np.abs(chroma), axis=2, keepdims=True)
+                    / np.maximum(gray + 1e-3, 1e-3),
+                    0.0,
+                    1.0,
+                )
+                protect = 1.0 - sat_map * 0.8
+                img = np.clip(img + vibrance * chroma * protect * 1.25, 0.0, 1.0)
+        else:
+            gray = image_luma(img)
+            img = np.repeat(gray[:, :, None], 3, axis=2)
+
+    texture = float(params.get("texture", 0.0)) / 100.0
+    if abs(texture) > 1e-4:
+        fine = img - cv2.GaussianBlur(img, (0, 0), 1.1)
+        img = np.clip(img + texture * fine * 0.90, 0.0, 1.0)
+
+    sharpen = float(params.get("sharpen", 0.0)) / 100.0
+    if abs(sharpen) > 1e-4:
+        sharp_base = cv2.GaussianBlur(img, (0, 0), 0.75)
+        img = np.clip(img + sharpen * (img - sharp_base) * 1.18, 0.0, 1.0)
+
+    clarity = float(params.get("clarity", 0.0)) / 100.0
+    if abs(clarity) > 1e-4:
+        local = cv2.GaussianBlur(img, (0, 0), 7.5)
+        luma = image_luma(img)
+        mid_mask = 1.0 - np.clip(np.abs(luma - 0.5) / 0.5, 0.0, 1.0)
         if img.ndim == 3:
-            # Color Temp (blue↔orange)
-            temp = float(self._adj_temp.value())
-            if abs(temp) > 0.001:
-                img[:,:,0] = np.clip(img[:,:,0] + temp * 0.15, 0, 1)
-                img[:,:,2] = np.clip(img[:,:,2] - temp * 0.15, 0, 1)
+            mid_mask = mid_mask[:, :, None]
+        img = np.clip(img + clarity * (img - local) * (0.6 + mid_mask * 0.9), 0.0, 1.0)
 
-            # Tint (green↔magenta)
-            tint = float(self._adj_tint.value())
-            if abs(tint) > 0.001:
-                img[:,:,1] = np.clip(img[:,:,1] + tint * 0.10, 0, 1)
-                img[:,:,0] = np.clip(img[:,:,0] - tint * 0.05, 0, 1)
+    dehaze = float(params.get("dehaze", 0.0)) / 100.0
+    if abs(dehaze) > 1e-4:
+        haze = cv2.GaussianBlur(img, (0, 0), 28.0)
+        img = np.clip(img + dehaze * (img - haze) * 1.35, 0.0, 1.0)
+        if dehaze > 0.0:
+            img = np.clip(0.5 + (img - 0.5) * (1.0 + dehaze * 0.18), 0.0, 1.0)
 
-            # Saturation + Vibrance
-            sat = float(self._adj_saturation.value())
-            vib = float(self._adj_vibrance.value())
-            if abs(sat) > 0.001 or abs(vib) > 0.001:
-                gray = img.mean(axis=2, keepdims=True)
-                chroma = img - gray
-                if abs(sat) > 0.001:
-                    img = np.clip(gray + chroma * (1 + sat), 0, 1)
-                if abs(vib) > 0.001:
-                    # Vibrance: protect already-saturated pixels
-                    sat_map = np.clip(np.abs(chroma).max(axis=2, keepdims=True) * 2, 0, 1)
-                    protect = 1 - sat_map
-                    img = np.clip(img + vib * chroma * protect, 0, 1)
-
-            # Hue Shift (via HSV)
-            hue = float(self._adj_hue.value())
-            if abs(hue) > 0.001:
-                img8 = (np.clip(img,0,1)*255).astype(np.uint8)
-                hsv  = cv2.cvtColor(img8, cv2.COLOR_RGB2HSV).astype(np.float32)
-                hsv[:,:,0] = (hsv[:,:,0] + hue * 180) % 180
-                img8 = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2RGB)
-                img  = img8.astype(np.float32) / 255.0
-
-            # Clarity (local contrast via unsharp)
-            clar = float(self._adj_clarity.value())
-            if clar > 0.001:
-                blur = cv2.GaussianBlur(img, (0,0), 30)
-                img  = np.clip(img + clar * (img - blur), 0, 1)
-
-            # Dehaze
-            dh = float(self._adj_dehaze.value())
-            if dh > 0.001:
-                dark = img.min(axis=2, keepdims=True)
-                img  = np.clip((img - dark * dh) / max(1 - dark.mean()*dh, 0.1), 0, 1)
-
-        return np.clip(img, 0, 1).astype(np.float32)
+    return np.clip(img, 0.0, 1.0).astype(np.float32)

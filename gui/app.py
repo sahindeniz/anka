@@ -4898,7 +4898,7 @@ class ImageViewer(QWidget):
             from PyQt6.QtCore import QTimer
             self._hist_preview_timer = QTimer()
             self._hist_preview_timer.setSingleShot(True)
-            self._hist_preview_timer.setInterval(50)  # 50ms throttle
+            self._hist_preview_timer.setInterval(24)  # tighter throttle for live RAW preview
             self._hist_preview_timer.timeout.connect(self._flush_hist_preview)
         if not self._hist_preview_timer.isActive():
             self._hist_preview_timer.start()
