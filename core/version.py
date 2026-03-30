@@ -12,7 +12,7 @@ Güncelleme akışı:
 
 # ─── Versiyon ─────────────────────────────────────────────────────────────────
 APP_NAME       = "Astro Maestro Pro"
-APP_VERSION    = "2.1.2"          # Mevcut sürüm
+APP_VERSION    = "2.1.3"          # Mevcut sürüm
 APP_AUTHOR     = "Deniz"
 APP_BUILD_DATE = "2026-03-30"
 
@@ -22,6 +22,11 @@ GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest" i
 
 # ─── Changelog ───────────────────────────────────────────────────────────────
 CHANGELOG = """
+v2.1.3  (2026-03-30)
+--------------------
+- ZIP-based updater now applies the downloaded release in place and restarts the app.
+- Added dedicated self-update helpers and regression coverage for release package install flow.
+
 v2.1.2  (2026-03-30)
 --------------------
 - Mastro Noise and Mastro Starless now run without Siril or external model folders.

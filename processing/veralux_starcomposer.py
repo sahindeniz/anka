@@ -8,7 +8,7 @@
 # (c) 2025 Riccardo Paterniti
 # VeraLux — StarComposer
 # SPDX-License-Identifier: GPL-3.0-or-later
-# Version 2.1.2
+# Version 2.1.3
 #
 # Credits / Origin
 # ----------------
@@ -184,11 +184,14 @@ QComboBox::down-arrow { width: 0; height: 0; border-left: 4px solid transparent;
 QComboBox QAbstractItemView { background-color: #3c3c3c; color: #ffffff; selection-background-color: #285299; border: 1px solid #555555; }
 """
 
-VERSION = "2.1.2"
+VERSION = "2.1.3"
 
 # ------------------------------------------------------------------------------
 # VERSION HISTORY
 # ------------------------------------------------------------------------------
+# 2.1.3: Self-update release alignment update.
+#        - Bundled updater now installs downloaded ZIP packages in place.
+#        - Synced bundled tool version with the main application release.
 # 2.1.2: Packaging and integration maintenance update.
 #        - Synced bundled tool version with the main application release.
 #        - Keeps release ZIP metadata aligned with the shipped build.
