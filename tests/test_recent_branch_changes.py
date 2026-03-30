@@ -308,6 +308,49 @@ class StarSmallerTests(unittest.TestCase):
         self.assertLess(after_bg_error, before_bg_error * 0.35)
         self.assertGreater(float(result[core_zone].mean()), float(bg[core_zone].mean()) + 0.10)
 
+    def test_reduce_stars_rebuilds_star_without_ring_halo(self):
+        h = w = 96
+        yy, xx = np.mgrid[:h, :w]
+        bg = np.stack(
+            [
+                np.full((h, w), 0.10, dtype=np.float32),
+                np.full((h, w), 0.12, dtype=np.float32),
+                np.full((h, w), 0.14, dtype=np.float32),
+            ],
+            axis=2,
+        )
+
+        cx = cy = 48
+        r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        star = (
+            1.00 * np.exp(-r2 / (2.0 * 1.2 ** 2))
+            + 0.45 * np.exp(-r2 / (2.0 * 5.2 ** 2))
+        ).astype(np.float32)
+        img = np.clip(bg + star[:, :, None], 0.0, 1.0).astype(np.float32)
+
+        result, _mask = reduce_stars(
+            img,
+            strength=0.92,
+            sensitivity=0.5,
+            feather=3,
+            max_sigma=8,
+            min_sigma=1,
+            threshold=0.02,
+        )
+
+        rr = np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)
+        residual = np.clip(result - bg, 0.0, None).mean(axis=2)
+        bands = []
+        for lo, hi in [(0.0, 1.2), (1.2, 2.2), (2.2, 3.2), (3.2, 4.2), (4.2, 6.0)]:
+            annulus = (rr >= lo) & (rr < hi)
+            bands.append(float(residual[annulus].mean()))
+
+        self.assertGreater(bands[0], bands[1])
+        self.assertGreater(bands[1], bands[2])
+        self.assertGreaterEqual(bands[2], bands[3])
+        self.assertLess(bands[3], bands[1] * 0.12)
+        self.assertLess(bands[4], bands[1] * 0.08)
+
 
 class NoiseDispatchTests(unittest.TestCase):
     def test_noisexterminator_dispatch_uses_real_engine(self):
