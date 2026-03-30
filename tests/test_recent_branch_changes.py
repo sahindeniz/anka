@@ -16,6 +16,12 @@ from processing.stacking import _normalize_frames, _stack_weighted_mean, stack_a
 
 
 class StackingRecentChangesTests(unittest.TestCase):
+    @staticmethod
+    def _frames_with_single_outlier(count):
+        frames = [np.ones((16, 16), dtype=np.float32) for _ in range(count)]
+        frames[-1][4, 7] = 50.0
+        return frames
+
     def test_normalize_frames_matches_reference_per_channel(self):
         base = np.linspace(0.1, 2.0, 16 * 16, dtype=np.float32).reshape(16, 16)
         ref = np.stack(
@@ -70,14 +76,10 @@ class StackingRecentChangesTests(unittest.TestCase):
         self.assertEqual(progress, [(8, "Weighted mean (1/2)"), (8, "Weighted mean (2/2)")])
 
     def test_stack_aligned_auto_rejects_outlier_and_emits_progress(self):
-        frame_a = np.ones((16, 16), dtype=np.float32)
-        frame_b = np.ones((16, 16), dtype=np.float32)
-        frame_c = np.ones((16, 16), dtype=np.float32)
-        frame_c[4, 7] = 50.0
         progress = []
 
         result = stack_aligned(
-            aligned_frames=[frame_a, frame_b, frame_c],
+            aligned_frames=self._frames_with_single_outlier(3),
             method="auto",
             weight_mode="equal",
             normalization="none",
@@ -91,6 +93,42 @@ class StackingRecentChangesTests(unittest.TestCase):
         self.assertIn((8, "Percentile rejection (1/1)"), progress)
         self.assertTrue(any(step == 8 and msg.endswith("(3/3)") for step, msg in progress))
         self.assertTrue(any(msg.startswith("✅ Stacking tamamlandı") for _step, msg in progress))
+
+    def test_stack_aligned_linear_fit_rejects_outlier(self):
+        result = stack_aligned(
+            aligned_frames=self._frames_with_single_outlier(5),
+            method="linear_fit",
+            weight_mode="equal",
+            normalization="none",
+        )
+
+        self.assertEqual(result["method"], "linear_fit")
+        self.assertGreater(result["n_rejected"], 0)
+        self.assertAlmostEqual(float(result["result"][4, 7]), 1.0, places=4)
+
+    def test_stack_aligned_sigma_clip_rejects_outlier(self):
+        result = stack_aligned(
+            aligned_frames=self._frames_with_single_outlier(8),
+            method="sigma_clip",
+            weight_mode="equal",
+            normalization="none",
+        )
+
+        self.assertEqual(result["method"], "sigma_clip")
+        self.assertGreater(result["n_rejected"], 0)
+        self.assertAlmostEqual(float(result["result"][4, 7]), 1.0, places=4)
+
+    def test_stack_aligned_winsorized_sigma_rejects_outlier(self):
+        result = stack_aligned(
+            aligned_frames=self._frames_with_single_outlier(8),
+            method="winsorized_sigma",
+            weight_mode="equal",
+            normalization="none",
+        )
+
+        self.assertEqual(result["method"], "winsorized_sigma")
+        self.assertGreater(result["n_rejected"], 0)
+        self.assertAlmostEqual(float(result["result"][4, 7]), 1.0, places=4)
 
 
 class WelcomeOverlayTests(unittest.TestCase):

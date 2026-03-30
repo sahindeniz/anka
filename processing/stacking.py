@@ -517,6 +517,33 @@ def _report_progress(progress_cb: Optional[Callable], step: int,
     progress_cb(step, f"{label} ({current}/{total})")
 
 
+def _select_block_size(h: int, w: int, n_frames: int,
+                       max_block: int = 64,
+                       target_mb: int = 96,
+                       temp_buffers: int = 4) -> int:
+    """Geçici blok bellek kullanımını sınırlayacak satır yüksekliği seç."""
+    if h <= 0:
+        return 1
+    bytes_per_row = max(1, int(n_frames)) * max(1, int(w)) * 4 * max(1, int(temp_buffers))
+    max_rows = int((target_mb * 1024 * 1024) // max(1, bytes_per_row))
+    return max(1, min(int(h), int(max_block), max(1, max_rows)))
+
+
+def _robust_location_scale(values: np.ndarray, valid_mask: np.ndarray,
+                           floor: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
+    """Median + MAD tabanli robust merkez ve olcek."""
+    masked = np.where(valid_mask, values, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=RuntimeWarning)
+        center = np.nanmedian(masked, axis=0, keepdims=True)
+        abs_dev = np.abs(values - center)
+        mad = np.nanmedian(np.where(valid_mask, abs_dev, np.nan), axis=0, keepdims=True)
+    center = np.nan_to_num(center, nan=0.0).astype(np.float32, copy=False)
+    scale = np.nan_to_num(mad * 1.4826, nan=floor).astype(np.float32, copy=False)
+    scale[scale < floor] = floor
+    return center, scale
+
+
 def _fill_luminance_block(frames: List[np.ndarray], y0: int, y1: int, out: np.ndarray) -> None:
     """Verilen satır aralığı için luminance bloğunu doldur."""
     if frames[0].ndim == 3:
@@ -548,7 +575,7 @@ def _reject_sigma_clip(frames: List[np.ndarray], valid: np.ndarray,
     h, w = frames[0].shape[:2]
     n = len(frames)
 
-    block_size = max(1, min(64, h))
+    block_size = _select_block_size(h, w, n, temp_buffers=4)
     total_blocks = max(1, (h + block_size - 1) // block_size)
     for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
@@ -557,15 +584,10 @@ def _reject_sigma_clip(frames: List[np.ndarray], valid: np.ndarray,
         v_block = valid[:, y0:y1, :]  # (n, bh, w)
 
         for _ in range(iterations):
-            vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
-            vcount[vcount == 0] = 1
-            mean = np.sum(lum * v_block, axis=0, keepdims=True) / vcount
-            diff = lum - mean
-            var = np.sum(diff * diff * v_block, axis=0, keepdims=True) / vcount
-            std = np.sqrt(var)
-            std[std < 1e-8] = 1e-8
-            # Asimetrik clipping
-            v_block = v_block & (diff >= -kappa_low * std) & (diff <= kappa_high * std)
+            center, scale = _robust_location_scale(lum, v_block)
+            diff = lum - center
+            # Median + MAD tabanlı robust clipping daha iyi transient rejection verir.
+            v_block = v_block & (diff >= -kappa_low * scale) & (diff <= kappa_high * scale)
 
         valid[:, y0:y1, :] = v_block
         _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
@@ -582,7 +604,7 @@ def _reject_linear_fit(frames: List[np.ndarray], valid: np.ndarray,
     n = len(frames)
     h, w = frames[0].shape[:2]
 
-    block_size = max(1, min(64, h))
+    block_size = _select_block_size(h, w, n, temp_buffers=3)
     total_blocks = max(1, (h + block_size - 1) // block_size)
     for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
@@ -590,19 +612,36 @@ def _reject_linear_fit(frames: List[np.ndarray], valid: np.ndarray,
         _fill_luminance_block(frames, y0, y1, lum)
         v_block = valid[:, y0:y1, :]
 
-        # Median baseline
-        vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
-        vcount[vcount == 0] = 1
-        mean = np.sum(lum * v_block, axis=0, keepdims=True) / vcount
+        reference, _ = _robust_location_scale(lum, v_block)
+        reference = reference[0]
 
-        # Residual = frame - mean
-        residual = lum - mean
-        res_var = np.sum(residual * residual * v_block, axis=0, keepdims=True) / vcount
-        res_std = np.sqrt(res_var)
-        res_std[res_std < 1e-8] = 1e-8
+        for i in range(n):
+            valid_i = v_block[i]
+            if int(np.sum(valid_i)) < 16:
+                continue
 
-        # Linear fit residual clipping
-        v_block = v_block & (residual >= -kappa_low * res_std) & (residual <= kappa_high * res_std)
+            x = lum[i][valid_i].astype(np.float64, copy=False)
+            y = reference[valid_i].astype(np.float64, copy=False)
+            x_med = float(np.median(x))
+            y_med = float(np.median(y))
+            x_center = x - x_med
+            denom = float(np.dot(x_center, x_center))
+            if denom > 1e-12:
+                slope = float(np.dot(x_center, y - y_med) / denom)
+            else:
+                slope = 1.0
+            slope = float(np.clip(slope, 0.25, 4.0))
+            intercept = y_med - slope * x_med
+
+            residual = lum[i] * slope + intercept - reference
+            residual_valid = residual[valid_i]
+            res_med = float(np.median(residual_valid))
+            res_mad = float(np.median(np.abs(residual_valid - res_med))) * 1.4826
+            res_scale = max(res_mad, 1e-8)
+            v_block[i] = valid_i & (
+                (residual >= (res_med - kappa_low * res_scale)) &
+                (residual <= (res_med + kappa_high * res_scale))
+            )
 
         valid[:, y0:y1, :] = v_block
         _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
@@ -619,7 +658,7 @@ def _reject_percentile(frames: List[np.ndarray], valid: np.ndarray,
     n = len(frames)
     h, w = frames[0].shape[:2]
 
-    block_size = max(1, min(64, h))
+    block_size = _select_block_size(h, w, n, temp_buffers=4)
     total_blocks = max(1, (h + block_size - 1) // block_size)
     for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
@@ -653,7 +692,7 @@ def _reject_winsorized_sigma(frames: List[np.ndarray], valid: np.ndarray,
     n = len(frames)
     h, w = frames[0].shape[:2]
 
-    block_size = max(1, min(64, h))
+    block_size = _select_block_size(h, w, n, temp_buffers=5)
     total_blocks = max(1, (h + block_size - 1) // block_size)
     for block_idx, y0 in enumerate(range(0, h, block_size), start=1):
         y1 = min(y0 + block_size, h)
@@ -662,8 +701,6 @@ def _reject_winsorized_sigma(frames: List[np.ndarray], valid: np.ndarray,
         v_block = valid[:, y0:y1, :]
 
         for _ in range(iterations):
-            vcount = np.sum(v_block, axis=0, keepdims=True).astype(np.float32)
-            vcount[vcount == 0] = 1
             # Winsorized mean: clip extremes before computing mean
             masked_lum = np.where(v_block, lum, np.nan)
             with warnings.catch_warnings():
@@ -673,12 +710,9 @@ def _reject_winsorized_sigma(frames: List[np.ndarray], valid: np.ndarray,
             lo_bound = np.nan_to_num(lo_bound, nan=0.0)
             hi_bound = np.nan_to_num(hi_bound, nan=1.0)
             winsorized = np.clip(lum, lo_bound, hi_bound)
-            mean = np.sum(winsorized * v_block, axis=0, keepdims=True) / vcount
-            diff = lum - mean
-            var = np.sum(diff * diff * v_block, axis=0, keepdims=True) / vcount
-            std = np.sqrt(var)
-            std[std < 1e-8] = 1e-8
-            v_block = v_block & (diff >= -kappa_low * std) & (diff <= kappa_high * std)
+            center, scale = _robust_location_scale(winsorized, v_block)
+            diff = lum - center
+            v_block = v_block & (diff >= -kappa_low * scale) & (diff <= kappa_high * scale)
 
         valid[:, y0:y1, :] = v_block
         _report_progress(progress_cb, 8, progress_label, block_idx, total_blocks)
