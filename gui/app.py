@@ -6953,15 +6953,15 @@ class AstroApp(QMainWindow):
                     "nlm              — Non-local means\n"
                     "noisexterminator — Wavelet astro gurultu\n"
                     "graxpert         — GraXpert AI (exe gerekli)")
-        p.add_slider("strength","Strength",0,1,0.7,2)
-        p.add_slider("detail","Detail Preserve",0,1,0.5,2,
+        p.add_slider("strength","Strength",0,1,0.30,2)
+        p.add_slider("detail","Detail Preserve",0,1,0.75,2,
                      "Yuksek = detay koru (noisexterminator)")
-        p.add_slider("modulation","Modulation",0,1,1.0,2,
+        p.add_slider("modulation","Modulation",0,1,0.50,2,
                      "Mastro Noise blend (0=orijinal, 1=tam denoise)")
         p.add_slider("iterations","Iterations",1,5,1,0)
-        p._params["strength"][0].sp.setValue(0.45)
-        p._params["detail"][0].sp.setValue(0.65)
-        p._params["modulation"][0].sp.setValue(0.65)
+        p._params["strength"][0].sp.setValue(0.55)
+        p._params["detail"][0].sp.setValue(0.75)
+        p._params["modulation"][0].sp.setValue(0.50)
         p.run_requested.connect(lambda s,k="noise": self._run_key(k,s))
 
         # Deconvolution
@@ -6987,22 +6987,22 @@ class AstroApp(QMainWindow):
 
         # Star Smaller (Deconv panelinin altinda)
         p = _make("⭐","Star Smaller","stars")
-        p.add_slider("strength","Strength",0,1,0.9,2,
+        p.add_slider("strength","Strength",0,1,0.55,2,
                      "Yıldız küçültme gücü (0=yok, 1=maksimum)")
-        p.add_slider("sensitivity","Sensitivity",0,1,0.5,2,
+        p.add_slider("sensitivity","Sensitivity",0,1,0.48,2,
                      "Yıldız tespiti hassasiyeti")
-        p.add_slider("feather","Feather Radius",1,10,3,1,
+        p.add_slider("feather","Feather Radius",1,10,4,1,
                      "Kenar yumuşatma piksel")
         p.add_check("protect_nebula","Nebula/Galaksi Koru", True)
         p.add_sep()
-        p.add_slider("max_sigma","Max Sigma",1,25,6,0,
+        p.add_slider("max_sigma","Max Sigma",1,25,7,0,
                      "DoG filtre max sigma")
         p.add_slider("min_sigma","Min Sigma",1,10,1,0,
                      "DoG filtre min sigma")
-        p.add_slider("threshold","Threshold",0.001,0.3,0.03,3,
+        p.add_slider("threshold","Threshold",0.001,0.3,0.025,3,
                      "Yıldız tespit eşiği")
-        p._params["strength"][0].sp.setValue(0.45)
-        p._params["sensitivity"][0].sp.setValue(0.55)
+        p._params["strength"][0].sp.setValue(0.30)
+        p._params["sensitivity"][0].sp.setValue(0.48)
         p._params["feather"][0].sp.setValue(4)
         p._params["max_sigma"][0].sp.setValue(7)
         p._params["threshold"][0].sp.setValue(0.025)
@@ -7010,21 +7010,21 @@ class AstroApp(QMainWindow):
 
         # Halo Reduction
         p = _make("◌","Halo Reduction","halo")
-        p.add_slider("denoise_strength","BG Denoise",0,1,0.25,2,
+        p.add_slider("denoise_strength","BG Denoise",0,1,0.12,2,
                      "Starless/background katmanina hafif denoise uygular")
-        p.add_slider("halo_strength","Halo Reduction",0,1,0.15,2,
+        p.add_slider("halo_strength","Halo Reduction",0,1,0.28,2,
                      "Sadece dis halo omzunu kisar, cekirdegi tam silmez")
-        p.add_slider("core_protect","Core Protect",0,1,0.70,2,
+        p.add_slider("core_protect","Core Protect",0,1,0.88,2,
                      "Parlak yildiz cekirdeklerini orijinale daha yakin tutar")
-        p.add_slider("chroma_cleanup","Color Halo",0,1,0.35,2,
+        p.add_slider("chroma_cleanup","Color Halo",0,1,0.22,2,
                      "Mor/yesil renk fringe temizligi")
-        p.add_slider("recompose_opacity","Screen Opacity",0.5,1.0,0.90,2,
+        p.add_slider("recompose_opacity","Screen Opacity",0.5,1.0,0.93,2,
                      "Tam sifir halo yerine hafif dogal glow birakmak icin dusur")
-        p._params["denoise_strength"][0].sp.setValue(0.25)
-        p._params["halo_strength"][0].sp.setValue(0.15)
-        p._params["core_protect"][0].sp.setValue(0.72)
-        p._params["chroma_cleanup"][0].sp.setValue(0.35)
-        p._params["recompose_opacity"][0].sp.setValue(0.90)
+        p._params["denoise_strength"][0].sp.setValue(0.12)
+        p._params["halo_strength"][0].sp.setValue(0.28)
+        p._params["core_protect"][0].sp.setValue(0.88)
+        p._params["chroma_cleanup"][0].sp.setValue(0.22)
+        p._params["recompose_opacity"][0].sp.setValue(0.93)
         p.run_requested.connect(lambda s,k="halo": self._run_key(k,s))
 
         # Star Shrink (dedicated panel)
@@ -8326,6 +8326,8 @@ class AstroApp(QMainWindow):
                     import numpy as _np
                     import cv2 as _cv2
                     from processing.veralux_nox import NoxCore
+                    strength = float(kw.get("strength", 0.30))
+                    detail = float(kw.get("detail", 0.75))
                     pcb = kw.get("_progress_cb")
                     stiffness  = float(kw.get("grid_size", 0.5))   # 0-1
                     aggression = float(kw.get("poly_degree", 50.0)) # percentile
@@ -8402,6 +8404,8 @@ class AstroApp(QMainWindow):
                 def graxpert_fn(img, **kw):
                     import cv2 as _cv2
                     from ai.graxpert_bridge import run_graxpert
+                    strength = float(kw.get("strength", 0.30))
+                    detail = float(kw.get("detail", 0.75))
                     pcb = kw.get("_progress_cb")
                     def _cb(msg):
                         if pcb:
@@ -8441,12 +8445,15 @@ class AstroApp(QMainWindow):
                 def _mastro_noise_fn(img, **kw):
                     import numpy as _np
                     from processing.mastro_noise import process_denoise
-                    modulation = float(kw.get("modulation", 1.0))
+                    modulation = float(kw.get("modulation", 0.5))
+                    strength = float(kw.get("strength", 0.30))
+                    detail = float(kw.get("detail", 0.75))
                     pcb = kw.get("_progress_cb")
                     def _cb(v):
                         if pcb: pcb(f"[{v}/100] Mastro Noise…", step=v, total=100)
                     r = process_denoise(img, tile=256, overlap=32,
-                                        modulation=modulation, use_gpu=True,
+                                        modulation=modulation, strength=strength,
+                                        detail_preserve=detail, use_gpu=True,
                                         progress_callback=_cb)
                     return _np.clip(r, 0, 1).astype("float32")
                 self._run_worker(key, _mastro_noise_fn, params)
@@ -8482,6 +8489,8 @@ class AstroApp(QMainWindow):
                     from processing.noisexterminator import noisexterminator
                     strength = float(kw.get("strength", 0.7))
                     detail   = float(kw.get("detail",   0.5))
+                    strength = float(kw.get("strength", 0.30))
+                    detail = float(kw.get("detail", 0.75))
                     pcb = kw.get("_progress_cb")
                     def _log(msg):
                         if pcb: pcb(msg)
@@ -8539,6 +8548,8 @@ class AstroApp(QMainWindow):
                 def graxpert_denoise_fn(img, **kw):
                     import cv2 as _cv2
                     from ai.graxpert_bridge import run_graxpert
+                    strength = float(kw.get("strength", 0.30))
+                    detail = float(kw.get("detail", 0.75))
                     pcb = kw.get("_progress_cb")
                     def _cb(msg):
                         if pcb:
@@ -8578,6 +8589,8 @@ class AstroApp(QMainWindow):
                 def starnet_fn(img, **kw):
                     from ai.starnet_bridge import run_starnet
                     # Wire _progress_cb from Worker to run_starnet's progress_cb
+                    strength = float(kw.get("strength", 0.30))
+                    detail = float(kw.get("detail", 0.75))
                     pcb = kw.get("_progress_cb")
                     def sn_cb(msg):
                         if pcb:

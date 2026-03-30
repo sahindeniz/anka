@@ -12,12 +12,12 @@ import numpy as np
 
 def reduce_stars(
     image,
-    strength=0.9,
-    sensitivity=0.5,
-    feather=3,
-    max_sigma=6,
+    strength=0.55,
+    sensitivity=0.48,
+    feather=4,
+    max_sigma=7,
     min_sigma=1,
-    threshold=0.03,
+    threshold=0.025,
     protect_nebula=True,
     **kw,
 ):

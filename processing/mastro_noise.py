@@ -51,6 +51,9 @@ def process_denoise(
     tile: int = 512,
     overlap: int = 64,
     modulation: float = 1.0,
+    strength: Optional[float] = None,
+    detail_preserve: Optional[float] = None,
+    detail: Optional[float] = None,
     use_gpu: bool = True,
     model_path: Optional[str] = None,
     progress_callback: Optional[Callable[[int], None]] = None,
@@ -67,17 +70,20 @@ def process_denoise(
 
     image = np.clip(np.asarray(img, dtype=np.float32), 0, 1)
     mix = float(np.clip(modulation, 0, 1))
+    denoise_strength = float(np.clip(strength, 0, 1)) if strength is not None else 0.22 + 0.58 * mix
+    detail_amount = detail_preserve if detail_preserve is not None else detail
+    if detail_amount is None:
+        detail_amount = max(0.25, 0.78 - 0.20 * mix)
+    detail_amount = float(np.clip(detail_amount, 0, 1))
 
     _emit_progress(progress_callback, 5)
     work, original_size, was_downscaled = _resize_limit(image, _CPU_MAX_PX)
 
     _emit_progress(progress_callback, 20)
-    denoise_strength = 0.22 + 0.58 * mix
-    detail_preserve = max(0.25, 0.78 - 0.20 * mix)
     denoised, _meta = noisexterminator(
         work,
         strength=denoise_strength,
-        detail=detail_preserve,
+        detail=detail_amount,
     )
 
     _emit_progress(progress_callback, 72)
@@ -85,7 +91,7 @@ def process_denoise(
         denoised = cv2.resize(denoised, original_size, interpolation=cv2.INTER_LANCZOS4)
 
     _emit_progress(progress_callback, 88)
-    denoised = _preserve_detail(image, denoised, amount=0.16)
+    denoised = _preserve_detail(image, denoised, amount=0.08 + 0.16 * detail_amount)
     result = image * (1.0 - mix) + denoised * mix
 
     _emit_progress(progress_callback, 100)

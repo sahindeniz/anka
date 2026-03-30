@@ -58,11 +58,11 @@ def _core_recovery_mask(stars: np.ndarray) -> np.ndarray:
 
 def reduce_halos(
     image: np.ndarray,
-    denoise_strength: float = 0.25,
-    halo_strength: float = 0.15,
-    chroma_cleanup: float = 0.35,
-    core_protect: float = 0.70,
-    recompose_opacity: float = 0.90,
+    denoise_strength: float = 0.12,
+    halo_strength: float = 0.28,
+    chroma_cleanup: float = 0.22,
+    core_protect: float = 0.88,
+    recompose_opacity: float = 0.93,
     blend_mode: str = "screen",
     _progress_cb: Optional[Callable[..., None]] = None,
     **_kw: Any,
