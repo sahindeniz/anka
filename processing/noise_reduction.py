@@ -32,7 +32,7 @@ def reduce_noise(image, strength=0.7, method="bilateral", iterations=1,
     if method == "silentium":
         try:
             from processing.veralux_silentium import denoise_silentium
-            result = denoise_silentium(img, strength=s)
+            result = denoise_silentium(img, strength=s, detail=detail)
             return np.clip(result, 0, 1).astype(np.float32)
         except Exception as e:
             print(f"[NOISE] silentium failed ({e}), fallback to bilateral", flush=True)
@@ -41,7 +41,7 @@ def reduce_noise(image, strength=0.7, method="bilateral", iterations=1,
     if method == "noisexterminator":
         try:
             from processing.noisexterminator import denoise as _nx_denoise
-            result = _nx_denoise(img, strength=s, detail_preserve=detail)
+            result, _meta = _nx_denoise(img, strength=s, detail_preserve=detail)
             return np.clip(result, 0, 1).astype(np.float32)
         except Exception as e:
             print(f"[NOISE] noisexterminator failed ({e}), fallback to bilateral", flush=True)

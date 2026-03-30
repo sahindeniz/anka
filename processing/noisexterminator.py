@@ -67,3 +67,8 @@ def _wavelet_denoise(channel, strength, detail):
 def _estimate_noise(detail_band):
     """MAD-based noise estimate from finest detail coefficients."""
     return float(np.median(np.abs(detail_band))) / 0.6745
+
+
+def denoise(image, strength=0.7, detail_preserve=0.5, **kw):
+    """Compatibility wrapper used by generic noise dispatch."""
+    return noisexterminator(image, strength=strength, detail=detail_preserve, **kw)

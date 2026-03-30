@@ -1,5 +1,7 @@
 import sys
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +14,10 @@ if str(ROOT) not in sys.path:
 from gui.bg_composer import generate_welcome_overlay
 from processing.mastro_noise import process_denoise
 from processing.mastro_starless import process_starless
+from processing.noise_reduction import reduce_noise
 from processing.stacking import _normalize_frames, _stack_weighted_mean, stack_aligned
+from processing.noisexterminator import denoise as denoise_noisexterminator
+from processing.veralux_silentium import denoise_silentium
 
 
 class StackingRecentChangesTests(unittest.TestCase):
@@ -184,6 +189,30 @@ class MastroSelfContainedTests(unittest.TestCase):
         self.assertEqual(mask.dtype, np.float32)
         self.assertEqual(progress[-1], 100)
         self.assertLess(float(starless[48, 48, 0]), float(img[48, 48, 0]))
+
+
+class NoiseDispatchTests(unittest.TestCase):
+    def test_noisexterminator_dispatch_uses_real_engine(self):
+        img = np.random.default_rng(3).random((32, 32, 3), dtype=np.float32)
+        direct, _meta = denoise_noisexterminator(img, strength=0.4, detail_preserve=0.6)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            dispatched = reduce_noise(img, method="noisexterminator", strength=0.4, detail=0.6)
+
+        self.assertEqual(direct.shape, dispatched.shape)
+        self.assertNotIn("noisexterminator failed", buf.getvalue())
+        np.testing.assert_allclose(dispatched, direct, rtol=1e-6, atol=1e-6)
+
+    def test_silentium_dispatch_uses_real_engine(self):
+        img = np.random.default_rng(4).random((24, 24, 3), dtype=np.float32)
+        direct = denoise_silentium(img, strength=0.35, detail=0.55)
+        buf = StringIO()
+        with redirect_stdout(buf):
+            dispatched = reduce_noise(img, method="silentium", strength=0.35, detail=0.55)
+
+        self.assertEqual(direct.shape, dispatched.shape)
+        self.assertNotIn("silentium failed", buf.getvalue())
+        np.testing.assert_allclose(dispatched, direct, rtol=1e-6, atol=1e-6)
 
 
 if __name__ == "__main__":

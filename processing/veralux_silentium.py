@@ -2223,5 +2223,40 @@ def main():
     app.exec()
 
 
+def denoise_silentium(image, strength=0.7, detail=0.5, **kw):
+    """Lightweight wrapper for generic noise reduction dispatch."""
+    img = np.clip(np.asarray(image, dtype=np.float32), 0, 1)
+    intensity = int(round(float(np.clip(strength, 0, 1)) * 100.0))
+    detail_guard = int(round(float(np.clip(detail, 0, 1)) * 100.0))
+    chroma_strength = int(round(float(np.clip(kw.get("chroma_strength", strength), 0, 1)) * 100.0))
+    deep_smooth = int(round(float(np.clip(kw.get("deep_smooth", 0.0), 0, 1)) * 100.0))
+
+    if img.ndim == 3:
+        chw = np.moveaxis(img, -1, 0)
+        out = SilentiumCore.apply_noise_reduction(
+            chw,
+            intensity,
+            detail_guard,
+            use_adaptive_noise=True,
+            star_mask=kw.get("star_mask"),
+            enable_chroma=True,
+            chroma_strength=chroma_strength,
+            deep_smooth=deep_smooth,
+        )
+        return np.moveaxis(np.clip(out, 0, 1), 0, -1).astype(np.float32)
+
+    out = SilentiumCore.apply_noise_reduction(
+        img,
+        intensity,
+        detail_guard,
+        use_adaptive_noise=True,
+        star_mask=kw.get("star_mask"),
+        enable_chroma=False,
+        chroma_strength=0,
+        deep_smooth=deep_smooth,
+    )
+    return np.clip(out, 0, 1).astype(np.float32)
+
+
 if __name__ == "__main__":
     main()
