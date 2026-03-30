@@ -211,14 +211,22 @@ class HistogramWidget(QWidget):
             mx = hdata.max()
             if mx == 0: continue
             norm = hdata / mx
-            bar_w = max(1, r.width() / 256)
+            bar_w = max(1.0, r.width() / 256)
             col = QColor(color); col.setAlphaF(alpha)
             p.setPen(Qt.PenStyle.NoPen); p.setBrush(QBrush(col))
+            path = QPainterPath()
+            path.moveTo(r.left(), r.bottom())
+            rh = r.height()
+            rl = r.left()
+            rb = r.bottom()
             for i, v in enumerate(norm):
-                bh = int(v * r.height())
-                if bh < 1: continue
-                bx = r.left() + int(i * bar_w)
-                p.drawRect(bx, r.bottom() - bh, max(1, int(bar_w)), bh)
+                bh = v * rh
+                bx = rl + i * bar_w
+                path.lineTo(bx, rb - bh)
+                path.lineTo(bx + bar_w, rb - bh)
+            path.lineTo(rl + 256 * bar_w, rb)
+            path.closeSubpath()
+            p.drawPath(path)
 
         # Border
         pen = QPen(QColor(BORDER)); pen.setWidth(1); p.setPen(pen)
@@ -367,6 +375,9 @@ class CurvesWidget(QWidget):
         self._hover_idx = None
         self._pad = 24
         self._coord_label = None   # (wx, wy, text)
+        self._cached_bg_size = None  # (W, H) for gradient cache
+        self._cached_bg_grad = None
+        self._cached_inner_grad = None
 
     def set_image(self, img):
         if img is None: self._hdata = {}; self.update(); return
@@ -433,18 +444,20 @@ class CurvesWidget(QWidget):
         ch   = self._ch
         glow = self._GLOW.get(ch, self._GLOW["L"])
 
-        # ── Background gradient ──
-        bg_grad = QLinearGradient(0, 0, 0, H)
-        bg_grad.setColorAt(0, QColor("#060e18"))
-        bg_grad.setColorAt(1, QColor("#0a1a2e"))
-        p.fillRect(0, 0, W, H, QBrush(bg_grad))
+        # ── Background gradient (cached) ──
+        if self._cached_bg_size != (W, H):
+            self._cached_bg_size = (W, H)
+            self._cached_bg_grad = QLinearGradient(0, 0, 0, H)
+            self._cached_bg_grad.setColorAt(0, QColor("#060e18"))
+            self._cached_bg_grad.setColorAt(1, QColor("#0a1a2e"))
+            self._cached_inner_grad = QLinearGradient(pad, pad, pad, H-pad)
+            self._cached_inner_grad.setColorAt(0, QColor("#081520"))
+            self._cached_inner_grad.setColorAt(0.5, QColor("#0c1c30"))
+            self._cached_inner_grad.setColorAt(1, QColor("#081520"))
+        p.fillRect(0, 0, W, H, QBrush(self._cached_bg_grad))
 
         inner = QRect(pad, pad, W-2*pad, H-2*pad)
-        inner_grad = QLinearGradient(pad, pad, pad, H-pad)
-        inner_grad.setColorAt(0, QColor("#081520"))
-        inner_grad.setColorAt(0.5, QColor("#0c1c30"))
-        inner_grad.setColorAt(1, QColor("#081520"))
-        p.fillRect(inner, QBrush(inner_grad))
+        p.fillRect(inner, QBrush(self._cached_inner_grad))
 
         # ── Grid — subtle ──
         pen = QPen(QColor("#152535")); pen.setWidth(1); p.setPen(pen)

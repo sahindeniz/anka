@@ -174,9 +174,9 @@ def _calc_sample_values(image: np.ndarray, points: np.ndarray,
             patch = image[y0:y1, x0:x1].ravel()
             values[i, 0] = _sigma_clipped_median(patch)
         else:
+            region = image[y0:y1, x0:x1]  # (ph, pw, C)
             for c in range(n_channels):
-                patch = image[y0:y1, x0:x1, c].ravel()
-                values[i, c] = _sigma_clipped_median(patch)
+                values[i, c] = _sigma_clipped_median(region[:, :, c].ravel())
 
     return values
 
@@ -271,12 +271,18 @@ def _interpolate_rbf(points: np.ndarray, values: np.ndarray,
     GY, GX = np.meshgrid(gy, gx, indexing='ij')
     grid_pts = np.stack([GY.ravel(), GX.ravel()], axis=1)  # (gh*gw, 2)
 
-    # Distances from grid to sample points
-    diffs = grid_pts[:, np.newaxis, :] - pts[np.newaxis, :, :]  # (M, N, 2)
-    dists = np.sqrt((diffs ** 2).sum(axis=2))  # (M, N)
-
-    Kg = _rbf_kernel(dists, kernel)  # (M, N)
-    bg_flat = Kg @ w_rbf + c_poly[0] + grid_pts[:, 0] * c_poly[1] + grid_pts[:, 1] * c_poly[2]
+    # Distances from grid to sample points — chunked to reduce memory
+    M = len(grid_pts)
+    bg_flat = np.empty(M, dtype=np.float64)
+    poly_offset = c_poly[0] + grid_pts[:, 0] * c_poly[1] + grid_pts[:, 1] * c_poly[2]
+    CHUNK = max(1, 65536 // max(N, 1))
+    for start in range(0, M, CHUNK):
+        end = min(start + CHUNK, M)
+        chunk = grid_pts[start:end]
+        diffs = chunk[:, np.newaxis, :] - pts[np.newaxis, :, :]
+        dists = np.sqrt((diffs ** 2).sum(axis=2))
+        Kg = _rbf_kernel(dists, kernel)
+        bg_flat[start:end] = Kg @ w_rbf + poly_offset[start:end]
     bg_small = bg_flat.reshape(gh, gw).astype(np.float32)
 
     # Upscale to original size

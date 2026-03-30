@@ -82,9 +82,7 @@ def _spcc(img: np.ndarray, reference_rgb: np.ndarray) -> np.ndarray:
     bg_mask = gray < bg_percentile
 
     # Arka plan notralizasyonu
-    bg = np.array([
-        float(np.median(img[:,:,c][bg_mask])) for c in range(3)
-    ]) + 1e-9
+    bg = np.median(img[bg_mask], axis=0).astype(np.float64) + 1e-9
 
     # ── 2. Yildiz tespiti (kucuk resimde hizli) ───────────────────────────────
     SCALE = 512
@@ -114,7 +112,7 @@ def _spcc(img: np.ndarray, reference_rgb: np.ndarray) -> np.ndarray:
                 x0,x1 = max(0,cx-r), min(sw,cx+r+1)
                 patch = small[y0:y1, x0:x1]
                 if patch.size > 0:
-                    star_colors.append([float(patch[:,:,c].mean()) for c in range(3)])
+                    star_colors.append(patch.mean(axis=(0, 1)).tolist())
 
     if len(star_colors) < 5:
         # Yetersiz yildiz — sadece background neutralize et
@@ -122,7 +120,7 @@ def _spcc(img: np.ndarray, reference_rgb: np.ndarray) -> np.ndarray:
         img_bg = np.clip(img_bg, 0, 1)
         # Referans oranina gore scale
         ref_norm = reference_rgb / reference_rgb.max()
-        means = np.array([float(img_bg[:,:,c].mean()) for c in range(3)]) + 1e-9
+        means = img_bg.mean(axis=(0, 1)).astype(np.float64) + 1e-9
         gains = (means.mean() * ref_norm) / means
         gains = np.clip(gains / gains.max(), 0.5, 2.0)
         return np.clip(img_bg * gains[None,None,:], 0, 1).astype(np.float32)
@@ -155,9 +153,8 @@ def _spcc(img: np.ndarray, reference_rgb: np.ndarray) -> np.ndarray:
     result -= bg[None,None,:] * 0.3
     result  = np.clip(result, 0, 1)
 
-    # Kazanc uygula
-    for c in range(3):
-        result[:,:,c] *= gains[c]
+    # Kazanc uygula (vectorized)
+    result *= gains[None, None, :]
 
     # Yeniden normalize (parlaklik koru)
     orig_mean = img.mean()
@@ -286,7 +283,7 @@ def _detect_stars_for_pcc(img):
                 x0, x1 = max(0, int(cx) - r), min(sw, int(cx) + r + 1)
                 patch = small[y0:y1, x0:x1]
                 if patch.size > 0:
-                    rgb = [float(patch[:, :, c].mean()) for c in range(3)]
+                    rgb = patch.mean(axis=(0, 1)).tolist()
                     brightness = sum(rgb) / 3.0
                     # Orijinal koordinatlara dönüştür
                     ox = cx / scale
@@ -506,9 +503,7 @@ def _apply_catalog_calibration(img, matched):
     # ── Arka plan notralizasyonu ──
     gray = img.mean(axis=2)
     bg_mask = gray < np.percentile(gray, 25)
-    bg = np.array([
-        float(np.median(img[:, :, c][bg_mask])) for c in range(3)
-    ]) + 1e-9
+    bg = np.median(img[bg_mask], axis=0).astype(np.float64) + 1e-9
 
     # ── Kazanç hesapla ──
     img_rgbs = np.array([m[0] for m in matched])  # (N, 3)

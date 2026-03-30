@@ -258,11 +258,18 @@ def _build_master(paths: List[str], method: str = "median",
         return None
     from core.loader import load_image
 
-    frames = []
-    for i, p in enumerate(paths):
-        if progress_cb:
-            progress_cb(label, f"{i+1}/{len(paths)} yukleniyor…")
-        frames.append(load_image(p))
+    n = len(paths)
+    frames = [None] * n
+
+    def _load(idx_path):
+        i, p = idx_path
+        return i, load_image(p)
+
+    with ThreadPoolExecutor(max_workers=_N_WORKERS) as pool:
+        for i, img in pool.map(_load, enumerate(paths)):
+            frames[i] = img
+            if progress_cb:
+                progress_cb(label, f"{i+1}/{n} yukleniyor…")
 
     stack = np.stack(frames, axis=0)
     if method == "median":
@@ -864,20 +871,28 @@ def align_frames_only(
 
     # ── 2. Tüm kareleri yükle + kalibre et + kalite skoru ──
     cb(4, f"{n} kare yükleniyor ve kalibre ediliyor…")
-    frames = []
-    frame_infos = []
-    for i, p in enumerate(light_paths):
-        cb(4, f"Kare {i+1}/{n}: {os.path.basename(p)}")
+
+    def _load_and_calibrate(idx_path):
+        i, p = idx_path
         img = load_image(p)
         img = _calibrate_frame(img, master_dark, master_flat, master_bias)
-
-        # Kalite skoru hesapla
         sc = score_frame(img)
         sc["path"] = p
         sc["name"] = os.path.basename(p)
         sc["index"] = i
         sc["status"] = "ok"
+        return i, img, sc
 
+    # Paralel yükle + kalibre et
+    loaded = [None] * n
+    with ThreadPoolExecutor(max_workers=_N_WORKERS) as pool:
+        for i, img, sc in pool.map(_load_and_calibrate, enumerate(light_paths)):
+            loaded[i] = (img, sc)
+            cb(4, f"Kare {i+1}/{n}: {os.path.basename(light_paths[i])}")
+
+    frames = []
+    frame_infos = []
+    for i, (img, sc) in enumerate(loaded):
         # Düşük kalite uyarısı
         if sc["score"] < quality_threshold:
             sc["status"] = "low_quality"

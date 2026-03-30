@@ -26,18 +26,19 @@ def _fix_hot_pixels_bayer(raw, sigma=5.0):
     import cv2
     h, w = raw.shape
     out = raw.copy()
-    # Her 2x2 Bayer pozisyonu için ayrı ayrı işle
+    # Tüm 4 Bayer kanalını birleştirip tek seferde std hesapla
+    bayer_channels = []
     for dy in range(2):
         for dx in range(2):
-            ch = raw[dy::2, dx::2].astype(np.float32)
-            # Aynı kanal komşuları ile median (5x5 → gerçek 3x3 komşu)
-            med = cv2.medianBlur(ch, 5)
-            diff = np.abs(ch - med)
-            std = max(float(np.std(ch)), 1e-6)
-            # Medyandan sigma*std kadar sapan pikseller → hot/dead
-            bad = diff > (sigma * std)
-            ch_fixed = np.where(bad, med, ch)
-            out[dy::2, dx::2] = ch_fixed.astype(raw.dtype)
+            bayer_channels.append((dy, dx, raw[dy::2, dx::2].astype(np.float32)))
+
+    for dy, dx, ch in bayer_channels:
+        med = cv2.medianBlur(ch, 5)
+        diff = np.abs(ch - med)
+        std = max(float(np.std(diff)), 1e-6)
+        bad = diff > (sigma * std)
+        np.copyto(ch, med, where=bad)
+        out[dy::2, dx::2] = ch.astype(raw.dtype)
     return out
 
 # All RAW extensions supported by rawpy / libraw

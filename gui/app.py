@@ -8297,7 +8297,7 @@ class AstroApp(QMainWindow):
             return
 
         if key == "stretch":
-            method = params.get("method","veralux")
+            method = params.get("method","auto_stf")
             if method == "veralux":
                 sensor = params.get("vl_sensor", "Rec.709")
                 tb     = float(params.get("vl_target_bg", 0.20))

@@ -1,10 +1,11 @@
 """
-Astro Maestro Pro — NoiseXterminator  (optimised v3)
-Wavelet-based noise suppression — fully vectorised, uint16 wavelets.
+Astro Maestro Pro — NoiseXterminator  (optimised v4)
+Wavelet-based noise suppression — fully vectorised, parallel channels.
 """
 import cv2
 import numpy as np
 import pywt
+from concurrent.futures import ThreadPoolExecutor
 
 
 def noisexterminator(image, strength=0.7, detail=0.5, **kw):
@@ -16,8 +17,11 @@ def noisexterminator(image, strength=0.7, detail=0.5, **kw):
     if img.ndim == 2:
         denoised = _wavelet_denoise(img, s, d)
     else:
-        # İşle: tüm kanalları tek seferde (paralel daha hızlı)
-        channels = [_wavelet_denoise(img[:, :, c], s, d) for c in range(img.shape[2])]
+        n_ch = img.shape[2]
+        def _do(c):
+            return _wavelet_denoise(img[:, :, c], s, d)
+        with ThreadPoolExecutor(max_workers=min(n_ch, 3)) as pool:
+            channels = list(pool.map(_do, range(n_ch)))
         denoised = np.stack(channels, axis=2)
 
     np.clip(denoised, 0, 1, out=denoised)
@@ -39,7 +43,7 @@ def _wavelet_denoise(channel, strength, detail):
     # Wavelet dönüşümü
     wavelet = 'db4'
     level   = min(4, pywt.dwt_max_level(min(ch.shape), wavelet))
-    coeffs  = pywt.wavedec2(ch.astype(np.float64), wavelet, level=level)
+    coeffs  = pywt.wavedec2(ch, wavelet, level=level)
 
     # Adaptive threshold
     sigma = _estimate_noise(coeffs[-1][0])
