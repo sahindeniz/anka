@@ -244,17 +244,16 @@ class HaloReductionTests(unittest.TestCase):
 
         result = reduce_halos(
             img,
-            denoise_strength=0.0,
-            halo_strength=0.35,
-            chroma_cleanup=0.0,
+            halo_strength=0.50,
             core_protect=0.85,
-            recompose_opacity=1.0,
+            halo_radius=3.5,
+            sensitivity=0.50,
+            chroma_reduce=0.0,
         )
 
         self.assertEqual(result["result"].shape, img.shape)
-        self.assertEqual(result["starless"].shape, img.shape)
-        self.assertEqual(result["stars"].shape, img.shape)
         self.assertEqual(result["result"].dtype, np.float32)
+        self.assertIn("halo_mask", result)
         self.assertLess(
             float(result["result"][annulus].mean()),
             float(img[annulus].mean()),

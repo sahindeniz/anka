@@ -7026,21 +7026,21 @@ class AstroApp(QMainWindow):
 
         # Halo Reduction
         p = _make("◌","Halo Reduction","halo")
-        p.add_slider("denoise_strength","BG Denoise",0,1,0.12,2,
-                     "Starless/background katmanina hafif denoise uygular")
-        p.add_slider("halo_strength","Halo Reduction",0,1,0.28,2,
-                     "Sadece dis halo omzunu kisar, cekirdegi tam silmez")
-        p.add_slider("core_protect","Core Protect",0,1,0.88,2,
-                     "Parlak yildiz cekirdeklerini orijinale daha yakin tutar")
-        p.add_slider("chroma_cleanup","Color Halo",0,1,0.22,2,
-                     "Mor/yesil renk fringe temizligi")
-        p.add_slider("recompose_opacity","Screen Opacity",0.5,1.0,0.93,2,
-                     "Tam sifir halo yerine hafif dogal glow birakmak icin dusur")
-        p._params["denoise_strength"][0].sp.setValue(0.12)
-        p._params["halo_strength"][0].sp.setValue(0.28)
-        p._params["core_protect"][0].sp.setValue(0.88)
-        p._params["chroma_cleanup"][0].sp.setValue(0.22)
-        p._params["recompose_opacity"][0].sp.setValue(0.93)
+        p.add_slider("halo_strength","Halo Gücü",0,1,0.50,2,
+                     "Haloları ne kadar agresif bastıracağını belirler")
+        p.add_slider("core_protect","Çekirdek Koruma",0,1,0.85,2,
+                     "Parlak yıldız çekirdeklerini korur")
+        p.add_slider("halo_radius","Halo Yarıçapı",1.5,8.0,3.5,1,
+                     "Halonun yıldız yarıçapının kaç katına uzandığı")
+        p.add_slider("sensitivity","Algılama",0,1,0.50,2,
+                     "Yıldız algılama hassasiyeti (yüksek=daha fazla yıldız)")
+        p.add_slider("chroma_reduce","Renk Fringe",0,1,0.30,2,
+                     "Halo bölgelerindeki renk sapmalarını azaltır")
+        p._params["halo_strength"][0].sp.setValue(0.50)
+        p._params["core_protect"][0].sp.setValue(0.85)
+        p._params["halo_radius"][0].sp.setValue(3.5)
+        p._params["sensitivity"][0].sp.setValue(0.50)
+        p._params["chroma_reduce"][0].sp.setValue(0.30)
         p.run_requested.connect(lambda s,k="halo": self._run_key(k,s))
 
         # Star Shrink (dedicated panel)
