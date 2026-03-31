@@ -470,6 +470,9 @@ class ProcessPanel(QWidget):
     def __init__(self, icon, title, key="", parent=None):
         super().__init__(parent)
         self._params   = {}
+        self._reset_defaults = {}
+        self._extra_reset_defaults = []
+        self._extra_reset_specs = []
         self._key      = key
         self._icon     = icon
         self._title    = title
@@ -506,6 +509,17 @@ class ProcessPanel(QWidget):
         self.btn_run.setToolTip("Run this process")
         self.btn_run.clicked.connect(self._emit)
 
+        self.btn_reset = QPushButton("↺")
+        self.btn_reset.setFixedSize(28, 22)
+        self.btn_reset.setStyleSheet(
+            f"QPushButton{{background:{BG3};color:{TEXT};border:1px solid {BORDER};border-radius:4px;"
+            f"font-size:11px;font-weight:700;}}"
+            f"QPushButton:hover{{background:{BG4};border:1px solid {ACCENT};}}"
+            f"QPushButton:pressed{{background:{BG};}}"
+            f"QPushButton:disabled{{background:{BG};color:{SUBTEXT};border:1px solid {BORDER};}}")
+        self.btn_reset.setToolTip("Reset this panel to its own defaults")
+        self.btn_reset.clicked.connect(self.reset_defaults)
+
         # Live preview toggle
         self._live_cb = QCheckBox("👁")
         self._live_cb.setChecked(False)
@@ -516,6 +530,7 @@ class ProcessPanel(QWidget):
 
         hlay.addWidget(self._arrow)
         hlay.addWidget(self._title_lbl, 1)
+        hlay.addWidget(self.btn_reset)
         hlay.addWidget(self._live_cb)
         hlay.addWidget(self.btn_run)
         outer.addWidget(self._hdr)
@@ -609,11 +624,41 @@ class ProcessPanel(QWidget):
     def collect(self):
         return {k: g(w) for k,(w,g) in self._params.items()}
 
+    def track_extra_default(self, getter, setter):
+        self._extra_reset_specs.append((getter, setter))
+
+    def capture_reset_defaults(self):
+        self._reset_defaults = dict(self.collect())
+        self._extra_reset_defaults = [
+            (setter, getter()) for getter, setter in self._extra_reset_specs
+        ]
+        self.btn_reset.setEnabled(bool(self._reset_defaults or self._extra_reset_defaults))
+
+    def _apply_reset_value(self, widget, value):
+        if isinstance(widget, (PS, PC)):
+            widget.set(value)
+        elif isinstance(widget, QCheckBox):
+            widget.setChecked(bool(value))
+        elif hasattr(widget, "setValue"):
+            widget.setValue(value)
+        elif hasattr(widget, "setCurrentText"):
+            widget.setCurrentText(str(value))
+
+    def reset_defaults(self):
+        for key, value in self._reset_defaults.items():
+            widget = self._params.get(key, (None, None))[0]
+            if widget is not None:
+                self._apply_reset_value(widget, value)
+        for setter, value in self._extra_reset_defaults:
+            setter(value)
+        self._schedule_preview()
+
     def _emit(self):
         self.run_requested.emit(self.collect())
 
     def set_running(self, v, msg=""):
         self.btn_run.setEnabled(not v)
+        self.btn_reset.setEnabled((not v) and bool(self._reset_defaults or self._extra_reset_defaults))
         if v:
             self.btn_run.setText("⏳ …")
         else:
@@ -7312,7 +7357,11 @@ class AstroApp(QMainWindow):
         self._stf_target.sp.setValue(0.22)
         self._update_stretch_vis()
         self._st_method.cb.currentTextChanged.connect(lambda _: self._update_stretch_vis())
+        p.track_extra_default(self._vl_mode.currentText, self._vl_mode.setCurrentText)
+        p.track_extra_default(self._vl_sensor.currentText, self._vl_sensor.setCurrentText)
         p.run_requested.connect(lambda s,k="stretch": self._run_key(k,s))
+
+        self._refresh_process_panel_reset_defaults()
 
         # Store order
         self._panel_order   = list(self._panels.keys())
@@ -7535,6 +7584,12 @@ class AstroApp(QMainWindow):
                 self, "Settings Saved",
                 "Settings saved.\nSome changes (font size, theme) take effect on next launch.")
 
+    def _refresh_process_panel_reset_defaults(self):
+        if not getattr(self, "_panels", None):
+            return
+        for panel in self._panels.values():
+            panel.capture_reset_defaults()
+
     def _apply_process_defaults_from_settings(self):
         if not getattr(self, "_panels", None):
             return
@@ -7575,6 +7630,8 @@ class AstroApp(QMainWindow):
             if stretch_default not in {"veralux", "auto_stf", "linear", "hyperbolic", "asinh", "log", "midtone", "statistical", "power"}:
                 stretch_default = "auto_stf"
             stretch_panel._params["method"][0].cb.setCurrentText(stretch_default)
+
+        self._refresh_process_panel_reset_defaults()
 
     def _show_workflow(self):
         """Workflow rehber panelini göster/gizle."""
