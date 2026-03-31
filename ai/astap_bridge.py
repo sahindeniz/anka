@@ -25,6 +25,122 @@ import re
 import numpy as np
 
 
+def _as_positive_float(value):
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def _append_unique_fov(values: list[float], value, max_value: float = 5.0):
+    fov = _as_positive_float(value)
+    if fov is None:
+        return
+    if max_value:
+        fov = min(fov, max_value)
+    key = round(fov, 3)
+    for existing in values:
+        if round(existing, 3) == key:
+            return
+    values.append(fov)
+
+
+def _build_fov_attempts(fov_hint=None, fov_width_hint=None) -> list[float]:
+    """ASTAP için güvenli FOV denemeleri üret."""
+    base = _as_positive_float(fov_hint)
+    if base is None:
+        return []
+
+    attempts: list[float] = []
+    _append_unique_fov(attempts, base)
+
+    width = _as_positive_float(fov_width_hint)
+    broader = base * 1.25
+    if width is not None:
+        broader = max(broader, width)
+    if broader > base * 1.08:
+        _append_unique_fov(attempts, broader)
+
+    return attempts
+
+
+def _recommended_hint_radius(search_radius: float, fov_hint=None) -> float:
+    """RA/Dec ipucu varsa ilk denemeler için daha dar bir radius seç."""
+    radius = max(0.1, float(search_radius))
+    base_fov = _as_positive_float(fov_hint)
+    if base_fov is not None:
+        near_radius = max(4.0, min(12.0, base_fov * 6.0))
+    else:
+        near_radius = 10.0
+    return min(radius, near_radius)
+
+
+def _build_solve_attempts(
+    search_radius: float,
+    ra_hint=None,
+    dec_hint=None,
+    fov_hint=None,
+    fov_width_hint=None,
+    disable_near_search: bool = False,
+) -> list[dict]:
+    radius = max(0.1, float(search_radius))
+    has_hints = ra_hint is not None and dec_hint is not None
+    near_radius = radius
+    if has_hints and not disable_near_search:
+        near_radius = _recommended_hint_radius(radius, fov_hint)
+
+    attempts: list[dict] = []
+    seen: set[tuple] = set()
+
+    def add_attempt(label: str, radius_value: float, use_hints: bool, fov_value):
+        key = (
+            round(float(radius_value), 2),
+            bool(use_hints),
+            None if fov_value is None else round(float(fov_value), 3),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        attempts.append(
+            {
+                "label": label,
+                "radius": float(radius_value),
+                "ra_hint": ra_hint if use_hints else None,
+                "dec_hint": dec_hint if use_hints else None,
+                "fov_hint": fov_value,
+            }
+        )
+
+    fov_attempts = _build_fov_attempts(fov_hint, fov_width_hint)
+
+    if has_hints:
+        for fov_value in fov_attempts:
+            add_attempt("near", near_radius, True, fov_value)
+        add_attempt("near-auto", near_radius, True, None)
+        if radius > near_radius + 0.05:
+            add_attempt("wide-auto", radius, True, None)
+    else:
+        for fov_value in fov_attempts:
+            add_attempt("guided", radius, False, fov_value)
+
+    add_attempt("blind", radius, False, None)
+    return attempts
+
+
+def _format_attempt_label(attempt: dict, index: int, total: int) -> str:
+    parts = [f"deneme {index}/{total}", attempt["label"],
+             f"radius={attempt['radius']:.1f}°"]
+    fov_hint = attempt.get("fov_hint")
+    if fov_hint is None:
+        parts.append("auto/blind" if attempt.get("ra_hint") is None else "FOV=auto")
+    else:
+        parts.append(f"FOV={float(fov_hint):.3f}°")
+    return " [" + ", ".join(parts) + "]"
+
+
 def solve_image(
     image,
     astap_exe: str,
@@ -37,6 +153,8 @@ def solve_image(
     ra_hint=None,
     dec_hint=None,
     fov_hint=None,
+    fov_width_hint=None,
+    disable_near_search: bool = False,
     progress_cb=None,
 ) -> dict:
     """Görüntüyü ASTAP ile plate solve eder."""
@@ -75,33 +193,34 @@ def solve_image(
         else:
             cb("[1/4] FITS kaydedildi")
 
-        # ── RA/Dec ipucu varsa radius'u otomatik küçült ──
-        effective_radius = search_radius
-        if ra_hint is not None and dec_hint is not None and search_radius >= 90:
-            effective_radius = 30.0
-            cb(f"  ℹ RA/Dec ipucu verildi, radius {search_radius}° → {effective_radius}° olarak küçültüldü")
+        has_hints = ra_hint is not None and dec_hint is not None
+        near_radius = max(0.1, float(search_radius))
+        if has_hints and not disable_near_search:
+            near_radius = _recommended_hint_radius(search_radius, fov_hint)
+            if near_radius < float(search_radius) - 0.05:
+                cb(
+                    "  ℹ Yakın çözüm aktif: "
+                    f"radius {float(search_radius):.1f}° → {near_radius:.1f}° "
+                    "(ilk denemeler)"
+                )
+        elif has_hints and disable_near_search:
+            cb("  ℹ Yakın çözüm kapalı, tam radius ile başlanıyor")
 
-        # ── FOV retry stratejisi ──
-        # 1) Verilen FOV  2) FOV×1.5  3) FOV×2  4) Auto (FOV=0)
-        # D80 kataloğu ~5° üzeri FOV'da başarısız olur, cap=5°
-        fov_attempts = [fov_hint]
-        if fov_hint and float(fov_hint) > 0:
-            fov_val = float(fov_hint)
-            for mult in [1.5, 2.0]:
-                scaled = fov_val * mult
-                if scaled <= 5.0:
-                    fov_attempts.append(scaled)
-            fov_attempts.append(None)  # son deneme: auto (blind)
-        else:
-            fov_attempts = [None]  # sadece auto
+        attempts = _build_solve_attempts(
+            search_radius=search_radius,
+            ra_hint=ra_hint,
+            dec_hint=dec_hint,
+            fov_hint=fov_hint,
+            fov_width_hint=fov_width_hint,
+            disable_near_search=disable_near_search,
+        )
 
         proc = None
-        for attempt_i, fov_try in enumerate(fov_attempts):
-            # Son deneme (fov_try=None) → gerçek blind solve: RA/Dec ipucu kaldır
-            is_blind = (fov_try is None and len(fov_attempts) > 1)
-            _ra  = None if is_blind else ra_hint
-            _dec = None if is_blind else dec_hint
-            _r   = search_radius if is_blind else effective_radius
+        for attempt_i, attempt in enumerate(attempts, start=1):
+            _ra = attempt.get("ra_hint")
+            _dec = attempt.get("dec_hint")
+            _r = attempt["radius"]
+            fov_try = attempt.get("fov_hint")
             cmd = _build_cmd(
                 astap_exe, fits_in, db_path, catalog_id,
                 _r, downsample, min_stars,
@@ -109,13 +228,7 @@ def solve_image(
             )
             cmd_str = " ".join(
                 f'"{c}"' if " " in str(c) else str(c) for c in cmd)
-            if fov_try:
-                attempt_label = (f" [deneme {attempt_i+1}/{len(fov_attempts)},"
-                                 f" FOV={float(fov_try):.1f}°]")
-            elif len(fov_attempts) > 1:
-                attempt_label = f" [deneme {attempt_i+1}/{len(fov_attempts)}, auto/blind]"
-            else:
-                attempt_label = ""
+            attempt_label = _format_attempt_label(attempt, attempt_i, len(attempts))
             cb(f"[2/4] Komut{attempt_label}:\n      {cmd_str}")
 
             try:
@@ -128,15 +241,15 @@ def solve_image(
                     cwd=tmpdir,
                 )
             except subprocess.TimeoutExpired:
-                cb(f"      ⏱ Zaman aşımı (deneme {attempt_i+1})")
+                cb(f"      ⏱ Zaman aşımı (deneme {attempt_i})")
                 continue
             except FileNotFoundError:
                 return _err(f"ASTAP başlatılamadı:\n{astap_exe}")
 
             if proc.returncode == 0:
                 break  # Çözüm bulundu
-            elif attempt_i < len(fov_attempts) - 1:
-                cb(f"      Çözüm bulunamadı (FOV={fov_try}°), farklı FOV deneniyor…")
+            elif attempt_i < len(attempts):
+                cb("      Çözüm bulunamadı, sonraki deneme hazırlanıyor…")
 
         if proc is None:
             return _err(
@@ -229,7 +342,8 @@ def solve_image(
                         cb(f"\n🔄 ASTAP önerisi: {alt_cat} kataloğu deneniyor…")
                         alt_cmd = _build_cmd(
                             astap_exe, fits_in, alt_db, alt_cat,
-                            effective_radius, downsample, min_stars,
+                            near_radius if has_hints else search_radius,
+                            downsample, min_stars,
                             ra_hint, dec_hint, fov_hint)
                         try:
                             alt_proc = subprocess.run(
