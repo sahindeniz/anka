@@ -1323,10 +1323,10 @@ class SettingsDialog(QDialog):
         bg_defaults = ["graxpert","astro_gradient_x","nox","dbe_spline","polynomial","ai_gradient","gaussian_sub"]
         bg_default = self._s.get(
             "default_bg",
-            "graxpert" if self._s.get("graxpert_exe", "") else "nox",
+            "graxpert" if self._s.get("graxpert_exe", "") else "astro_gradient_x",
         )
         if bg_default not in bg_defaults:
-            bg_default = "graxpert" if self._s.get("graxpert_exe", "") else "nox"
+            bg_default = "graxpert" if self._s.get("graxpert_exe", "") else "astro_gradient_x"
         self.combo_def_bg = QComboBox()
         self.combo_def_bg.addItems(bg_defaults)
         self.combo_def_bg.setCurrentText(bg_default)
@@ -2139,52 +2139,83 @@ class WorkflowPanel(QFrame):
          "Amac plastik shrink degil, daha dogal bir yildiz omzu birakmaktir."),
     ]
 
-    _RECOMMENDED_STEP_ORDER = [0, 1, 2, 3, 7, 5, 4, 6, 8, 9, 10, 11, 12, 13, 19, 14, 15, 16, 17, 18]
+    _RECOMMENDED_STEP_ORDER = [0, 1, 2, 3, 4, 7, 5, 6, 8, 9, 10, 11, 12, 13, 19, 14, 15, 16, 17, 18]
 
     @classmethod
     def _recommended_steps(cls):
         steps = [list(step) for step in cls.STEPS]
         overrides = {
             4: {
-                "title": "7. Deconvolution",
-                "desc": "Optik bulaniklik ve yildiz PSF duzeltme. Blind, Richardson-Lucy, Wiener\n"
-                        "veya Blur Exterminator. Lineer veride PSF modeli en dogru calisir.\n"
-                        "Gurultu azaltmadan once hafif-orta gucte uygulamak en dogal detayi verir.",
+                "title": "5. Astro Blur X / Deconvolution",
+                "desc": "Onerilen ilk lineer pas: astro_blur_x ile Correct Only acik, hafif-orta guc.\n"
+                        "Boylece PSF ve optik yumusama renk kalibrasyonundan once temizlenir.\n"
+                        "Gerekirse PCC sonrasi, stretch oncesi ayni panel ikinci kez sharpen modunda calistirilabilir.",
             },
             5: {
-                "title": "6. Aberasyon Duzeltme",
+                "title": "7. Aberasyon Duzeltme",
                 "desc": "Kromatik aberasyon, koma ve spike duzeltme.\n"
-                        "Renk kalibrasyonu sonrasi ve deconvolution oncesi duzeltmek en temiz sonucu verir.",
+                        "Renk kalibrasyonu sonrasi, lineer fazdayken temizlemek en guvenli noktadir.\n"
+                        "Ozellikle parlak yildizlarda renk fringe varsa stretch oncesi burada duzelt.",
             },
             6: {
                 "title": "8. Gurultu Azaltma (Lineer)",
-                "desc": "Lineer fazda gurultu karakteri uniform - en etkili nokta burasi.\n"
-                        "Oneri: tek pas, hafif guc. Ana temizligi burada, son rotusu stretch sonrasi yap.\n"
-                        "Agresif denoise yerine detay koruyan orta seviye ayarlar en iyi sonucu verir.",
+                "desc": "Astro Noise X mantigi burada en temiz sonucu verir: deconvolutiondan sonra, stretchten once.\n"
+                        "2 iterasyon, detail preserve yuksek, color denoise luminance'tan biraz daha guclu olsun.\n"
+                        "Ana temizligi burada yap; final rötuşu stretch sonrasi hafif ikinci pasla tamamla.",
             },
             7: {
-                "title": "5. Renk Kalibrasyon",
-                "desc": "Onerilen sira: gradient ve arka plan notralizasyonundan hemen sonra uygula.\n"
-                        "Plate solve varsa PCC Solve, yoksa Average Spiral veya SPCC ile guvenli kalibrasyon.\n"
-                        "Stretch oncesi dogru beyaz dengesi tum sonraki islemlerin temelini olusturur.",
+                "title": "6. Renk Kalibrasyon",
+                "desc": "Astro Blur X Correct Only pasindan hemen sonra uygula.\n"
+                        "Plate solve varsa PCC Solve en iyi secim; yoksa Average Spiral veya SPCC ile devam et.\n"
+                        "Stretch oncesi dogru beyaz dengesi ve arka plan tonu tum sonraki islemlerin temelidir.",
             },
             9: {
-                "title": "10. Yildiz Kontrolu (Ilk Pas)",
-                "desc": "Ilk pas icin hafif yildiz kucultme veya yildiz baskisini kontrol et.\n"
-                        "Amac yildizlarin nebula detayini bogmasini engellemek, goruntuyu plastiklestirmek degil.\n"
-                        "Final shrink adimini sona sakla; burada nazik bir on denge kur.",
+                "title": "10. Yildiz Ayirma / Starless",
+                "desc": "Astro Star X veya Mastro Starless ile yildizlari ayir; nebula ve galaksi detayi ayri islenebilsin.\n"
+                        "Yildizlar goruntuyu boguyorsa bu noktadan sonra starless katmanda calismak en temiz yoldur.\n"
+                        "Ayirma zorunlu degil ama agresif keskinlik ve renk calismalarinda kaliteyi ciddi iyilestirir.",
+            },
+            10: {
+                "title": "11. Nebula Gelistirme",
+                "desc": "Starless katmanda nebula kontrasti, lokal detay ve mikroyapiyi bagimsiz guclendir.\n"
+                        "Yildiz katmani ayri oldugu icin halolar büyümez, galaksi omuzlari daha stabil kalir.\n"
+                        "Bu asamada hafif-orta ayarlar, sonradan egrilerle desteklenen en dogal sonucu verir.",
+            },
+            11: {
+                "title": "12. Keskinlestirme",
+                "desc": "Mümkünse starless katmanda uygula; yildiz profili degil, yapisal detay hedeflensin.\n"
+                        "Revela veya hafif yapisal sharpen ile nebula/galaksi detayi cikart, yildiz halosu üretme.\n"
+                        "Asiri keskinlestirme yerine iki hafif pas daha dogal gorunur.",
+            },
+            12: {
+                "title": "13. Gurultu Azaltma (Final)",
+                "desc": "Stretch, lokal kontrast ve sharpen sonrasi kalan ince gurultuyu temizle.\n"
+                        "Astro Noise X burada ikinci, daha hafif bir pas olarak kullanilabilir.\n"
+                        "Arka planı temizlerken mikro kontrasti öldürmemek icin strength'i dusuk tut.",
             },
             13: {
                 "title": "14. Yildiz Kucultme (Final)",
-                "desc": "Yildiz boyutunu kucult - cekirdek/halo ayrimi ile orantili shrink.\n"
-                        "Halo fill ile dogal gorunum. Renk ve keskinlik oturduktan sonra son yildiz duzeltmesi.\n"
-                        "Oneri: tek, hafif final pas; kucuk degerler daha dogal sonuc verir.",
+                "desc": "Final yildiz düzeltmesi icin astro_star_shrink kullan; coklu hafif pas en dogal sonuc verir.\n"
+                        "Stars Smaller artik halo daha az ürettigi icin Halo Reduction sadece gerekiyorsa acilsin.\n"
+                        "Amac yildizi yok etmek degil, nebula ve galaksi detayinin nefes almasını saglamaktir.",
+            },
+            14: {
+                "title": "15. Renk Grading",
+                "desc": "Kalibrasyon farkli, grading farkli: burada artistik tonlama ve doygunluk ince ayari yap.\n"
+                        "Nebula renklerini zenginlestirirken arka planin nötr kalmasina dikkat et.\n"
+                        "Yildizlar ayri katmandaysa starless tarafta daha özgür calisabilirsin.",
             },
             15: {
                 "title": "16. Yildiz Birlestirme / Blend",
                 "desc": "Starless ve yildiz katmanlariyla calisiyorsan islenmis katmanlari burada blend et.\n"
                         "Screen/Lighten modlari, yildiz renk ve boyut kontrolu.\n"
                         "Ayri katman kullanilmiyorsa bu adim opsiyoneldir.",
+            },
+            19: {
+                "title": "14b. Halo Azaltma (Gerekirse)",
+                "desc": "Bu artik zorunlu adim degil; sadece cok parlak yildiz omuzlari hâlâ sert kaldıysa kullan.\n"
+                        "Galaksi ve nebula bölgelerinde bozucu olabildigi icin hafif ve secici uygulanmali.\n"
+                        "Öncelik: starsmaller / astro_star_shrink tarafini dogru kullanmak, halo panelini son çare yapmak.",
             },
         }
         for idx, values in overrides.items():
@@ -6904,12 +6935,12 @@ class AstroApp(QMainWindow):
         p = _make("🌌","Background Extraction","bg")
         bg_methods = ["graxpert","astro_gradient_x","nox","dbe_spline","polynomial","ai_gradient","median_grid","gaussian_sub"]
         bg_default = str(self._settings.get("default_bg", "")).strip() or (
-            "graxpert" if self._settings.get("graxpert_exe","") else "nox"
+            "graxpert" if self._settings.get("graxpert_exe","") else "astro_gradient_x"
         )
         if bg_default not in bg_methods:
-            bg_default = "graxpert" if self._settings.get("graxpert_exe","") else "nox"
+            bg_default = "graxpert" if self._settings.get("graxpert_exe","") else "astro_gradient_x"
         if bg_default == "graxpert" and not self._settings.get("graxpert_exe",""):
-            bg_default = "nox"
+            bg_default = "astro_gradient_x"
         p.add_combo("method","Method",
                     bg_methods,
                     bg_default,
@@ -7027,6 +7058,8 @@ class AstroApp(QMainWindow):
         p._params["strength"][0].sp.setValue(0.55)
         p._params["detail"][0].sp.setValue(0.75)
         p._params["modulation"][0].sp.setValue(0.50)
+        p._params["iterations"][0].sp.setValue(2)
+        p._params["method"][0].cb.setCurrentText("astro_noise_x")
         p.run_requested.connect(lambda s,k="noise": self._run_key(k,s))
 
         # Deconvolution
@@ -7048,13 +7081,14 @@ class AstroApp(QMainWindow):
         p.add_slider("nonstellar_sharpen","Structure Sharpen",0,1,0.45,2,
                      "Nebula/galaksi detayina uygulanacak duzeltme miktari")
         p.add_check("correct_only","Correct Only",False)
-        p._params["method"][0].cb.setCurrentText("blind")
+        p._params["method"][0].cb.setCurrentText("astro_blur_x")
         p._params["iterations"][0].sp.setValue(15)
         p._params["tv_weight"][0].sp.setValue(0.08)
         p._params["strength"][0].sp.setValue(0.65)
         p._params["noise_level"][0].sp.setValue(0.015)
         p._params["stellar_sharpen"][0].sp.setValue(0.85)
         p._params["nonstellar_sharpen"][0].sp.setValue(0.42)
+        p._params["correct_only"][0].chk.setChecked(True)
         p.run_requested.connect(lambda s,k="deconv": self._run_key(k,s))
 
         # Star Smaller (Deconv panelinin altinda)
@@ -7147,6 +7181,7 @@ class AstroApp(QMainWindow):
         p._params["sharpen_amount"][0].sp.setValue(0.45)
         p._params["sharpen_radius"][0].sp.setValue(1.2)
         p._params["denoise_strength"][0].sp.setValue(3)
+        p._params["mode"][0].cb.setCurrentText("astro_star_shrink")
         p.run_requested.connect(lambda s,k="star_shrink": self._run_key(k,s))
 
         # GraXpert Gradient Extraction (dedicated panel)

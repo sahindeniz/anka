@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -8,7 +9,7 @@ from processing.deconvolution import astro_blur_x
 from processing.mastro_starless import astro_star_x
 from processing.noise_reduction import reduce_noise
 from processing.noisexterminator import astro_noise_x
-from processing.star_shrink import astro_star_shrink
+from processing.star_shrink import astro_star_shrink, full_astro_process
 
 
 class AstroMaestroXTests(unittest.TestCase):
@@ -100,6 +101,45 @@ class AstroMaestroXTests(unittest.TestCase):
         self.assertEqual(result["stars_only"].shape, img.shape)
         self.assertLess(float(result["starless"][28, 30, 0]), float(img[28, 30, 0]))
         self.assertGreater(float(result["stars_only"][28, 30, 0]), 0.05)
+
+    def test_full_astro_process_follows_updated_astromaestro_workflow(self):
+        img = np.full((24, 24, 3), 0.2, dtype=np.float32)
+        calls = []
+
+        def _bg(x, **kwargs):
+            calls.append("bg")
+            return np.clip(x + 0.01, 0, 1)
+
+        def _bn(x, **kwargs):
+            calls.append("bg_neutralize")
+            return np.clip(x + 0.01, 0, 1)
+
+        def _blur(x, **kwargs):
+            calls.append("blur")
+            return np.clip(x + 0.01, 0, 1)
+
+        def _shrink(x, **kwargs):
+            calls.append("star_shrink")
+            return np.clip(x + 0.01, 0, 1)
+
+        def _noise(x, **kwargs):
+            calls.append("noise")
+            return np.clip(x + 0.01, 0, 1), {}
+
+        with patch("processing.background.gradient_terminator", side_effect=_bg), \
+             patch("processing.bg_neutralize.neutralize_background", side_effect=_bn), \
+             patch("processing.deconvolution.astro_blur_x", side_effect=_blur), \
+             patch("processing.star_shrink.astro_star_shrink", side_effect=_shrink), \
+             patch("processing.noisexterminator.astro_noise_x", side_effect=_noise):
+            result = full_astro_process(
+                img,
+                bg_extract=True,
+                do_star_shrink=True,
+                denoise_strength=5,
+            )
+
+        self.assertEqual(result.shape, img.shape)
+        self.assertEqual(calls, ["bg", "bg_neutralize", "blur", "star_shrink", "noise"])
 
 
 if __name__ == "__main__":

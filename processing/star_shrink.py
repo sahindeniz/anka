@@ -345,40 +345,91 @@ def full_astro_process(image,
 
     # 1. BG Extract
     if bg_extract:
-        img = _bg_extract(img, grid_size=int(bg_grid))
+        from processing.background import gradient_terminator
+
+        detail = "fine" if int(bg_grid) >= 10 else "medium"
+        img = gradient_terminator(
+            img,
+            detail=detail,
+            strength="medium",
+            balance_background_color=False,
+            grid_size=int(bg_grid),
+        )
+        if img.ndim == 3:
+            from processing.bg_neutralize import neutralize_background
+
+            img = neutralize_background(
+                img,
+                method="percentile",
+                strength=1.0,
+                bg_percentile=7.0,
+                protect_signal=0.45,
+                per_channel=True,
+            )
         mx = img.max()
         if mx > 0:
             img /= mx
         np.clip(img, 0, 1, out=img)
 
-    # 2. Stretch
+    # 2. Linear deconvolution pass (RC Astro-style "Correct Only")
+    from processing.deconvolution import astro_blur_x
+
+    img = astro_blur_x(
+        img,
+        strength=0.55,
+        iterations=max(10, int(10 + float(sharpen_amount) * 6)),
+        noise_level=0.012,
+        stellar_sharpen=0.82,
+        nonstellar_sharpen=0.28,
+        correct_only=True,
+    )
+
+    # 3. Stretch
     img = _auto_stretch(img, target_bg=float(stretch_strength))
 
-    # 3. Local contrast
+    # 4. Local contrast
     if local_contrast > 0.1:
         img = _local_contrast(img, clip_limit=float(local_contrast))
 
-    # 4. Color boost
+    # 5. Color boost
     if img.ndim == 3 and (saturation != 1.0 or vibrance > 0):
         img = _color_boost(img, saturation=float(saturation),
                            vibrance=float(vibrance))
 
-    # 5. Star shrink
+    # 6. Star shrink
     if do_star_shrink:
-        img = star_shrink(img,
-                          shrink_factor=float(shrink_factor),
-                          halo_fill_ratio=float(halo_fill_ratio),
-                          noise_level=0,
-                          star_density_threshold=float(star_density_threshold))
+        amount = float(np.clip((float(shrink_factor) - 0.1) / 2.9, 0.0, 1.0))
+        passes = 1 if amount < 0.35 else 2 if amount < 0.75 else 3
+        img = astro_star_shrink(
+            img,
+            amount=amount,
+            passes=passes,
+            halo_fill_ratio=float(halo_fill_ratio),
+            noise_level=0,
+            star_density_threshold=float(star_density_threshold),
+        )
 
-    # 6. Sharpen
+    # 7. Sharpen
     if sharpen_amount > 0.01:
         img = _sharpen_detail(img, amount=float(sharpen_amount),
                               radius=float(sharpen_radius))
 
-    # 7. Denoise
+    # 8. Final denoise
     if denoise_strength > 0:
-        img = _denoise_light(img, strength=int(denoise_strength))
+        from processing.noisexterminator import astro_noise_x
+
+        denoise_level = float(np.clip(float(denoise_strength) / 20.0, 0.0, 1.0))
+        img, _meta = astro_noise_x(
+            img,
+            strength=max(0.15, denoise_level * 0.8),
+            detail=0.72,
+            iterations=2 if denoise_level >= 0.3 else 1,
+            denoise_color=min(1.0, denoise_level * 1.05),
+            denoise_lf=denoise_level * 0.35,
+            denoise_lf_color=denoise_level * 0.55,
+            hf_lf_scale=6.0,
+            linear_hint=False,
+        )
 
     np.clip(img, 0, 1, out=img)
     return img.astype(np.float32)
