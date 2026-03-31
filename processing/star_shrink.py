@@ -65,7 +65,7 @@ def _detect_stars(gray_f32, sigma_threshold=2.0, min_area=3, max_area_ratio=0.00
 
 
 def star_shrink(image, shrink_factor=1.0, halo_fill_ratio=0.3,
-                noise_level=5.0, star_density_threshold=2.0, **kw):
+                noise_level=5.0, star_density_threshold=2.0, passes=1, **kw):
     """
     Yıldızları küçültür — morfolojik yıldız tespiti + Gauss profil küçültme.
     Galaksi ve nebula korunur. Halo artefaktı olmaz.
@@ -84,6 +84,20 @@ def star_shrink(image, shrink_factor=1.0, halo_fill_ratio=0.3,
     """
     img = np.ascontiguousarray(image, dtype=np.float32)
     np.clip(img, 0, 1, out=img)
+
+    n_passes = max(1, int(passes))
+    if n_passes > 1:
+        result = img.copy()
+        for _ in range(n_passes):
+            result = star_shrink(
+                result,
+                shrink_factor=shrink_factor,
+                halo_fill_ratio=halo_fill_ratio,
+                noise_level=noise_level,
+                star_density_threshold=star_density_threshold,
+                passes=1,
+            )
+        return np.clip(result, 0, 1).astype(np.float32)
 
     is_color = img.ndim == 3
 
@@ -158,6 +172,39 @@ def star_shrink(image, shrink_factor=1.0, halo_fill_ratio=0.3,
 
     np.clip(result, 0, 1, out=result)
     return result.astype(np.float32)
+
+
+def astro_star_shrink(
+    image,
+    amount=0.75,
+    passes=2,
+    halo_fill_ratio=0.55,
+    noise_level=2.0,
+    star_density_threshold=2.3,
+    **kw,
+):
+    """AstroMaestro's StarShrink-style profile."""
+    del halo_fill_ratio, noise_level, star_density_threshold, kw
+    from processing.starsmaller import reduce_stars
+
+    strength = 0.15 + float(np.clip(amount, 0.0, 1.0)) * 0.65
+    result = np.clip(np.asarray(image, dtype=np.float32), 0, 1)
+    n_passes = max(1, int(passes))
+
+    for idx in range(n_passes):
+        pass_strength = min(0.95, strength * (1.0 + 0.08 * idx))
+        result, _mask = reduce_stars(
+            result,
+            strength=pass_strength,
+            sensitivity=0.48,
+            feather=4,
+            max_sigma=7,
+            min_sigma=1,
+            threshold=0.022,
+            protect_nebula=True,
+        )
+
+    return np.clip(result, 0, 1).astype(np.float32)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

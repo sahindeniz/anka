@@ -64,11 +64,16 @@ def deconvolve(image, psf_size=5, iterations=15, psf_type="moffat",
 
 
 def deconvolve_dispatch(image, method="richardson_lucy", **kwargs):
+    if method == "astro_blur_x":
+        return astro_blur_x(image, **kwargs)
     if method == "blur_exterminator":
         return blur_exterminator(image,
             strength   =kwargs.get("strength",   1.0),
             iterations =kwargs.get("iterations", 20),
-            noise_level=kwargs.get("noise_level", 0.01))
+            noise_level=kwargs.get("noise_level", 0.01),
+            stellar_sharpen=kwargs.get("stellar_sharpen", 0.85),
+            nonstellar_sharpen=kwargs.get("nonstellar_sharpen", 0.45),
+            correct_only=kwargs.get("correct_only", False))
     return deconvolve(image, method=method, **kwargs)
 
 
@@ -146,8 +151,18 @@ def _blind_deconv(img, psf_size):
     return _rl_deconv(img, "moffat", psf_size, 12, 1.0)
 
 
-def blur_exterminator(image, strength=1.0, iterations=20, noise_level=0.01, **kwargs):
+def blur_exterminator(
+    image,
+    strength=1.0,
+    iterations=20,
+    noise_level=0.01,
+    stellar_sharpen=0.85,
+    nonstellar_sharpen=0.45,
+    correct_only=False,
+    **kwargs,
+):
     from skimage.restoration import denoise_tv_chambolle, richardson_lucy
+    del kwargs
     img = np.ascontiguousarray(image, dtype=np.float32)
     np.clip(img, 0, 1, out=img)
     h, w = img.shape[:2]
@@ -202,5 +217,61 @@ def blur_exterminator(image, strength=1.0, iterations=20, noise_level=0.01, **kw
     else:
         enh = enh_s
 
+    star_mix = float(np.clip(stellar_sharpen, 0, 1))
+    struct_mix = float(np.clip(nonstellar_sharpen, 0, 1))
+    dense_star_field = False
+    star_mask = None
+
+    if img.ndim == 3:
+        try:
+            from processing.starxterminator import build_star_mask, feather_mask
+
+            gray = img.mean(axis=2).astype(np.float32)
+            star_mask = feather_mask(build_star_mask(gray, sensitivity=0.55), radius=4.0).astype(
+                np.float32
+            )
+            dense_star_field = float(np.mean(star_mask > 0.15)) > 0.10
+        except Exception:
+            star_mask = None
+
+    if dense_star_field:
+        struct_mix = min(struct_mix, 0.18)
+
+    if correct_only:
+        base_mix = float(np.clip(0.12 + 0.20 * float(np.clip(strength, 0, 1)), 0, 0.35))
+        result = img * (1.0 - base_mix) + np.clip(enh, 0, 1) * base_mix
+        return np.clip(result, 0, 1).astype(np.float32)
+
     blend = float(np.clip(strength, 0, 1))
-    return np.clip(img * (1 - blend) + np.clip(enh, 0, 1) * blend, 0, 1).astype(np.float32)
+    if star_mask is None:
+        return np.clip(img * (1 - blend) + np.clip(enh, 0, 1) * blend, 0, 1).astype(np.float32)
+
+    mix = (
+        struct_mix * (1.0 - star_mask[:, :, None])
+        + star_mix * star_mask[:, :, None]
+    ) * blend
+    result = img * (1.0 - mix) + np.clip(enh, 0, 1) * mix
+    return np.clip(result, 0, 1).astype(np.float32)
+
+
+def astro_blur_x(
+    image,
+    strength=0.7,
+    iterations=16,
+    noise_level=0.012,
+    stellar_sharpen=0.9,
+    nonstellar_sharpen=0.42,
+    correct_only=False,
+    **kwargs,
+):
+    """AstroMaestro's RC Astro-inspired BlurX profile."""
+    return blur_exterminator(
+        image,
+        strength=strength,
+        iterations=iterations,
+        noise_level=noise_level,
+        stellar_sharpen=stellar_sharpen,
+        nonstellar_sharpen=nonstellar_sharpen,
+        correct_only=correct_only,
+        **kwargs,
+    )

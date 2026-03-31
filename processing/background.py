@@ -16,6 +16,17 @@ def remove_gradient(image, kernel_size=101, method="dbe_spline",
                     clip_low=0.0, grid_size=16, poly_degree=4, **kwargs):
     img = np.ascontiguousarray(image, dtype=np.float32)
 
+    if method in {"gradient_terminator", "astro_gradient_x"}:
+        return gradient_terminator(
+            img,
+            detail=kwargs.get("detail", "medium"),
+            strength=kwargs.get("strength_level", "medium"),
+            balance_background_color=kwargs.get("balance_background_color", True),
+            grid_size=grid_size,
+            clip_low=clip_low,
+            poly_degree=poly_degree,
+        )
+
     if clip_low > 0:
         lo = np.percentile(img, clip_low)
         img = np.where(img < lo, lo, img)
@@ -33,6 +44,78 @@ def remove_gradient(image, kernel_size=101, method="dbe_spline",
     if mx > 1e-9: result /= mx
     np.clip(result, 0, 1, out=result)
     return result.astype(np.float32)
+
+
+def gradient_terminator(
+    image,
+    detail="medium",
+    strength="medium",
+    balance_background_color=True,
+    grid_size=16,
+    clip_low=0.0,
+    poly_degree=4,
+    **kwargs,
+):
+    """
+    AstroMaestro's GradientX-style workflow.
+
+    RC Astro's public documentation emphasizes three behaviors:
+    - detail controls grid fineness
+    - strength controls how closely the model follows local variation
+    - background color can be neutralized after gradient removal
+    """
+    del kwargs
+    img = np.ascontiguousarray(image, dtype=np.float32)
+    detail_key = str(detail).strip().lower()
+    strength_key = str(strength).strip().lower()
+
+    detail_map = {
+        "coarse": {"method": "dbe_spline", "grid": max(6, int(round(grid_size * 0.55))), "poly": 3},
+        "medium": {"method": "dbe_spline", "grid": max(8, int(round(grid_size * 0.8))), "poly": 4},
+        "fine": {"method": "ai_gradient", "grid": max(10, int(round(grid_size * 1.1))), "poly": 5},
+    }
+    strength_map = {
+        "low": 0.58,
+        "medium": 0.82,
+        "high": 1.0,
+    }
+
+    cfg = detail_map.get(detail_key, detail_map["medium"])
+    blend = float(strength_map.get(strength_key, strength_map["medium"]))
+
+    corrected = remove_gradient(
+        img,
+        method=cfg["method"],
+        grid_size=cfg["grid"],
+        poly_degree=max(cfg["poly"], int(poly_degree)),
+        clip_low=clip_low,
+    )
+
+    if blend < 0.999:
+        corrected = img * (1.0 - blend) + corrected * blend
+
+    if balance_background_color and corrected.ndim == 3:
+        try:
+            from processing.bg_neutralize import neutralize_background
+
+            corrected = neutralize_background(
+                corrected,
+                method="percentile",
+                strength=min(1.0, 0.85 + 0.15 * blend),
+                bg_percentile=7.0,
+                protect_signal=0.45,
+                per_channel=True,
+            )
+        except Exception:
+            pass
+
+    np.clip(corrected, 0, 1, out=corrected)
+    return corrected.astype(np.float32)
+
+
+def astro_gradient_x(image, **kwargs):
+    """AstroMaestro alias for the GradientX-inspired workflow."""
+    return gradient_terminator(image, **kwargs)
 
 
 def _dbe_spline(img, grid_size=16):
@@ -188,4 +271,6 @@ def _ai_gradient(img, degree=3):
 def remove_gradient_dispatch(image, method="dbe_spline", **kwargs):
     if method == "graxpert":
         return remove_gradient(image, method="dbe_spline", **kwargs)
+    if method in {"gradient_terminator", "astro_gradient_x"}:
+        return gradient_terminator(image, **kwargs)
     return remove_gradient(image, method=method, **kwargs)

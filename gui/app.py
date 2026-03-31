@@ -1320,7 +1320,7 @@ class SettingsDialog(QDialog):
         self.combo_def_stretch.setStyleSheet(COMBO_CSS); self.combo_def_stretch.setFixedWidth(130)
         glayout.addLayout(row("Default Stretch Method:", self.combo_def_stretch))
 
-        bg_defaults = ["graxpert","nox","dbe_spline","polynomial","ai_gradient","gaussian_sub"]
+        bg_defaults = ["graxpert","astro_gradient_x","nox","dbe_spline","polynomial","ai_gradient","gaussian_sub"]
         bg_default = self._s.get(
             "default_bg",
             "graxpert" if self._s.get("graxpert_exe", "") else "nox",
@@ -6902,7 +6902,7 @@ class AstroApp(QMainWindow):
 
         # Background Extraction — GraXpert Siril tarzı
         p = _make("🌌","Background Extraction","bg")
-        bg_methods = ["graxpert","nox","dbe_spline","polynomial","ai_gradient","median_grid","gaussian_sub"]
+        bg_methods = ["graxpert","astro_gradient_x","nox","dbe_spline","polynomial","ai_gradient","median_grid","gaussian_sub"]
         bg_default = str(self._settings.get("default_bg", "")).strip() or (
             "graxpert" if self._settings.get("graxpert_exe","") else "nox"
         )
@@ -7007,7 +7007,7 @@ class AstroApp(QMainWindow):
         # Noise Reduction
         p = _make("✨","Noise Reduction","noise")
         p.add_combo("method","Method",
-                    ["mastro_noise","silentium","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
+                    ["mastro_noise","astro_noise_x","silentium","bilateral","gaussian","median","nlm","noisexterminator","graxpert"],
                     "mastro_noise",
                     "mastro_noise     — Mastro Noise (dahili self-contained)\n"
                     "silentium        — Veralux Silentium (wavelet, hızlı alternatif)\n"
@@ -7033,7 +7033,7 @@ class AstroApp(QMainWindow):
         p = _make("🔭","Deconvolution (R-L)","deconv")
         p.add_combo("psf_type","PSF Type",["moffat","gaussian","airy","lorentzian","box"],"moffat")
         p.add_combo("method","Method",
-                    ["richardson_lucy","blind","wiener","total_variation","blur_exterminator"],"richardson_lucy",
+                    ["richardson_lucy","blind","wiener","total_variation","blur_exterminator","astro_blur_x"],"richardson_lucy",
                     "richardson_lucy — Classic RL\nblind — AI PSF from stars\nwiener — Noise-robust\n"
                     "total_variation — TV regularised\nblur_exterminator — Blind+multi-scale+TV (best)")
         p.add_slider("psf_size","PSF Size (px)",3,21,5,0)
@@ -7043,11 +7043,18 @@ class AstroApp(QMainWindow):
         p.add_slider("tv_weight","TV Weight",0.01,1.0,0.1,2)
         p.add_slider("strength","BE Strength",0,1,1.0,2,"Blur Exterminator blend")
         p.add_slider("noise_level","BE Noise",0.001,0.1,0.01,3,"Blur Exterminator noise level")
+        p.add_slider("stellar_sharpen","Star Sharpen",0,1,0.85,2,
+                     "Yildiz profiline uygulanacak blur duzeltme miktari")
+        p.add_slider("nonstellar_sharpen","Structure Sharpen",0,1,0.45,2,
+                     "Nebula/galaksi detayina uygulanacak duzeltme miktari")
+        p.add_check("correct_only","Correct Only",False)
         p._params["method"][0].cb.setCurrentText("blind")
         p._params["iterations"][0].sp.setValue(15)
         p._params["tv_weight"][0].sp.setValue(0.08)
         p._params["strength"][0].sp.setValue(0.65)
         p._params["noise_level"][0].sp.setValue(0.015)
+        p._params["stellar_sharpen"][0].sp.setValue(0.85)
+        p._params["nonstellar_sharpen"][0].sp.setValue(0.42)
         p.run_requested.connect(lambda s,k="deconv": self._run_key(k,s))
 
         # Star Smaller (Deconv panelinin altinda)
@@ -7095,7 +7102,7 @@ class AstroApp(QMainWindow):
         # Star Shrink (dedicated panel)
         p = _make("✦↓","Star Shrink","star_shrink")
         p.add_combo("mode","Mod",
-                    ["star_shrink","full_process"],
+                    ["star_shrink","astro_star_shrink","full_process"],
                     "star_shrink",
                     "star_shrink — Sadece yıldız küçültme\n"
                     "full_process — Tam astro pipeline (Stretch+BG+Color+Shrink+Sharp+Denoise)")
@@ -7599,7 +7606,7 @@ class AstroApp(QMainWindow):
             bg_method = str(self._settings.get("default_bg", "")).strip() or (
                 "graxpert" if self._settings.get("graxpert_exe", "") else "nox"
             )
-            if bg_method not in {"graxpert", "nox", "dbe_spline", "polynomial", "ai_gradient", "median_grid", "gaussian_sub"}:
+            if bg_method not in {"graxpert", "astro_gradient_x", "nox", "dbe_spline", "polynomial", "ai_gradient", "median_grid", "gaussian_sub"}:
                 bg_method = "graxpert" if self._settings.get("graxpert_exe", "") else "nox"
             if bg_method == "graxpert" and not self._settings.get("graxpert_exe", ""):
                 bg_method = "nox"
@@ -8326,6 +8333,20 @@ class AstroApp(QMainWindow):
                         denoise_strength=float(kw.get("denoise_strength", 5)),
                     )
                 self._run_worker(key, _full_process_fn, params)
+            elif mode == "astro_star_shrink":
+                def _astro_shrink_fn(img, **kw):
+                    from processing.star_shrink import astro_star_shrink
+                    amount = float(np.clip(kw.get("shrink_factor", 0.75), 0.1, 3.0))
+                    amount = float(np.clip((amount - 0.45) / 0.7, 0.0, 1.0))
+                    return astro_star_shrink(
+                        img,
+                        amount=amount,
+                        passes=int(kw.get("passes", 2)),
+                        halo_fill_ratio=float(kw.get("halo_fill_ratio", 0.55)),
+                        noise_level=float(kw.get("star_noise_level", 2.0)),
+                        star_density_threshold=float(kw.get("star_density_threshold", 2.3)),
+                    )
+                self._run_worker(key, _astro_shrink_fn, params)
             else:
                 def _shrink_dedicated(img, **kw):
                     from processing.star_shrink import star_shrink
@@ -8335,6 +8356,7 @@ class AstroApp(QMainWindow):
                         halo_fill_ratio=float(kw.get("halo_fill_ratio", 0.3)),
                         noise_level=float(kw.get("star_noise_level", 5.0)),
                         star_density_threshold=float(kw.get("star_density_threshold", 2.0)),
+                        passes=int(kw.get("passes", 1)),
                     )
                 self._run_worker(key, _shrink_dedicated, params)
             return
