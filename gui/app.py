@@ -8239,6 +8239,7 @@ class AstroApp(QMainWindow):
             method = params.get("method","vectra")
             if method == "pcc_solve":
                 # Plate solve sonucunu parametrelere ekle
+                params["catalog_limit_mag"] = float(self._settings.get("cat_limit_mag", 16.0))
                 solve = getattr(self, '_last_solve_result', None)
                 if solve and solve.get("ra") is not None:
                     params["solve_ra"] = solve["ra"]
@@ -8297,7 +8298,8 @@ class AstroApp(QMainWindow):
                     feather=int(kw.get("feather", 3)),
                     max_sigma=int(kw.get("max_sigma", 6)),
                     min_sigma=int(kw.get("min_sigma", 1)),
-                    threshold=float(kw.get("threshold", 0.03)))
+                    threshold=float(kw.get("threshold", 0.03)),
+                    protect_nebula=bool(kw.get("protect_nebula", True)))
                 return _np.clip(r, 0, 1).astype("float32")
             self._run_worker(key, _smaller_fn, params)
             return
