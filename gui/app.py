@@ -7088,7 +7088,7 @@ class AstroApp(QMainWindow):
         p._params["noise_level"][0].sp.setValue(0.015)
         p._params["stellar_sharpen"][0].sp.setValue(0.85)
         p._params["nonstellar_sharpen"][0].sp.setValue(0.42)
-        p._params["correct_only"][0].chk.setChecked(True)
+        p._params["correct_only"][0].setChecked(True)
         p.run_requested.connect(lambda s,k="deconv": self._run_key(k,s))
 
         # Star Smaller (Deconv panelinin altinda)
