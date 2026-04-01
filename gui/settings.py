@@ -34,7 +34,7 @@ _DEFAULT = {
 
     # Processing defaults
     "default_stretch": "auto_stf",
-    "default_bg": "graxpert",
+"default_bg": "astro_gradient_x",
     "num_threads": 4,
 
     # Paths & recent

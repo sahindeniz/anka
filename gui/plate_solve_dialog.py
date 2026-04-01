@@ -154,6 +154,8 @@ class _SolveWorker(QThread):
                 ra_hint       = p.get("ra_hint"),
                 dec_hint      = p.get("dec_hint"),
                 fov_hint      = p.get("fov_hint"),
+                fov_width_hint= p.get("fov_width_hint"),
+                disable_near_search = p.get("disable_near_search", False),
                 progress_cb   = lambda m: self.progress.emit(str(m)),
             )
             self.finished.emit(result)
@@ -580,6 +582,7 @@ class PlateSolveDialog(QDialog):
         r3.addSpacing(20)
         self._chk_no_near = QCheckBox("disable near search")
         self._chk_no_near.setStyleSheet(_CHK)
+        self._chk_no_near.setChecked(bool(self._settings.get("astap_disable_near", False)))
         r3.addWidget(self._chk_no_near)
         r3.addStretch()
         lay.addLayout(r3)
@@ -781,6 +784,7 @@ class PlateSolveDialog(QDialog):
         self._settings["astap_catalog"] = self._combo_catalog.currentText()
         self._settings["cat_limit_mag"] = self._sp_lim_mag.value()
         self._settings["astap_radius"] = self._sp_radius.value()
+        self._settings["astap_disable_near"] = self._chk_no_near.isChecked()
         self._settings["astap_min_stars"] = self._sp_min_stars.value()
         self._settings["astap_timeout"] = self._sp_timeout.value()
         try:
@@ -791,6 +795,7 @@ class PlateSolveDialog(QDialog):
                 f"  Katalog: {self._combo_catalog.currentText()}\n"
                 f"  Limit Mag: {self._sp_lim_mag.value()}\n"
                 f"  Radius: {self._sp_radius.value()}°\n"
+                f"  Near search: {'kapalı' if self._chk_no_near.isChecked() else 'açık'}\n"
                 f"  Min Stars: {self._sp_min_stars.value()}")
         except Exception as e:
             QMessageBox.warning(self, "Hata", f"Ayarlar kaydedilemedi:\n{e}")
@@ -907,28 +912,38 @@ class PlateSolveDialog(QDialog):
         try:
             focal_mm = self._get_focal_mm()
             self._lbl_focal.setText(f"{focal_mm:.1f} mm")
-            pixel_um = self._sp_pixel.value()
-            if focal_mm > 0 and pixel_um > 0:
-                arcsec_per_px = (pixel_um / focal_mm) * 206.265
+            metrics = self._fov_metrics()
+            arcsec_per_px = metrics.get("scale_arcsec")
+            if isinstance(arcsec_per_px, float):
                 self._lbl_resolution.setText(
                     f"Resolution: {arcsec_per_px:.4f}\"")
         except Exception:
             pass
 
-    def _fov_deg(self) -> float:
-        """Görüntünün tahmini FOV genişliğini derece döner."""
+    def _fov_metrics(self) -> dict:
+        """Çözüm için kullanılacak tahmini ölçek ve FOV boyutlarını döndür."""
         try:
             if self._image is None:
-                return 0.0
-            w = self._image.shape[1]
-            focal_mm  = self._get_focal_mm()
-            pixel_um  = self._sp_pixel.value()
-            if focal_mm > 0 and pixel_um > 0:
-                arcsec_per_px = (pixel_um / focal_mm) * 206.265
-                return (w * arcsec_per_px) / 3600.0
+                return {}
+            h, w = self._image.shape[:2]
+            focal_mm = self._get_focal_mm()
+            pixel_um = self._sp_pixel.value()
+            if focal_mm <= 0 or pixel_um <= 0:
+                return {}
+            arcsec_per_px = (pixel_um / focal_mm) * 206.265
+            return {
+                "scale_arcsec": float(arcsec_per_px),
+                "width_deg": float((w * arcsec_per_px) / 3600.0),
+                "height_deg": float((h * arcsec_per_px) / 3600.0),
+                "diag_deg": float((np.hypot(w, h) * arcsec_per_px) / 3600.0),
+            }
         except Exception:
-            pass
-        return 0.0
+            return {}
+
+    def _fov_deg(self) -> float:
+        """ASTAP için görüntünün tahmini FOV yüksekliğini derece döner."""
+        metrics = self._fov_metrics()
+        return float(metrics.get("height_deg", 0.0) or 0.0)
 
     # ─────────────────────────────────────────────────────────────────────────
     #  SIMBAD arama
@@ -1326,7 +1341,9 @@ class PlateSolveDialog(QDialog):
         # Parametreleri topla
         ra_deg  = self._ra_widget.value_deg()
         dec_deg = self._dec_widget.value_deg()
-        fov_deg = self._fov_deg()
+        fov_metrics = self._fov_metrics()
+        fov_deg = float(fov_metrics.get("height_deg", 0.0) or 0.0)
+        fov_width_deg = float(fov_metrics.get("width_deg", 0.0) or 0.0)
 
         # Sonucu settings'e kaydet (bir sonraki açılış için)
         self._settings["last_platesolve_ra"]  = ra_deg
@@ -1338,6 +1355,7 @@ class PlateSolveDialog(QDialog):
         self._settings["pixel_size_um"]        = self._sp_pixel.value()
         self._settings["astap_catalog"]        = self._combo_catalog.currentText()
         self._settings["astap_radius"]         = self._sp_radius.value()
+        self._settings["astap_disable_near"]   = self._chk_no_near.isChecked()
         self._settings["astap_min_stars"]      = self._sp_min_stars.value()
         self._settings["astap_timeout"]        = self._sp_timeout.value()
         self._settings["astap_downsample"]     = self._sp_downsample.value()
@@ -1354,6 +1372,8 @@ class PlateSolveDialog(QDialog):
             "ra_hint":       ra_deg  if (ra_deg != 0.0 or dec_deg != 0.0) else None,
             "dec_hint":      dec_deg if (ra_deg != 0.0 or dec_deg != 0.0) else None,
             "fov_hint":      fov_deg if fov_deg > 0.01 else None,
+            "fov_width_hint": fov_width_deg if fov_width_deg > 0.01 else None,
+            "disable_near_search": self._chk_no_near.isChecked(),
         }
 
         self._log.clear()
@@ -1369,7 +1389,9 @@ class PlateSolveDialog(QDialog):
             f"   DB yolu : {params['db_path'] or '(ASTAP varsayılanı)'}\n"
             f"   Radius  : {params['search_radius']}°\n"
             f"   Min★    : {params['min_stars']}\n"
-            f"   FOV tahmini: {fov_deg:.3f}°" if fov_deg > 0.01 else
+            f"   FOV tahmini (ASTAP h): {fov_deg:.3f}°"
+            f"{f'  |  Çerçeve: {fov_width_deg:.3f}° x {fov_deg:.3f}°' if fov_width_deg > 0.01 else ''}"
+            if fov_deg > 0.01 else
             f"🔭 Plate solve başlıyor…")
 
         self._worker = _SolveWorker(self._image, params)

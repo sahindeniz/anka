@@ -3,6 +3,7 @@ import unittest
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -349,6 +350,90 @@ class StarSmallerTests(unittest.TestCase):
         self.assertGreaterEqual(bands[2], bands[3])
         self.assertLess(bands[3], bands[1] * 0.12)
         self.assertLess(bands[4], bands[1] * 0.08)
+
+    def test_reduce_stars_skips_embedded_sources_when_protection_is_enabled(self):
+        h = w = 96
+        yy, xx = np.mgrid[:h, :w]
+        bg = np.stack(
+            [
+                np.full((h, w), 0.10, dtype=np.float32),
+                np.full((h, w), 0.12, dtype=np.float32),
+                np.full((h, w), 0.14, dtype=np.float32),
+            ],
+            axis=2,
+        )
+
+        cx = cy = 48
+        r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        star = (
+            1.00 * np.exp(-r2 / (2.0 * 1.2 ** 2))
+            + 0.45 * np.exp(-r2 / (2.0 * 5.2 ** 2))
+        ).astype(np.float32)
+        img = np.clip(bg + star[:, :, None], 0.0, 1.0).astype(np.float32)
+
+        with patch("processing.starsmaller._extended_structure_level", return_value=1.0):
+            protected, _ = reduce_stars(
+                img,
+                strength=0.92,
+                sensitivity=0.5,
+                feather=3,
+                max_sigma=8,
+                min_sigma=1,
+                threshold=0.02,
+                protect_nebula=True,
+            )
+            unprotected, _ = reduce_stars(
+                img,
+                strength=0.92,
+                sensitivity=0.5,
+                feather=3,
+                max_sigma=8,
+                min_sigma=1,
+                threshold=0.02,
+                protect_nebula=False,
+            )
+
+        self.assertLess(float(np.abs(protected - img).mean()), 1e-6)
+        self.assertGreater(float(np.abs(unprotected - img).mean()), 0.002)
+
+    def test_reduce_stars_keeps_galaxy_shoulder_stable(self):
+        h = w = 128
+        yy, xx = np.mgrid[:h, :w]
+        bg = np.full((h, w, 3), 0.03, dtype=np.float32)
+
+        galaxy = (
+            0.20
+            * np.exp(-(((xx - 64) / 20.0) ** 2 + ((yy - 64) / 12.0) ** 2) / 2.0)
+        ).astype(np.float32)
+        galaxy_rgb = np.stack([galaxy * 1.05, galaxy * 1.00, galaxy * 0.92], axis=2)
+
+        cx = 90
+        cy = 64
+        r2 = (xx - cx) ** 2 + (yy - cy) ** 2
+        star = (
+            0.88 * np.exp(-r2 / (2.0 * 1.1 ** 2))
+            + 0.22 * np.exp(-r2 / (2.0 * 3.8 ** 2))
+        ).astype(np.float32)
+        img = np.clip(bg + galaxy_rgb + star[:, :, None], 0.0, 1.0).astype(np.float32)
+
+        result, _ = reduce_stars(
+            img,
+            strength=0.85,
+            sensitivity=0.5,
+            feather=3,
+            max_sigma=8,
+            min_sigma=1,
+            threshold=0.02,
+            protect_nebula=False,
+        )
+
+        galaxy_shoulder = (
+            (((xx - 64) / 20.0) ** 2 + ((yy - 64) / 12.0) ** 2) <= 1.0
+        ) & (r2 >= 18.0) & (r2 <= 120.0)
+        star_core = r2 <= 6.0
+
+        self.assertLess(float(np.abs(result[galaxy_shoulder] - img[galaxy_shoulder]).mean()), 0.02)
+        self.assertLess(float(result[star_core].mean()), float(img[star_core].mean()) * 0.55)
 
 
 class NoiseDispatchTests(unittest.TestCase):

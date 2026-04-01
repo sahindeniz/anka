@@ -62,6 +62,56 @@ def process_starless(
     return starless, star_mask
 
 
+def astro_star_x(
+    img: np.ndarray,
+    retain_structures: float = 0.8,
+    noise_match: bool = True,
+    progress_callback: Optional[Callable[[int], None]] = None,
+    **kwargs,
+):
+    """
+    AstroMaestro's StarX-style convenience wrapper.
+
+    The public RC Astro descriptions emphasize minimal impact to non-stellar
+    structures and natural noise matching around removed stars. We reflect that
+    by using more conservative star growth when structure retention is high and
+    always returning starless + stars-only layers.
+    """
+    del kwargs
+    image = np.clip(np.asarray(img, dtype=np.float32), 0, 1)
+    max_dim = max(image.shape[:2])
+
+    sensitivity = 0.028 if retain_structures >= 0.7 else 0.024
+    max_star_size = 14 if max_dim <= 2200 else 18
+    growth_factor = 1.45 if retain_structures >= 0.7 else 1.7
+    inpaint_radius = max(3, min(8, int(round(max_dim / 900.0))))
+
+    from ai.star_net import separate_stars
+
+    result = separate_stars(
+        image,
+        sensitivity=sensitivity,
+        min_star_size=1,
+        max_star_size=max_star_size,
+        growth_factor=growth_factor,
+        inpaint_radius=inpaint_radius,
+        ai_enhance=bool(noise_match),
+    )
+    starless = np.clip(result["starless"], 0, 1).astype(np.float32)
+    star_mask = result.get("star_mask")
+    if star_mask is not None:
+        star_mask = np.clip(star_mask, 0, 1).astype(np.float32)
+    stars_only = np.clip(image - starless, 0, 1).astype(np.float32)
+    if progress_callback is not None:
+        progress_callback(100)
+    return {
+        "starless": starless,
+        "stars_only": stars_only,
+        "star_mask": star_mask,
+        "n_stars": int(result.get("n_stars", 0)),
+    }
+
+
 def reset_model() -> None:
     """Compatibility shim for old call sites."""
     return None

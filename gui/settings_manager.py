@@ -20,7 +20,7 @@ DEFAULTS = {
     "show_history": True,
     "canvas_interp": "nearest",
     "default_stretch": "auto_stf",
-    "default_bg": "graxpert",
+"default_bg": "astro_gradient_x",
     "num_threads": 4,
     "last_open_dir": "",
     "last_save_dir": "",

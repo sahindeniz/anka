@@ -80,6 +80,8 @@ def _spcc(img: np.ndarray, reference_rgb: np.ndarray) -> np.ndarray:
     gray = img.mean(axis=2)
     bg_percentile = np.percentile(gray, 25)
     bg_mask = gray < bg_percentile
+    if not np.any(bg_mask):
+        bg_mask = gray <= bg_percentile
 
     # Arka plan notralizasyonu
     bg = np.median(img[bg_mask], axis=0).astype(np.float64) + 1e-9
@@ -199,6 +201,7 @@ def _pcc_platesolve(img, progress_cb=None, **kwargs):
     dec_center = float(kwargs.get("solve_dec", 0))
     scale_aspp = float(kwargs.get("solve_scale", 1.8))
     rotation   = float(kwargs.get("solve_rotation", 0.0))
+    limit_mag  = float(kwargs.get("catalog_limit_mag", 16.0))
 
     h, w = img.shape[:2]
     cb("[1/5] Yıldız tespiti...")
@@ -217,14 +220,27 @@ def _pcc_platesolve(img, progress_cb=None, **kwargs):
         stars_px, w, h, ra_center, dec_center, scale_aspp, rotation)
 
     # ── 3. Katalogdan referans yıldız renklerini çek ──
-    cb("[3/5] Gaia DR3 kataloğundan yıldız renkleri çekiliyor...")
     fov_deg = max(w, h) * scale_aspp / 3600.0
-    catalog_stars = _query_gaia_colors(ra_center, dec_center, fov_deg)
+    cb(
+        "[3/5] Katalog sorgusu: Gaia DR3/APASS "
+        f"(yarıçap ~{min(max(0.2, fov_deg * 0.5), 1.5):.2f}°, "
+        f"limit mag {limit_mag:.2f})"
+    )
+    catalog_stars, catalog_meta = _query_gaia_colors(
+        ra_center, dec_center, fov_deg, limit_mag=limit_mag
+    )
 
     if catalog_stars is None or len(catalog_stars) < 5:
+        source_name = catalog_meta.get("source_name", "Katalog")
+        err = catalog_meta.get("error")
+        if err:
+            cb(f"[3/5] {source_name} sorgusu başarısız: {err}")
         cb("Katalog sorgusu başarısız — G2V referansına geçiliyor")
         return _spcc(img, G2V_RGB)
-    cb(f"[3/5] Katalogdan {len(catalog_stars)} yıldız alındı")
+    cb(
+        f"[3/5] {catalog_meta.get('source_name', 'Katalog')} "
+        f"kaynağından {len(catalog_stars)} yıldız alındı"
+    )
 
     # Debug: RA/Dec aralıklarını karşılaştır
     img_ras  = [rd[0] for rd in stars_radec]
@@ -238,9 +254,15 @@ def _pcc_platesolve(img, progress_cb=None, **kwargs):
 
     # ── 4. Eşleştir: görüntü yıldızları ↔ katalog yıldızları ──
     cb("[4/5] Yıldız eşleştirmesi...")
-    matched = _match_stars(stars_px, stars_radec, catalog_stars,
-                           img, scale_aspp)
-    cb(f"[4/5] {len(matched)} yıldız eşleştirildi")
+    matched, match_stats = _match_stars(
+        stars_px, stars_radec, catalog_stars, img, scale_aspp
+    )
+    cb(
+        f"[4/5] {len(matched)} yıldız eşleştirildi "
+        f"(eşleşmedi: {match_stats['excluded_no_catalog']}, "
+        f"sönük: {match_stats['excluded_mag']}, "
+        f"tekrar: {match_stats['excluded_duplicate']})"
+    )
 
     if len(matched) < 5:
         cb("Yetersiz eşleşme — G2V referansına geçiliyor")
@@ -248,8 +270,43 @@ def _pcc_platesolve(img, progress_cb=None, **kwargs):
 
     # ── 5. Kazanç hesapla ve uygula ──
     cb("[5/5] Renk kalibrasyonu uygulanıyor...")
-    result = _apply_catalog_calibration(img, matched)
-    cb(f"[5/5] Tamamlandı ({len(matched)} yıldız ile kalibre edildi)")
+    result, cal_stats = _apply_catalog_calibration(img, matched)
+
+    fit_rg = cal_stats.get("fit_rg")
+    fit_bg = cal_stats.get("fit_bg")
+    if fit_rg or fit_bg:
+        cb("  PCC Linear Fits")
+    if fit_rg:
+        cb(
+            "  Image R/G = "
+            f"{fit_rg['intercept']:.6f} + {fit_rg['slope']:.6f} * "
+            f"Catalog R/G (sigma: {fit_rg['sigma']:.6f})"
+        )
+    if fit_bg:
+        cb(
+            "  Image B/G = "
+            f"{fit_bg['intercept']:.6f} + {fit_bg['slope']:.6f} * "
+            f"Catalog B/G (sigma: {fit_bg['sigma']:.6f})"
+        )
+
+    cb(
+        f"  Çözüm {cal_stats['used_star_count']} yıldız ile bulundu "
+        f"(outlier hariç tutulan: {cal_stats['excluded_outliers']})"
+    )
+    cb("  White balance factors:")
+    gains = cal_stats["gains"]
+    for idx, gain in enumerate(gains):
+        cb(f"  K{idx}: {gain:.3f}")
+    cb("  Background reference:")
+    bg = cal_stats["background"]
+    for idx, value in enumerate(bg):
+        cb(f"  B{idx}: {value:+.5e}")
+
+    quality_warning = cal_stats.get("quality_warning")
+    if quality_warning:
+        cb(f"  {quality_warning}")
+
+    cb(f"[5/5] Tamamlandı ({cal_stats['used_star_count']} yıldız ile kalibre edildi)")
     return result
 
 
@@ -319,24 +376,30 @@ def _pixel_to_radec(stars_px, w, h, ra0, dec0, scale_aspp, rotation_deg):
     return result
 
 
-def _query_gaia_colors(ra_deg, dec_deg, fov_deg):
+def _query_gaia_colors(ra_deg, dec_deg, fov_deg, limit_mag=16.0):
     """
     VizieR üzerinden Gaia DR3 yıldız renklerini çek.
     Gaia DR3 native kolon adları: RA_ICRS, DE_ICRS, Gmag, BP-RP
     """
+    radius = min(max(0.2, fov_deg * 0.5), 1.5)
+    meta = {
+        "source_name": "Gaia DR3",
+        "radius_deg": float(radius),
+        "limit_mag": float(limit_mag),
+        "error": "",
+    }
+
     try:
         from astroquery.vizier import Vizier
         from astropy.coordinates import SkyCoord
         import astropy.units as u
 
         coord = SkyCoord(ra=ra_deg, dec=dec_deg, unit="deg", frame="icrs")
-        # Yarıçapı FOV/2 ile sınırla (alan yarıçapı), max 1.5°
-        radius = min(max(0.2, fov_deg * 0.5), 1.5)
 
         # Gaia DR3 native kolonları + mesafe sıralaması
         v = Vizier(columns=["RA_ICRS", "DE_ICRS", "Gmag", "BP-RP", "+_r"],
                    row_limit=2000,
-                   column_filters={"Gmag": "<15"})
+                   column_filters={"Gmag": f"<{float(limit_mag):.2f}"})
         v.ROW_LIMIT = 2000
         tables = v.query_region(coord, radius=radius * u.deg,
                                 catalog="I/355/gaiadr3")
@@ -387,7 +450,7 @@ def _query_gaia_colors(ra_deg, dec_deg, fov_deg):
                             mag = float(_mag_val)
                             if not np.isfinite(bp_rp) or not np.isfinite(mag):
                                 continue
-                            if mag > 16:
+                            if mag > float(limit_mag):
                                 continue
                             bv = 0.0981 + 0.9287 * bp_rp - 0.0736 * bp_rp**2
                             rgb = _bv_to_rgb(bv)
@@ -395,15 +458,17 @@ def _query_gaia_colors(ra_deg, dec_deg, fov_deg):
                         except (ValueError, KeyError):
                             continue
                     if len(stars) >= 5:
-                        return stars
+                        meta["source_name"] = "Gaia DR3"
+                        return stars, meta
 
         # APASS DR9 alternatifi
+        meta["source_name"] = "APASS DR9"
         v2 = Vizier(columns=["RAJ2000", "DEJ2000", "Vmag", "B-V"],
                     row_limit=2000)
         tables = v2.query_region(coord, radius=radius * u.deg,
                                  catalog="II/336/apass9")
         if not tables or len(tables) == 0:
-            return None
+            return None, meta
         t = tables[0]
         stars = []
         for row in t:
@@ -414,16 +479,20 @@ def _query_gaia_colors(ra_deg, dec_deg, fov_deg):
                 mag = float(row["Vmag"])
                 if not np.isfinite(bv) or not np.isfinite(mag):
                     continue
+                if mag > float(limit_mag):
+                    continue
                 rgb = _bv_to_rgb(bv)
                 stars.append((ra, dec, mag, rgb))
             except (ValueError, KeyError):
                 continue
-        return stars if len(stars) >= 5 else None
+        return (stars, meta) if len(stars) >= 5 else (None, meta)
 
     except ImportError:
-        return None
-    except Exception:
-        return None
+        meta["error"] = "astroquery yüklü değil"
+        return None, meta
+    except Exception as exc:
+        meta["error"] = str(exc)
+        return None, meta
 
 
 def _bv_to_rgb(bv):
@@ -469,8 +538,16 @@ def _match_stars(stars_px, stars_radec, catalog_stars, img, scale_aspp):
     Görüntü yıldızlarını katalog yıldızlarıyla eşleştir.
     Dönüş: [(img_rgb, catalog_rgb), ...]
     """
+    stats = {
+        "candidate_count": len(stars_px),
+        "matched_count": 0,
+        "excluded_no_catalog": 0,
+        "excluded_mag": 0,
+        "excluded_duplicate": 0,
+        "match_radius_arcsec": float(scale_aspp * 30.0),
+    }
     if not catalog_stars or not stars_radec:
-        return []
+        return [], stats
 
     cat_ra  = np.array([s[0] for s in catalog_stars])
     cat_dec = np.array([s[1] for s in catalog_stars])
@@ -478,6 +555,7 @@ def _match_stars(stars_px, stars_radec, catalog_stars, img, scale_aspp):
 
     match_radius_deg = scale_aspp * 30.0 / 3600.0  # 30 piksel tolerans (~54 arcsec)
     matched = []
+    used_catalog = set()
 
     for i, (px_data, (ra, dec)) in enumerate(zip(stars_px, stars_radec)):
         x, y, brt, r, g, b = px_data
@@ -487,13 +565,64 @@ def _match_stars(stars_px, stars_radec, catalog_stars, img, scale_aspp):
         dist = np.sqrt(d_ra**2 + d_dec**2)
         idx = np.argmin(dist)
 
-        if dist[idx] < match_radius_deg:
-            cat_rgb = catalog_stars[idx][3]
-            # Doygun olmayan yıldızları kabul et (mag < 14)
-            if cat_mag[idx] < 14:
-                matched.append(((r, g, b), cat_rgb))
+        if dist[idx] >= match_radius_deg:
+            stats["excluded_no_catalog"] += 1
+            continue
 
-    return matched
+        idx_int = int(idx)
+        if idx_int in used_catalog:
+            stats["excluded_duplicate"] += 1
+            continue
+
+        if cat_mag[idx] >= 14:
+            stats["excluded_mag"] += 1
+            continue
+
+        used_catalog.add(idx_int)
+        cat_rgb = catalog_stars[idx][3]
+        matched.append(((r, g, b), cat_rgb))
+
+    stats["matched_count"] = len(matched)
+    return matched, stats
+
+
+def _fit_color_relation(img_rgbs, cat_rgbs, channel_idx):
+    img_g = img_rgbs[:, 1] + 1e-9
+    cat_g = cat_rgbs[:, 1] + 1e-9
+    x = cat_rgbs[:, channel_idx] / cat_g
+    y = img_rgbs[:, channel_idx] / img_g
+    valid = np.isfinite(x) & np.isfinite(y)
+    if valid.sum() < 3:
+        return None
+    x = x[valid]
+    y = y[valid]
+    try:
+        slope, intercept = np.polyfit(x, y, 1)
+    except Exception:
+        return None
+    residual = y - (intercept + slope * x)
+    return {
+        "intercept": float(intercept),
+        "slope": float(slope),
+        "sigma": float(np.std(residual)),
+    }
+
+
+def _build_quality_warning(bg, fit_rg, fit_bg):
+    sigmas = [
+        item["sigma"]
+        for item in (fit_rg, fit_bg)
+        if item and np.isfinite(item.get("sigma", np.nan))
+    ]
+    max_sigma = max(sigmas) if sigmas else 0.0
+    bg = np.asarray(bg, dtype=np.float64)
+    bg_spread = float(np.std(bg) / max(np.mean(bg), 1e-9))
+    if max_sigma > 0.12 or bg_spread > 0.65:
+        return (
+            "Fotometrik çözüm biraz belirsiz görünüyor; "
+            "önce gradient düzeltmeyi deneyin"
+        )
+    return ""
 
 
 def _apply_catalog_calibration(img, matched):
@@ -502,7 +631,10 @@ def _apply_catalog_calibration(img, matched):
     """
     # ── Arka plan notralizasyonu ──
     gray = img.mean(axis=2)
-    bg_mask = gray < np.percentile(gray, 25)
+    bg_percentile = np.percentile(gray, 25)
+    bg_mask = gray < bg_percentile
+    if not np.any(bg_mask):
+        bg_mask = gray <= bg_percentile
     bg = np.median(img[bg_mask], axis=0).astype(np.float64) + 1e-9
 
     # ── Kazanç hesapla ──
@@ -514,8 +646,14 @@ def _apply_catalog_calibration(img, matched):
     med_ratio = np.median(ratios, axis=0)
     std_ratio = np.std(ratios, axis=0) + 1e-9
     good = np.all(np.abs(ratios - med_ratio) < 2.0 * std_ratio, axis=1)
+    excluded_outliers = 0
+    used_img_rgbs = img_rgbs
+    used_cat_rgbs = cat_rgbs
     if good.sum() >= 5:
+        excluded_outliers = int(len(ratios) - int(good.sum()))
         ratios = ratios[good]
+        used_img_rgbs = img_rgbs[good]
+        used_cat_rgbs = cat_rgbs[good]
 
     # Medyan oran = kazanç
     gains = np.median(ratios, axis=0)  # (3,)
@@ -539,7 +677,20 @@ def _apply_catalog_calibration(img, matched):
     if new_mean > 1e-9:
         result *= orig_mean / new_mean
 
-    return np.clip(result, 0, 1).astype(np.float32)
+    fit_rg = _fit_color_relation(used_img_rgbs, used_cat_rgbs, 0)
+    fit_bg = _fit_color_relation(used_img_rgbs, used_cat_rgbs, 2)
+    stats = {
+        "background": bg.astype(np.float64),
+        "gains": gains.astype(np.float64),
+        "input_star_count": int(len(matched)),
+        "used_star_count": int(len(used_img_rgbs)),
+        "excluded_outliers": int(excluded_outliers),
+        "fit_rg": fit_rg,
+        "fit_bg": fit_bg,
+        "quality_warning": _build_quality_warning(bg, fit_rg, fit_bg),
+    }
+
+    return np.clip(result, 0, 1).astype(np.float32), stats
 
 
 # ── PCC (yildiz tabanlı, hizli) ───────────────────────────────────────────────
